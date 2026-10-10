@@ -5,6 +5,7 @@ import {
 	evaluateRunEffectiveness,
 	formatRunEffectivenessLines,
 	taskHasEmptyResult,
+	taskHasObservableWorkerActivity,
 } from "../../../../src/runtime/effectiveness.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 
@@ -189,4 +190,21 @@ test("F4: non-empty result with observed events still passes", () => {
 	assert.equal(summary.severity, "ok");
 	assert.equal(summary.observable, 1);
 	assert.deepEqual(summary.noObservedWorkTaskIds, []);
+});
+
+test("verify_gate-skipped verifier counts as observable work (U13 vs guard, live-caught 2026-10-10)", () => {
+	// A gated verifier completes with NO usage/transcript/toolCount by design
+	// (the deterministic gate ran typecheck/test exit codes in the host).
+	// Before the fix this shape false-triggered "no observable worker activity"
+	// → run blocked (non-terminal) → sync team calls hung forever.
+	const gated: TeamTaskState = {
+		id: "03_verify",
+		status: "completed",
+		diagnostics: { verifyGate: { verdict: "PASS", reason: "deterministic_pass", evidenceLines: ["typecheck: exit=0 PASS"] } },
+	} as unknown as TeamTaskState;
+	assert.equal(taskHasObservableWorkerActivity(gated), true);
+	// The gate context alone must not leak into OTHER shapes: a task without
+	// any evidence still reports unobservable.
+	const bare: TeamTaskState = { id: "x", status: "completed" } as unknown as TeamTaskState;
+	assert.equal(taskHasObservableWorkerActivity(bare), false);
 });

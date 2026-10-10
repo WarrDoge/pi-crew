@@ -22,7 +22,16 @@ export function taskHasObservableWorkerActivity(task: TeamTaskState): boolean {
 			task.usage ||
 			task.transcriptArtifact ||
 			task.modelAttempts?.some((attempt) => attempt.success) ||
-			task.jsonEvents,
+			task.jsonEvents ||
+			// U13 deterministic verify_gate: a gated verifier does real work
+			// (typecheck/test exit codes via ctx.executeTool) WITHOUT spawning an
+			// LLM worker — no usage/transcript by design. The gate verdict recorded
+			// in task.diagnostics.verifyGate is the observable-work evidence.
+			// Live-caught 2026-10-10 (T7 battery, runs team_20261010161149 +
+			// team_20261010162310): green-gated verifier tasks were false-blocked
+			// here ("no observable worker activity") → run stuck non-terminal
+			// "blocked" → sync team calls hung forever.
+			task.diagnostics?.verifyGate !== undefined,
 	);
 }
 
