@@ -795,6 +795,15 @@ export function saveRunTasksCoalesced(
 	} catch {
 		return;
 	}
+	// U8 FIX (2026-10-10, live P2 probe run team_20261010164746): the coalesced
+	// json write below is the READ-SIDE mirror (50ms buffer); the sqlite db is
+	// AUTHORITATIVE and must see every task-state change immediately — this is
+	// the hot path from persistSingleTaskUpdate. Without this branch the db
+	// kept its createRun snapshot ("queued") while tasks.json moved on
+	// (manifest completed + tasks.json completed + sqlite tasks stuck queued).
+	if (isSqliteStateBackend()) {
+		getSqliteRunStateStore(manifest.stateRoot).saveTasks(tasks);
+	}
 	atomicWriteJsonCoalesced(manifest.tasksPath, tasks, undefined, { compact: true, durability }, skipCoalesce);
 }
 
