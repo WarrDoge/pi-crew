@@ -23,7 +23,7 @@ Scope: FULL T1→T13 per skill done-criteria. Report filled DURING the run.
 | T11 a–j | ✅ PASS (a.4 pending below) | 11a stores sync (plan-store 3, ownership-map 3) + crash-recovery :262 + census 15 files; 11b wc-gate max 1408/2000, ci+ci-fast ✓; 11c warn-only ✓; 11d 3 slow files, globs disjoint ✓; 11e nightly comment-only ✓; 11f reject-format ✓; 11g bottom ✓; 11h worktree-twins 4/4 ×3 ✓; 11i 0 dead exports, MUST_INCLUDE now 6 core (drift documented); 11j committed-hash OK |
 | T12 resource contracts | ✅ PASS | 12a 1/1; 12b 18 agents BOTH parsers clean (0 bad desc, 0 no-routing, strict YAML 18/0); 12c 16/16 useWhen (verifier/writer tail-truncated BY DESIGN); 12d 45/0 |
 | T13 real-run UI render | ✅ PASS | all surfaces from REAL run state (CALL/STREAMING/COLLAPSED/EXPANDED@118+@80/DOCK done·done@50·running·failed/PLAN CARD/SIDEBAR); invariant sweep **0 undefined / 0 retired glyph / 0 wire-format / 0 plural / 0 over-width / 0 spinner-on-idle**; hint ↓·enter survives 40/50/60; catalog capture 18 + PNG 18/18 after OSC8 fix |
-| T11a.4 full test:unit | ✅ PASS | [x] final: 8XXX/0 — see Final counts below |
+| T11a.4 full test:unit | ✅ PASS | **8952 tests / 8949 pass / 0 fail / 0 cancelled / 3 skipped, EXIT=0** (769s; env scrubbed PI_CREW_*/PI_TEAMS_*) |
 
 ## Live-caught during THIS battery (2 findings)
 
@@ -52,3 +52,15 @@ Scope: FULL T1→T13 per skill done-criteria. Report filled DURING the run.
   the programmatic tofu-guard (18/18 with glyph coverage self-check).
 
 ## Final counts
+
+## Final counts (filled at completion)
+
+- test:critical: 120/120 ×3 paths (default / BROKER=0 / BROKER=1)
+- full test:unit: **8952 / 8949 pass / 0 fail / 3 skipped / EXIT=0** — 769s
+- surface-tmux E2E: 4/4 · resource contracts: 18+18 parsers · catalog: 18 captures + 18 PNGs
+- Bundle md5: 8f9a4a112d8070ecb6bbe482ca00e991 (disk == session == committed)
+- Runs produced: team_…171504 (T7), team_…171934 (9b async), team_…172145+team_…172537 (chain),
+  team_…172900 (steer anomaly), team_…173546 (9g round-trip PASS)
+- Battery-triggered fixes this run: render_png.py OSC8 strip (committed 5665bd8f)
+
+**VERDICT: FULL T1→T13 PASS** — 2 findings recorded (1 follow-up anomaly, 1 fixed in-run).
