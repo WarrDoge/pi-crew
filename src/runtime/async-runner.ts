@@ -250,6 +250,16 @@ export const BACKGROUND_RUNNER_ENV_ALLOWLIST: string[] = [
 	// PI_CREW_MODEL_REQUIRE_CREDENTIALS is NOT here — see forwardModelControlEnv.
 	"PI_CREW_MODEL",
 	"PI_CREW_MODEL_FALLBACK_ORDER",
+	// U8/U14 state+transport control (2026-10-10, live-caught P2 probe run
+	// team_20261010165359): the detached runner OWNS task-state writes for async
+	// runs — stripping PI_CREW_STATE_BACKEND made the host create the run with
+	// the sqlite backend while every runner-side task update silently used the
+	// JSON default (state.sqlite stuck at its createRun snapshot; tasks.json
+	// correct). PI_CREW_CHILD_PI_MODE/POOL ride along for the same parity
+	// reason (runner spawns the child-pi workers).
+	"PI_CREW_STATE_BACKEND",
+	"PI_CREW_CHILD_PI_MODE",
+	"PI_CREW_CHILD_PI_POOL",
 ];
 
 /**
