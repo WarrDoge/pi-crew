@@ -14,7 +14,7 @@
 
 ### Pane 2 — Progress (phím 2)
 ────────────────────────────────────────────────────────────
-Progress pane: 1/5 completed · running=2 queued=1 failed=0
+Progress pane: 1/5 completed · 2 running · 1 queued · 0 failed
 All 1 phases done: 20% (1/5)
   Phase 1 default: 20% (1/5) [waiting]
 group joins: none
@@ -24,14 +24,14 @@ group joins: none
 
 ### Pane 3 — Mailbox (phím 3)
 ────────────────────────────────────────────────────────────
-Mailbox pane: inbox unread=2 · outbox pending=1 · attention=1
-  Breakdown: steer=1 · response=1
+Mailbox pane: ↓2 unread · ↑1 pending · ⚠1 attention
+  Breakdown: ↓1 steer · ↓1 response
   ⚠ Urgent: steering messages require immediate attention.
 Needs attention: press Enter for detail · A ack · N nudge · C compose · X ack all.
 
 ### Pane 5 — Health (phím 5)
 ────────────────────────────────────────────────────────────
-Health pane: 0/5 healthy · stale=0 · dead=0 · missing=0
+Health pane: 0/5 healthy · 0 stale · 0 dead · 0 missing
 Actions: D diagnostic export
 
 ### Pane 6 — Metrics (phím 6)

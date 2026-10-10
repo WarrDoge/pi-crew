@@ -5,11 +5,11 @@
   id=pi-crew-steps · 
   id=pi-crew-plan · 
 --- update-segment (payload thật) ---
-  id=pi-crew-active · icon=—
-    text: ''
-  id=pi-crew-progress · icon=—
-    text: ''
+  id=pi-crew-active · icon=⚙
+    text: ⚙ idle
+  id=pi-crew-progress · icon=— bar=0 suffix="0/1"
+    text: inline-seam-fixture
   id=pi-crew-steps · icon=—
-    text: ''
+    text: ○assess
   id=pi-crew-plan · icon=—
     text: ''

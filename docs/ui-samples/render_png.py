@@ -106,6 +106,11 @@ def to_png(txt_path: str, title: str) -> str:
     for ln in raw_lines:
         lines.append(_substitute(ln))
     # strip ANSI cho PNG (màu đồng nhất theo dòng)
+    # OSC8 terminal hyperlinks (added to the inline panel in the v0.9.x UI
+    # phases) wrap text as: ESC]8;;<url>ST ESC\<text>ESC]8;;ST ESC\ — strip
+    # both wrappers, keep the visible text (the tofu-guard would otherwise
+    # fail loudly on the raw ESC; live-caught by the 2026-10-10 full battery).
+    lines = [re.sub(r"\x1b\]8;;(?:[^\x1b]*|)\x1b\\", "", ln) for ln in lines]
     lines = [re.sub(r"\x1b\[[0-9;]*m", "", ln) for ln in lines]
     missing = sorted({c for ln in lines for c in ln if not _has_glyph(c)})
     if missing:
