@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.11.15] — U8 sqlite async parity: coalesced mirror + runner env allowlist (2026-10-10)
+
+Second live-caught pair from the real-test battery (P2/P2b/P2c probes).
+
+### Fixed
+
+- **`saveRunTasksCoalesced` skipped the sqlite backend** — the hot path from
+  `persistSingleTaskUpdate` wrote only the tasks.json mirror; the authoritative
+  `state.sqlite` kept its createRun snapshot (P2 probe: manifest completed,
+  sqlite tasks all `queued`).
+- **Detached runner env stripped `PI_CREW_STATE_BACKEND`** — even with the
+  mirror fix, async runs route task-state writes through the background
+  runner whose allowlist dropped the key: host created sqlite, runner updated
+  JSON (P2b re-probe still stuck). `PI_CREW_STATE_BACKEND`,
+  `PI_CREW_CHILD_PI_MODE`, `PI_CREW_CHILD_PI_POOL` are now allowlisted.
+  P2c end-to-end: sqlite tasks reach terminal status, tasks.json mirror and
+  events.jsonl audit spine intact, rpc transport + deterministic verify_gate
+  engaged.
+
+# Changelog
+
 ## [0.11.13] — Reliability: runner survives run.lock contention + 2 fixes from live wave runs (2026-10-10)
 
 Three reliability fixes discovered while shipping Waves 1-3 of the upgrade-spec
