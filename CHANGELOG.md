@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **feat(scripts): Δ2 — declared-deps/lazy-import gate rewritten from regex to AST** (esbuild type-strip + acorn walk of `ImportDeclaration` / `export … from` / runtime `import()` / `require()`-`require.resolve()`, ports upstream check-runtime-deps semantics; per-entry budget `{maxFiles: 521, forbid: [test/, scripts/, docs/, dist/]}` for `index.bundle.ts`, ports upstream check-entry-graphs; `--root` fixture seam for tests) — closes every RR-021 residual regex blind spot; first run surfaced one real finding: `hosted-git-info` is an undeclared optional `require()` in `src/utils/git.ts` (resolves transitively via peer `@earendil-works/pi-coding-agent`; explicitly allowlisted in the gate pending an `optionalDependencies` decision).
+
 ### Fixed
 
 - **fix(state): stop unit-test runs leaking into the real user crew root** — the

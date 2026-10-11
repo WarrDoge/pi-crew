@@ -1,101 +1,494 @@
+#!/usr/bin/env node
+// Δ2 (2026-10-11) — AST-based declared-deps + lazy-import gate with per-entry budgets.
+//
+// This gate replaces the RR-021 regex scanner with a true AST walk, ported from
+// upstream pi monorepo patterns (`scripts/check-runtime-deps.mjs` for the
+// declared-deps walk, `scripts/check-entry-graphs.mjs` for the {maxFiles,
+// forbid[]} budgets). It runs FOUR checks:
+//
+//  1. DECLARED DEPS — every value import in `src/**/*.ts` + root entry files
+//     (`index.ts`, `index.bundle.ts`) must resolve to a package declared in
+//     `dependencies` / `peerDependencies` / `optionalDependencies` (or be a
+//     Node builtin / relative path). Covers ImportDeclaration, re-exports
+//     (`export … from`, `export * from`), runtime `import("…")`, and
+//     `require(…)` / `require.resolve(…)` call sites — all found via AST, so
+//     there are no regex-shaped blind spots.
+//
+//  2. LAZY MARKERS — every RUNTIME `import()` call in `src/**/*.ts` must carry
+//     a `// LAZY: <reason>` marker on its line or the adjacent line (Biome
+//     hoists trailing comments on block-opening lines onto the first statement
+//     line, so ±1 is accepted — carried over from the RR-021 regex gate).
+//     Because type annotations are ERASED before parsing, type-position
+//     `import("…").T` usage can no longer be mistaken for runtime imports, and
+//     the RR-021 round-3/round-4 residual false-skips (object-property values,
+//     ternary-else, case-label positions, member-access-after-colon) are all
+//     closed: the AST sees every import() call site.
+//
+//  3. ENTRY BUDGETS — the value-import graph reachable from each bundle entry
+//     (`index.bundle.ts`, per scripts/build-bundle.mjs entryPoints) is capped
+//     at {maxFiles, forbid[]}. Entries are cost contracts (upstream
+//     check-entry-graphs): one stray barrel export silently drags the whole
+//     tree into the shipped bundle; this fails at commit time instead.
+//
+//  4. DIST ASSERTION (unchanged, RR-021 WI-2.3b) — dist/index.mjs must not
+//     contain module-scope hoisted `from"pkg"` imports of the heavy externals.
+//
+// HOW TS IS PARSED: acorn parses ECMAScript only, so each .ts file is first
+// type-stripped by esbuild's `transformSync` (loader "ts", treeShaking OFF,
+// tsconfigRaw `importsNotUsedAsValues: "preserve"` — see parseFile() for why
+// both flags matter) and then parsed by acorn. Both are existing direct
+// dependencies; nothing new was added. Original line numbers are recovered
+// from esbuild's sourcemap via a minimal VLQ decoder, so violations point at
+// the SOURCE file, not the intermediate JS.
+//
+// KNOWN GAPS (honest, residual):
+//  - `import()` with a NON-STATIC argument (template with expressions, `${}`
+//    interpolation, identifiers) cannot be resolved for the declared-deps or
+//    budget checks — the call site IS still LAZY-marker-checked (argument
+//    shape is irrelevant there). pi-crew has no such call sites today.
+//  - Value imports that Node's strip-types fallback would load but the bundler
+//    erases (an `import { X }` used ONLY in type positions) are preserved via
+//    `importsNotUsedAsValues: "preserve"`, which matches strip-types runtime
+//    behavior (amaro keeps such imports) — but a bare `import "pkg"` that is
+//    dead code in BOTH paths is still counted. Deliberate: dead imports are
+//    their own bug.
+//  - The dist assertion still only matches the minified `from"pkg"` specifier
+//    form (esbuild's emit shape for named/default imports); a side-effect-only
+//    `import"pkg"` in dist would escape. Acceptable regression gate, unchanged
+//    from RR-021.
+//  - `require()` / `require.resolve()` are detected syntactically on the type-
+//    stripped output, where esbuild renames local `require` bindings to
+//    `require2`, …; the gate matches that rename scheme. A hand-written
+//    function literally named `require2` called with a static string argument
+//    would be miscounted — none exists in-tree.
+//  - Only `src/**` + the two root entry files are dep-checked; `scripts/` and
+//    `test/` are dev-only surfaces (not shipped) and stay out of scope, like
+//    upstream's src-only rule.
+//  - Budget graph resolution follows relative `.ts` imports only; the repo
+//    has no self-referential package imports, so none are mapped. Unlike
+//    upstream (whose regex only sees `… from "…"` shapes), this walk ALSO
+//    follows relative dynamic import("./…") edges — with a single-file esbuild
+//    bundle they ship in dist/index.mjs too, so they belong in the budget.
+//  - Undeclared-dep exceptions live in OPTIONAL_RUNTIME_REQUIRES with a
+//    required written justification; keep that list SHORT.
+
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { isBuiltin } from "node:module";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { transformSync } from "esbuild";
+import * as acorn from "acorn";
 
-// RR-021 WI-2.3: the check previously only matched `await import(` — bare
-// runtime `import()` expressions (e.g. Promise.all([import(...)]), void import())
-// escaped it entirely (audit "gate blind spot #2"). We now flag EVERY runtime
-// dynamic-import position. Type-position `import("...").SomeType` annotations
-// are erased at compile time (zero runtime cost), so they are skipped via a
-// positive runtime-pattern list plus declaration/comment skips.
-const RUNTIME_IMPORT_PATTERNS = [
-	"await import\\(", // explicit await (original rule)
-	"=\\s*import\\(", // assignment (space optional — `=import(` escaped the `= import\(` form)
-	"void import\\(", // fire-and-forget
-	"return import\\(", // return position
-	"^\\s*import\\(", // expression/statement start (Promise.all arrays, warmup)
-	"\\? import\\(", // ternary branch
-	"&& import\\(", // short-circuit branch
-	"\\|\\| import\\(", // short-circuit branch
-	"[(,{\\[]\\s*import\\(", // call/array/object-argument (RR-021 round-2: `foo(import())`, `Promise.allSettled([import()])`, `[import()]` escaped the line-start rule). KNOWN GAPS (RR-021 round-3, accepted): ternary-else `x ? y : import(...)`, object-property values `{ foo: import(...) }`, case/label positions `case 1: import(...)` RESIDUAL FALSE-SKIP (round-4, accepted): a RUNTIME member-access form `import("./x").then(...)` on a line that also has an earlier `: identifier` colon-shape satisfies both skip conditions and escapes — closing it needs AST parsing or a narrower skip rule. — closing them needs a `:\s*import\(` rule that would false-flag return-type annotations.
-	">\\s*import\\(", // arrow body (RR-021 round-2: `arr.map((m) => import(m))` escaped every prior rule)
-];
-const GREP_ARGS = RUNTIME_IMPORT_PATTERNS.map((p) => `-e "${p}"`).join(" ");
+// Test seam: point the gate at a fixture tree (`--root <dir>`) instead of the
+// repo root. Everything below resolves package.json / src / entries relative
+// to this root, so the fixture test can drive both the pass and fail paths.
+const rootArgIdx = process.argv.indexOf("--root");
+const ROOT =
+	rootArgIdx !== -1 && process.argv[rootArgIdx + 1]
+		? resolve(process.argv[rootArgIdx + 1])
+		: resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-// RR-021 round-2 review: `git grep` exits 1 (and execSync therefore throws)
-// when there are ZERO matches — i.e. on a fully-clean src/. Treat status 1 as
-// "no matches" instead of crashing the gate on a clean tree (fail-closed only
-// for real anomalies: any other non-zero status still propagates).
-let out = "";
-try {
-	out = execSync(`git grep -nE ${GREP_ARGS} -- "src/**/*.ts"`, { encoding: "utf-8" });
-} catch (err) {
-	if (err?.status !== 1) throw err;
-	out = err?.stdout?.toString() ?? "";
+const MANIFEST = existsSync(resolve(ROOT, "package.json"))
+	? JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8"))
+	: { name: "fixture", dependencies: {} };
+const DECLARED = new Set([
+	MANIFEST.name,
+	...Object.keys(MANIFEST.dependencies ?? {}),
+	...Object.keys(MANIFEST.optionalDependencies ?? {}),
+	...Object.keys(MANIFEST.peerDependencies ?? {}),
+]);
+
+// ── Per-entry budgets (upstream check-entry-graphs style) ───────────────────
+// Keys are the bundle entries from scripts/build-bundle.mjs entryPoints.
+// maxFiles is a ratchet on the current reachable-file count; forbid[] lists
+// path fragments that must NEVER enter the shipped entry graph (test/, dev
+// scripts/, docs/ are not shipped; dist/ would mean the bundle recursively
+// re-importing its own output — the exact recursion build-bundle.mjs avoids
+// by using index.bundle.ts instead of index.ts).
+const BUDGETS = {
+	"index.bundle.ts": {
+		maxFiles: 521,
+		forbid: ["test/", "scripts/", "docs/", "dist/"],
+	},
+};
+
+// Deliberate, REVIEWABLE exceptions to the declared-deps rule. Each entry
+// must carry its justification here. (Δ2 first-run finding: `hosted-git-info`
+// is required() by src/utils/git.ts inside a try/catch with a null fallback —
+// an OPTIONAL runtime enhancement that today resolves only TRANSITIVELY via
+// the peer dep @earendil-works/pi-coding-agent. The proper fix is declaring
+// it in `optionalDependencies`; until that product decision lands, the
+// exception lives here explicitly instead of staying invisible.)
+const OPTIONAL_RUNTIME_REQUIRES = new Set(["hosted-git-info"]);
+
+const failures = [];
+
+// ── Parsing: esbuild type-strip → acorn AST → sourcemap line recovery ───────
+
+const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const parseCache = new Map(); // absPath -> { ast, code, segs, srcLines } | { error }
+// esbuild's ESM output RENAMES a user binding named `require` to `require2`,
+// `require3`, … (it reserves `require` for CJS interop). Syntactic require()
+// detection therefore matches that rename scheme too — the in-tree shim
+// (src/runtime/deterministic-ast.ts) is exactly this shape.
+const REQUIRE_NAME = /^require\d*$/;
+
+function decodeMappings(mappings) {
+	// Standard base64 VLQ: per-generated-line arrays of
+	// { genCol, origLine } segments with cumulative deltas.
+	const perLine = [];
+	let srcIdx = 0;
+	let origLine = 0;
+	let origCol = 0;
+	for (const line of mappings.split(";")) {
+		let genCol = 0;
+		const segs = [];
+		for (const seg of line.split(",")) {
+			if (!seg) continue;
+			const fields = [];
+			let shift = 0;
+			let value = 0;
+			for (const ch of seg) {
+				const digit = B64.indexOf(ch);
+				if (digit < 0) throw new Error(`bad VLQ char ${JSON.stringify(ch)}`);
+				value += (digit & 31) << shift;
+				shift += 5;
+				if ((digit & 32) === 0) {
+					const negative = value & 1;
+					value >>= 1;
+					fields.push(negative ? -value : value);
+					value = 0;
+					shift = 0;
+				}
+			}
+			genCol += fields[0] ?? 0;
+			if (fields.length >= 4) {
+				srcIdx += fields[1];
+				origLine += fields[2];
+				origCol += fields[3];
+				segs.push({ genCol, origLine });
+			}
+		}
+		perLine.push(segs);
+	}
+	return perLine;
 }
 
-const bad = [];
-const fileCache = new Map();
+function lineOfOffset(code, offset) {
+	let line = 1;
+	for (let i = 0; i < offset && i < code.length; i++) {
+		if (code.charCodeAt(i) === 10) line += 1;
+	}
+	return line;
+}
 
-for (const line of out.split("\n").filter(Boolean)) {
-	if (line.includes("// LAZY:")) continue;
-	const m = line.match(/^([^:]+):(\d+):/);
-	if (!m) continue;
-	const [, file, lineNum] = m;
-	if (!fileCache.has(file)) fileCache.set(file, readFileSync(file, "utf-8").split(/\r?\n/));
-	const lines = fileCache.get(file);
-	const idx = Number(lineNum) - 1;
-	const prevLine = lines[idx - 1] ?? "";
-	// Biome's formatter hoists trailing comments on block-opening lines into
-	// the block body (first statement line) — accept a marker there too.
-	const nextLine = lines[idx + 1] ?? "";
-	if (prevLine.includes("// LAZY:") || nextLine.includes("// LAZY:")) continue;
-	// Skip type-only declarations (`type X = import("...").T` is erased).
-	const content = lines[Number(lineNum) - 1] ?? "";
-	const stripped = content.trimStart();
-	if (
-		stripped.startsWith("//") ||
-		stripped.startsWith("*") ||
-		stripped.startsWith("/*") ||
-		stripped.startsWith("type ") ||
-		stripped.startsWith("interface ") ||
-		stripped.startsWith("declare ")
-	)
+function origLineOf(segs, genLine, genCol) {
+	const row = segs[genLine - 1] ?? [];
+	let best;
+	for (const seg of row) {
+		if (seg.genCol <= genCol) best = seg;
+		else break;
+	}
+	return best?.origLine;
+}
+
+/**
+ * Type-strip with esbuild then parse with acorn.
+ *
+ * treeShaking: false — the transform API otherwise DROPS unused top-level
+ * statements, including `const m = await import("…")` whose binding is never
+ * read. That is a real runtime import() and must be seen by checks 1–2.
+ *
+ * importsNotUsedAsValues: "preserve" — esbuild's TS default ELIDES
+ * `import { X } from "…"` when X is only referenced in type positions (tsc
+ * emit semantics). But pi-crew's strip-types FALLBACK path (index.ts when
+ * dist/ is absent) runs on Node's amaro, which keeps such imports — the
+ * specifier still loads at runtime there. "preserve" keeps the statement so
+ * the declared-deps check sees it, matching both runtime paths.
+ */
+function parseFile(absPath) {
+	if (parseCache.has(absPath)) return parseCache.get(absPath);
+	let entry;
+	try {
+		const source = readFileSync(absPath, "utf8");
+		const t = transformSync(source, {
+			loader: "ts",
+			format: "esm",
+			target: "node22",
+			sourcemap: "external",
+			treeShaking: false,
+			tsconfigRaw: { compilerOptions: { importsNotUsedAsValues: "preserve" } },
+		});
+		const map = typeof t.map === "string" ? JSON.parse(t.map) : t.map;
+		const ast = acorn.parse(t.code, {
+			ecmaVersion: "latest",
+			sourceType: "module",
+			allowAwaitOutsideFunction: true,
+			allowReturnOutsideFunction: true,
+		});
+		entry = { ast, code: t.code, segs: decodeMappings(map.mappings ?? ""), srcLines: source.split(/\r?\n/) };
+	} catch (err) {
+		entry = { error: err };
+	}
+	parseCache.set(absPath, entry);
+	return entry;
+}
+
+function isNode(value) {
+	return Boolean(value) && typeof value === "object" && typeof value.type === "string";
+}
+
+function staticStringOf(node) {
+	if (!isNode(node)) return undefined;
+	if (node.type === "Literal" && typeof node.value === "string") return node.value;
+	if (node.type === "TemplateLiteral") {
+		const expressions = Array.isArray(node.expressions) ? node.expressions : [];
+		if (expressions.length > 0) return undefined;
+		const quasis = Array.isArray(node.quasis) ? node.quasis : [];
+		return quasis
+			.map((q) => {
+				const cooked = q?.value?.cooked;
+				return typeof cooked === "string" ? cooked : q?.value?.raw ?? "";
+			})
+			.join("");
+	}
+	return undefined;
+}
+
+/**
+ * Walk the AST, collecting every import site.
+ *   statics: ImportDeclaration / export-from (specifier required to be present)
+ *   dynamics: EVERY runtime import() call site (for the LAZY check — argument
+ *             shape is irrelevant)
+ *   requires: require("…") / require.resolve("…") calls with a static argument
+ */
+function collectImportSites(parsed) {
+	const statics = [];
+	const dynamics = [];
+	const requires = [];
+	(function walk(node) {
+		if (!isNode(node)) return;
+		if (node.type === "ImportDeclaration" && isNode(node.source)) {
+			statics.push({ spec: node.source.value, start: node.start });
+		} else if (
+			(node.type === "ExportNamedDeclaration" || node.type === "ExportAllDeclaration") &&
+			isNode(node.source)
+		) {
+			statics.push({ spec: node.source.value, start: node.start });
+		} else if (node.type === "ImportExpression" || (node.type === "CallExpression" && isNode(node.callee) && node.callee.type === "Import")) {
+			// acorn >= 8.9 emits `ImportExpression` for dynamic import(); older
+			// shapes (and `import(x)` inside call chains on some versions) use a
+			// CallExpression whose callee is an `Import` node. Accept both.
+			const arg = isNode(node.source)
+				? node.source
+				: Array.isArray(node.arguments)
+						? node.arguments[0]
+						: undefined;
+			dynamics.push({ spec: staticStringOf(arg), start: node.start });
+		} else if (node.type === "CallExpression") {
+			const callee = node.callee;
+			const firstArg = Array.isArray(node.arguments) ? node.arguments[0] : undefined;
+			if (isNode(callee) && callee.type === "Identifier" && REQUIRE_NAME.test(callee.name)) {
+				const spec = staticStringOf(firstArg);
+				if (spec !== undefined) requires.push({ spec, start: node.start });
+			} else if (
+				isNode(callee) &&
+				callee.type === "MemberExpression" &&
+				callee.computed === false &&
+				isNode(callee.object) &&
+				callee.object.type === "Identifier" &&
+				REQUIRE_NAME.test(callee.object.name) &&
+				isNode(callee.property) &&
+				callee.property.type === "Identifier" &&
+				callee.property.name === "resolve"
+			) {
+				const spec = staticStringOf(firstArg);
+				if (spec !== undefined) requires.push({ spec, start: node.start });
+			}
+		}
+		for (const value of Object.values(node)) {
+			if (Array.isArray(value)) {
+				for (const item of value) walk(item);
+			} else {
+				walk(value);
+			}
+		}
+	})(parsed.ast);
+	return { statics, dynamics, requires };
+}
+
+function origLineOfSite(parsed, site) {
+	const offset = site.start;
+	const lineStart = offset > 0 ? parsed.code.lastIndexOf("\n", offset - 1) + 1 : 0;
+	const genLine = lineOfOffset(parsed.code, offset);
+	const mapped = origLineOf(parsed.segs, genLine, offset - lineStart);
+	if (mapped !== undefined) return mapped + 1; // sourcemap lines are 0-based
+	// Fallback (no mapping segment): locate the specifier text in the source.
+	if (typeof site.spec === "string") {
+		const idx = parsed.srcLines.findIndex((l) => l.includes(site.spec));
+		if (idx !== -1) return idx + 1;
+	}
+	return genLine;
+}
+
+// ── File sets ────────────────────────────────────────────────────────────────
+
+function gitTrackedFiles(pattern) {
+	let out = "";
+	try {
+		out = execSync(`git ls-files -- "${pattern}"`, {
+			cwd: ROOT,
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+	} catch {
+		out = ""; // non-git fixture trees fall through to the fs walk below
+	}
+	const files = out.split("\n").filter((f) => f.endsWith(".ts"));
+	if (files.length > 0) return files.map((f) => resolve(ROOT, f));
+	// Fixture mode (no git / no tracked src): walk the fs for src/**/*.ts.
+	const srcDir = resolve(ROOT, "src");
+	const acc = [];
+	(function walkDir(dir) {
+		if (!existsSync(dir)) return;
+		for (const name of readdirSync(dir, { withFileTypes: true })) {
+			const p = resolve(dir, name.name);
+			if (name.isDirectory()) walkDir(p);
+			else if (name.name.endsWith(".ts")) acc.push(p);
+		}
+	})(srcDir);
+	return acc;
+}
+
+const srcFiles = gitTrackedFiles("src/**/*.ts");
+const rootEntries = ["index.ts", "index.bundle.ts"]
+	.map((f) => resolve(ROOT, f))
+	.filter((f) => existsSync(f));
+const depCheckFiles = [...srcFiles, ...rootEntries];
+
+// ── Check 1: declared deps ───────────────────────────────────────────────────
+
+function packageNameOf(spec) {
+	if (!spec) return undefined;
+	if (spec.startsWith(".") || spec.startsWith("/")) return undefined; // relative/absolute
+	if (spec.startsWith("node:") || spec.startsWith("data:") || spec.startsWith("#")) return undefined;
+	if (isBuiltin(spec)) return undefined;
+	const parts = spec.split("/");
+	return spec.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
+}
+
+for (const file of depCheckFiles) {
+	const parsed = parseFile(file);
+	if (parsed.error) {
+		failures.push(`${relative(ROOT, file)}: parse failed — ${parsed.error.message}`);
 		continue;
-	// Skip type-ANNOTATION positions (RR-021 round-2): a generic inside a
-	// variable's type annotation — `const X: Record<string, import("./f.ts").T>` —
-	// is erased at compile time. The `[(,]\s*import\(` pattern needed for
-	// `Promise.allSettled([import()])` also matches the generic's comma, so
-	// recognize the annotation shape: colon + identifier + no `=`/`(` until the
-	// import, AND require a member-access suffix `import("...").T` (RR-021
-	// round-3: type annotations always access a member; runtime arg positions
-	// like `Promise.all([cond ? a : b, await import("./x")])` are terminal, so
-	// the compound-colon shape no longer false-skips them). A bare ternary
-	// `x ? y : import(...)` still does not match (no identifier between `:` and
-	// `import(`), so runtime positions stay flagged.
-	if (/:\s*\w+[^=(]*import\(/.test(content) && /import\(["'][^"']*["']\)\s*\./.test(content)) continue;
-	bad.push(line);
+	}
+	const { statics, dynamics, requires } = collectImportSites(parsed);
+	const sites = [
+		...statics,
+		...dynamics.filter((d) => typeof d.spec === "string"),
+		...requires,
+	];
+	for (const site of sites) {
+		const pkg = packageNameOf(site.spec);
+		if (pkg === undefined) continue;
+		if (DECLARED.has(pkg)) continue;
+		if (OPTIONAL_RUNTIME_REQUIRES.has(pkg)) continue;
+		const line = origLineOfSite(parsed, site);
+		failures.push(
+			`${relative(ROOT, file)}:${line}: ${site.spec} is not declared in ${MANIFEST.name}'s dependencies/peerDependencies`,
+		);
+	}
 }
 
-if (bad.length > 0) {
-	console.error("Dynamic runtime imports without `// LAZY:` marker:\n" + bad.join("\n"));
+// ── Check 2: LAZY markers on runtime import() ────────────────────────────────
+
+for (const file of srcFiles) {
+	const parsed = parseFile(file);
+	if (parsed.error) continue; // already reported above
+	const { dynamics } = collectImportSites(parsed);
+	for (const site of dynamics) {
+		const line = origLineOfSite(parsed, site); // 1-based
+		const near = [
+			parsed.srcLines[line - 2] ?? "",
+			parsed.srcLines[line - 1] ?? "",
+			parsed.srcLines[line] ?? "",
+		];
+		if (near.some((l) => l.includes("// LAZY:"))) continue;
+		failures.push(
+			`${relative(ROOT, file)}:${line}: runtime import(${site.spec ?? "…"}) without \`// LAZY:\` marker (checked line and ±1)`,
+		);
+	}
+}
+
+// ── Check 3: per-entry budgets ───────────────────────────────────────────────
+
+function resolveRelative(spec, fromFile) {
+	const base = resolve(dirname(fromFile), spec);
+	for (const candidate of [base, `${base}.ts`, `${base}/index.ts`]) {
+		if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
+	}
+	return undefined;
+}
+
+for (const [entry, budget] of Object.entries(BUDGETS)) {
+	const entryPath = resolve(ROOT, entry);
+	if (!existsSync(entryPath)) {
+		console.log(`entry ${entry}: not found — skipping budget check (fixture mode)`);
+		continue;
+	}
+	const seen = new Set();
+	const queue = [entryPath];
+	while (queue.length > 0) {
+		const file = queue.pop();
+		if (seen.has(file)) continue;
+		seen.add(file);
+		if (file.endsWith(".json")) continue;
+		const parsed = parseFile(file);
+		if (parsed.error) continue;
+		const { statics, dynamics } = collectImportSites(parsed);
+		for (const site of [...statics, ...dynamics]) {
+			if (typeof site.spec !== "string" || !site.spec.startsWith(".")) continue;
+			const target = resolveRelative(site.spec, file);
+			if (target) queue.push(target);
+		}
+	}
+	const graph = [...seen].map((f) => relative(ROOT, f)).sort();
+	if (graph.length > budget.maxFiles) {
+		failures.push(
+			`entry ${entry} reaches ${graph.length} files, budget ${budget.maxFiles}\n` +
+				graph.map((f) => `    ${f}`).join("\n"),
+		);
+	}
+	for (const pattern of budget.forbid ?? []) {
+		const hit = graph.filter((f) => f.includes(pattern));
+		if (hit.length > 0) {
+			failures.push(`entry ${entry} must not reach ${pattern}:\n` + hit.map((f) => `    ${f}`).join("\n"));
+		}
+	}
+	console.log(`entry ${entry}: ${graph.length}/${budget.maxFiles} files in value-import graph.`);
+}
+
+if (failures.length > 0) {
+	console.error(`Declared-deps/lazy-import gate: ${failures.length} violation(s):\n  ` + failures.join("\n  "));
 	process.exit(1);
 }
 
-// ── Dist-side assertion (RR-021 WI-2.3b) ────────────────────────────────────
+// ── Check 4: dist-side assertion (RR-021 WI-2.3b, unchanged semantics) ───────
 // The heavy deps below are INTENTIONALLY external + lazy (sync createRequire
 // shims or await import). A module-scope hoisted `from"pkg"` import in the
 // minified bundle means someone reintroduced an eager import — this is the
 // C1/H1 regression gate. Dynamic (`import("pkg")`) and require()-shim forms
 // are fine and do not match. dist/ is committed, so this runs even pre-build.
-// KNOWN GAP (RR-021 review): only the `from"pkg"` specifier form is matched —
-// a bare side-effect `import"pkg"` or inline array form would escape. Acceptable
-// as a regression gate (esbuild emits `from`-form for named/default imports);
-// tighten here if a new hoisting shape appears.
+// KNOWN GAP (unchanged from RR-021): only the `from"pkg"` specifier form is
+// matched — a bare side-effect `import"pkg"` would escape. Acceptable: esbuild
+// emits the `from` form for named/default imports; tighten if a new hoisting
+// shape appears.
 const HEAVY_PKGS = ["esbuild", "acorn", "diff", "jiti", "cli-highlight", "yaml", "ajv"];
-const distPath = path.resolve(import.meta.dirname, "../dist/index.mjs");
+const distPath = resolve(ROOT, "dist/index.mjs");
 if (existsSync(distPath)) {
-	const dist = readFileSync(distPath, "utf-8");
+	const dist = readFileSync(distPath, "utf8");
 	const hoisted = [];
 	for (const pkg of HEAVY_PKGS) {
 		const re = new RegExp(`from\\s*["']${pkg}["']`);
@@ -113,4 +506,4 @@ if (existsSync(distPath)) {
 	console.log("dist/index.mjs not found — skipping dist-side hoisted-import assertion.");
 }
 
-console.log("All dynamic runtime imports have `// LAZY:` marker.");
+console.log("Declared-deps gate: all runtime imports declared; all dynamic imports LAZY-marked; entry graphs within budget.");
