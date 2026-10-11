@@ -1,5 +1,125 @@
 # Changelog
 
+## [0.11.17] — upgrade wave A: pi-1.1.0 adoption, central env registry, OSC 7501 program-status (2026-10-11)
+
+Implements the 10-item Wave A from `pi-crew-upgrade-research-round2.md` +
+`pi-crew-upgrade-research-round3-deep.md` (verification-backed anchors), built by 4
+lanes (W1 env/child-pi, W2 ui, W3 runtime fixes, W4 retrieval) in one shared worktree;
+finalize ran the full gate battery + real-test T1/T3 + a fresh Linux bench baseline.
+
+### Added
+
+- **feat(env): central env-forwarding registry (C-1)** — `src/config/env-allowlist-registry.ts`
+  now GENERATES `BACKGROUND_RUNNER_ENV_ALLOWLIST` (async-runner.ts) and `BASE_ALLOWLIST`
+  (child-pi-spawn.ts) from one decision table seeded from `config/env-vars.ts`; every
+  `CREW_ENV_VARS` key must carry an explicit forwarding decision (allowlist / explicit
+  channel / child-write / host-only / gap / test-only) — fail-fast at import + unit-tested
+  (no orphan entries, no dropped control vars). Content byte-identical to v0.11.16 plus the
+  one documented addition `PI_CREW_TOOLS_MODIFIERS`. Closes the incident class behind
+  2026-09-29 (`PI_CREW_MODEL` stripped) and `44d16d94` (STATE_BACKEND trio). Registry gaps
+  fixed: `PI_CREW_DELEGATE_ENABLED` + `PI_CREW_ASYNC_RUN` were live read/write sites missing
+  from env-vars.ts. 29 runner-read vars are classified known-gaps (surfaced via
+  `crewEnvForwardingGapReport()`) for a follow-up wave.
+- **feat(child-pi): adopt pi 1.1.0 `agent_settled.aborted` (L2-1)** — the rpc transport
+  feature-detects `record.aborted === true` (absent on ≤1.0.4 hosts → byte-identical legacy):
+  a host-cancelled settle now marks the run `aborted:true` / `crashClass:"cancelled"` (was:
+  healthy exit 0) and the worker is evicted from / never registered into the rpc pool — a
+  cancelled worker can no longer be revived as a healthy reuse candidate.
+- **feat(child-pi): opt-in pi 1.1.0 `+tool` modifier spawn syntax (L2-3)** —
+  `PI_CREW_TOOLS_MODIFIERS=1` (default OFF) + probed host pi ≥ 1.1.0 emits declared agent
+  tools: as `--tools +a,+b` (additive on the default surface; no CONTROL_TOOLS merge)
+  instead of the legacy replacement allowlist. **Decision — default OFF even though version
+  detection is reliable** (`probePiVersion()` memoized + threaded into arg build): the
+  additive syntax changes `tools:` SEMANTICS from a least-privilege replacement allowlist
+  (pinned by tests + the 2026-09-10 battery) to additive on the default surface — i.e. it
+  would WIDEN the worker tool surface on every 1.1.0+ host, and this workspace's peer dep
+  is still 1.0.4 (mixed fleet). Below-floor/unknown versions keep the legacy syntax
+  (strict-parser safety; 1.1.0 also forbids mixing plain names with modifiers).
+- **feat(ui): OSC 7501 program-status channel (B-1)** — `src/ui/program-status.ts` vendors
+  the upstream `@earendil-works/pi-tui` v1.1.0 wire format (MIT © 2025 Mario Zechner;
+  vendored — the peer dep has no 1.1.0 floor and `PROGRAM_STATUS_QUERY` is not re-exported;
+  never imported from the host). terminal-status.ts gains a third best-effort no-throw
+  channel (working / blocked+kind+message / idle / clear); the wiring derives blocked state
+  from durable runs — plan-approval pending, `ask`/wait park (`manifest.waitState`, 65-min
+  freshness matching the 1h broker deadline clamp), stuck-blocked subagent records — kind
+  `question` for all sources. Blocked now shows even with zero live-session agents
+  (child-process runs). crew-broker emits an in-process `mailbox_updated` wake after a
+  successful park (task.waiting / ask.requested never reach the live UI bus). Headless stays
+  no-op. Raw tty writer failures no longer propagate from any terminal-status path (no-throw
+  hardening, caught by the new C-8 rule-4 test).
+- **feat(ui): host `durationMs` for tool progress (B-3)** — `formatCompactToolProgress`
+  prefers an optional host-measured `durationMs` (pi ≥1.1.0 ToolRenderContext.durationMs;
+  used only when present + numeric + finite ≥ 0, value never trusted blindly) over
+  self-timing; fallback unchanged. Audit result: `outputPad` has 0 usages and no
+  `renderShell:"self"` sites exist in src — nothing added (no apply site).
+- **feat(ui): theme discovery delegates to `ctx.ui.getAllThemes()` (B-4)** — host list wins
+  when non-empty; empty (RPC-degraded `[]`), throwing, or missing API falls back to the
+  unchanged fs scan. Feature-detected shim in pi-ui-compat.ts (undefined = fallback).
+
+### Fixed
+
+- **bench: strip-types break from TS parameter properties (R3-1)** —
+  `LiveSessionHungToolError` used `constructor(readonly …)` which strip-only mode rejects →
+  `register-startup.bench` rc=1 + `bench-cold-start` strip arm failed since `c1621c20`.
+  Converted to plain fields assigned in the constructor body (public API unchanged).
+  Verified: register-startup rc 1→0; bench-cold-start strip arm 10/10 iters rc=0.
+- **paths: shared junk-literal guard blocks 'undefined'/'null'/'' (round 3)** — unset-var
+  expansion (`PI_CREW_HOME=$UNSET_VAR`) produced literal `"undefined"`/`"null"` that
+  anchored the config path (`config.ts resolveHomeDir`) and the run root
+  (`state-store createRunPaths`) into the garbage tree `undefined/.pi/…` (the stray
+  `pi-crew/undefined/` dir — verified 0 files via `find -type f`, deleted). New
+  `isJunkPathLiteral()` in `src/utils/paths.ts` (F4 pattern extended to 'null'); junk env
+  home → fallback `os.homedir()`; junk cwd → existing `Invalid cwd` error; legal paths
+  unchanged.
+- **surface(herdr): graceful close kills the worker by pid first (C-3 / TODO A2)** —
+  `closeSurface` graceful path now SIGTERMs the worker process tree via the existing
+  `killProcessTree` (group kill + SIGKILL escalation), waits a 3s grace, then still runs
+  `pane.close` as kill-tree fallback. Pid source is an injectable `resolveWorkerPid` seam
+  (host wires it from `manifest.surface.workerPids`; `pane.process_info` does not exist on
+  wire 0.8.2 — verified). All kill-by-pid steps are best-effort NO-THROW; the force path
+  and real `pane.close` error semantics are unchanged; default unwired = old behavior.
+  NOTE: the seam is DORMANT until the host wires `resolveWorkerPid` (resolve-surface /
+  doctor) — follow-up item.
+- **bench(b13): warm-cache case retired its junk-band query (R3-2)** — the warm query
+  ("verify package exports typecheck bundle", 5 abstract tokens) topped out at 0.42 under
+  the G23b floor `MIN_SUGGEST_SCORE=0.5`: a single keyword hit scores `(1/5)*0.6+0.3 =
+  0.42`, TIED with 40+ runtime-state grazers (`state/runs/**/03_verify/status.json`
+  matching "verify"), so the pre-G23b PASS had been satisfied by exactly the junk suggestions G23b
+  exists to block, with no ordering signal in the tie. Measured decision: NO floor value
+  separates the bands — real 1-hit gold (0.42) sits BELOW the grazer junk band (0.45–0.47;
+  on a 180-keyword real-run goal, 59,281/59,281 files scored >0 with max 0.473, all
+  grazers) — so "recalibrate the threshold" is refuted and **the floor stays 0.5**. The
+  bench query moved to the regime real per-task queries live in (module-path vocabulary,
+  multi-hit; G23b's own tuning note: "useful path-only scores reach ~0.64") and now ranks
+  true gold first (`retrieval-orchestrator.test.ts` 0.60 / `retrieval-orchestrator.ts`
+  0.56; 28 files ≥ floor). Regression pinned bench-harness-free in
+  `retrieval-orchestrator.test.ts` ("R3-2: warm cache (cached discovery, new keywords)
+  stays non-empty" + cached-discovery proof + every suggestion ≥ floor). b13 warm: FAIL
+  (files=0) → PASS (18–23ms, budget 400ms), deterministic ×3.
+- **test(goal): re-pin "model env forwards" to the central registry** — the cross-file pin
+  read async-runner.ts source for the old allowlist literals; it now asserts the
+  registry-consumption anchor + runtime allowlist membership (C-1 fallout, semantics
+  unchanged).
+- **chore: cleared pre-existing biome debt** — 5 files failed `format:check` and
+  `state-store-sqlite-parity.test.ts` carried 2 unused imports; all committed red at HEAD
+  `add29ff3` (left by earlier waves, untouched by Wave A lanes). Formatted + imports
+  removed so the release gates run green from a clean tree.
+
+### Changed
+
+- **bench baseline replaced: win32/v24.10.0 (2026-05-14) → linux/v22.23.1 (2026-10-11)** —
+  the old baseline was captured on another OS/node line and could never arbitrate Linux
+  regressions. Captured under residual external load (an out-of-run rustc build had just
+  finished; ~5-min load avg ~6 decaying to ~4 on 4 cores) — treat the first 15%-threshold
+  comparisons as advisory until re-captured on an idle machine. Full `npm run bench`
+  (b1–b13 + legacy suite): 184s, all green — b13 warm 18ms PASS (budget 400ms), cold 85ms.
+- **ci:fast stays bench-free (decision)** — considered adding a bench:smoke subset; NOT
+  added: the regression classes this wave hit are already covered by cheaper existing
+  gates (strip-types syntax → the `typecheck` strip-types import probe; b13 warm-cache →
+  the R3-2 unit pin inside npm test), bench timing assertions are machine-sensitive, and
+  the full bench (184s) would roughly triple the fast gate. `bench:check` remains the
+  deliberate comparison tool against the (now Linux) baseline.
+
 ## [0.11.16] — fix(bug #4): steer racing executor start no longer wiped by on-spawn truncate (2026-10-11)
 
 Third live-caught fix from the 2026-10-10 full battery (run team_20261010172900).
