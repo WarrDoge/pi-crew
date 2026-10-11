@@ -14,7 +14,7 @@ import { asCrewTheme } from "./theme-adapter.ts";
 // highlight() is only called from SYNC render paths (highlightCode /
 // highlightJson), so it MUST stay sync — lazy-load via a synchronous
 // createRequire shim on first use instead (same mechanism as
-// skills/validate.ts's yaml / utils/git.ts's hosted-git-info). In the esbuild
+// skills/validate.ts's yaml). In the esbuild
 // bundle cli-highlight stays external and resolves through this same shim.
 const require = createRequire(import.meta.url);
 type CliHighlight = typeof import("cli-highlight");

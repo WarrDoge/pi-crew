@@ -117,13 +117,13 @@ const BUDGETS = {
 };
 
 // Deliberate, REVIEWABLE exceptions to the declared-deps rule. Each entry
-// must carry its justification here. (Δ2 first-run finding: `hosted-git-info`
-// is required() by src/utils/git.ts inside a try/catch with a null fallback —
-// an OPTIONAL runtime enhancement that today resolves only TRANSITIVELY via
-// the peer dep @earendil-works/pi-coding-agent. The proper fix is declaring
-// it in `optionalDependencies`; until that product decision lands, the
-// exception lives here explicitly instead of staying invisible.)
-const OPTIONAL_RUNTIME_REQUIRES = new Set(["hosted-git-info"]);
+// must carry its justification here. (Δ2 resolution 2026-10-11: the original
+// exception `hosted-git-info` was DROPPED — its require() in src/utils/git.ts
+// never resolved in ANY environment (undeclared, and unreachable even
+// transitively from src/ in the repo checkout), so the branch was dead code
+// and has been deleted outright instead of declared. The allowlist is back
+// to strict/empty; add an entry ONLY together with a written justification.)
+const OPTIONAL_RUNTIME_REQUIRES = new Set();
 
 const failures = [];
 

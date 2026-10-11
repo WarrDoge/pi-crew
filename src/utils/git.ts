@@ -1,17 +1,3 @@
-import { createRequire } from "node:module";
-
-type HostedGitInfoResult = {
-	repo?: unknown;
-	domain?: string;
-	project?: string;
-	user?: string;
-	committish?: string;
-};
-
-type HostedGitInfoModule = {
-	fromUrl: (url: string) => HostedGitInfoResult | null;
-};
-
 /**
  * Parsed git source information.
  */
@@ -41,17 +27,6 @@ export type GitSource = {
 	 */
 	pinned: boolean;
 };
-
-function getHostedGitInfo(): HostedGitInfoModule | null {
-	const require = createRequire(import.meta.url);
-	try {
-		return require("hosted-git-info") as HostedGitInfoModule;
-	} catch {
-		return null;
-	}
-}
-
-const hostedGitInfo = getHostedGitInfo();
 
 function splitRef(url: string): { repo: string; ref?: string } {
 	const scpLikeMatch = url.match(/^git@([^:]+):(.+)$/);
@@ -210,51 +185,11 @@ export function parseGitUrl(source: string): GitSource | null {
 		return null;
 	}
 
-	const split = splitRef(url);
-
-	const parseCandidate = (candidate: string): GitSource | null => {
-		if (!hostedGitInfo) {
-			return null;
-		}
-		const info = hostedGitInfo.fromUrl(candidate) as HostedGitInfoResult | null;
-		if (!info) return null;
-		if (split.ref && info.project?.includes("@")) {
-			return null;
-		}
-		return {
-			type: "git",
-			repo:
-				split.repo.startsWith("http://") ||
-				split.repo.startsWith("https://") ||
-				split.repo.startsWith("ssh://") ||
-				split.repo.startsWith("git://") ||
-				split.repo.startsWith("git@")
-					? split.repo
-					: `https://${split.repo}`,
-			host: info.domain ?? "",
-			path: `${info.user ?? ""}/${info.project ?? ""}`.replace(/\.git$/, ""),
-			ref: info.committish || split.ref || undefined,
-			pinned: Boolean(info.committish || split.ref),
-		};
-	};
-
-	const hostedCandidates = [split.ref ? `${split.repo}#${split.ref}` : undefined, url].filter((value): value is string => Boolean(value));
-	for (const candidate of hostedCandidates) {
-		const info = parseCandidate(candidate);
-		if (info) {
-			return info;
-		}
-	}
-
-	const httpsCandidates = [split.ref ? `https://${split.repo}#${split.ref}` : undefined, `https://${url}`].filter(
-		(value): value is string => Boolean(value),
-	);
-	for (const candidate of httpsCandidates) {
-		const info = parseCandidate(candidate);
-		if (info) {
-			return info;
-		}
-	}
-
+	// 2026-10-11 (Δ2 follow-up): a hosted-git-info parse branch used to run
+	// here ahead of the generic parser, but its require() never resolved in
+	// ANY environment (undeclared dependency; unreachable even transitively
+	// from src/ in the repo checkout), so the branch was dead code in every
+	// deployment and was removed. parseGenericGitUrl is the only parse path
+	// that ever executed.
 	return parseGenericGitUrl(url);
 }

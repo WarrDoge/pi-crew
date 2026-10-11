@@ -15,6 +15,8 @@
 
 ### Changed
 
+- **fix(utils): drop dead `hosted-git-info` branch in `parseGitUrl` — Δ2 gate allowlist back to strict** — the Δ2 finding's `require()` in `src/utils/git.ts` was verified to never resolve in ANY environment (undeclared, and in the repo checkout even the transitive path via peer `@earendil-works/pi-coding-agent` is unreachable from `src/`), so the hosted-parse candidate loops were dead code in every deployment and `parseGenericGitUrl` was the only path that ever executed. Removed the require, its types/loader, and both candidate loops (zero behavior change); `OPTIONAL_RUNTIME_REQUIRES` in `scripts/check-lazy-imports.mjs` is empty again — the gate is strict, resolving the "pending `optionalDependencies` decision" note in the Δ2 entry below.
+
 - **feat(scripts): Δ2 — declared-deps/lazy-import gate rewritten from regex to AST** (esbuild type-strip + acorn walk of `ImportDeclaration` / `export … from` / runtime `import()` / `require()`-`require.resolve()`, ports upstream check-runtime-deps semantics; per-entry budget `{maxFiles: 521, forbid: [test/, scripts/, docs/, dist/]}` for `index.bundle.ts`, ports upstream check-entry-graphs; `--root` fixture seam for tests) — closes every RR-021 residual regex blind spot; first run surfaced one real finding: `hosted-git-info` is an undeclared optional `require()` in `src/utils/git.ts` (resolves transitively via peer `@earendil-works/pi-coding-agent`; explicitly allowlisted in the gate pending an `optionalDependencies` decision).
 
 ### Fixed

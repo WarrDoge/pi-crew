@@ -70,7 +70,7 @@ const VERSION_REGEX = /^\d+\.\d+(\.\d+)?(-[A-Za-z0-9.-]+)?$/;
 // synchronous lazy pattern via createRequire keeps the public (sync) API of
 // parseSkillFrontmatter/validateSkillFrontmatter unchanged. In the esbuild
 // bundle, yaml is a bundled CJS module resolved through the injected
-// createRequire shim (same mechanism as utils/git.ts's hosted-git-info).
+// createRequire shim.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 let yamlModule: typeof import("yaml") | undefined;
 function getYaml(): typeof import("yaml") {
