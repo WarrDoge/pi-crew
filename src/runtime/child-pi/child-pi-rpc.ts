@@ -209,6 +209,20 @@ function releasePooledRpcClient(key: string, entry: RpcPoolEntry): void {
 	if (rpcPool.get(key) === entry) entry.idle = true;
 }
 
+/**
+ * L2-1 (agent_settled.aborted, pi 1.1.0+): a worker-CANCELLED settle must
+ * NEVER return to the pool as a healthy reuse candidate. Evict the entry and
+ * stop the process best-effort — the pool-exit hook (attachPoolExitHook)
+ * owns the rest of the cleanup when the process finally dies. Mirrors the
+ * dead-entry eviction shape of acquirePooledRpcClient.
+ */
+function evictPooledRpcClient(key: string, entry: RpcPoolEntry): void {
+	if (rpcPool.get(key) === entry) rpcPool.delete(key);
+	void entry.client.stop().catch(() => {
+		/* best-effort — clearRpcPool/exit-hook own the rest */
+	});
+}
+
 /** Drop every pooled entry and gracefully stop the processes (tests/shutdown). */
 export function clearRpcPool(): void {
 	for (const [, entry] of rpcPool) {
@@ -508,6 +522,10 @@ async function runRpcSession(
 			const cleanupErrors: string[] = [];
 			const steeringController = new ChildPiSteeringController(input.maxTurns, input.graceTurns);
 			let abortDueToParentSignal = false;
+			// L2-1 (pi 1.1.0+): the host reported `aborted: true` on agent_settled —
+			// the turn was CANCELLED host-side (feature-detect: hosts <= 1.0.4 never
+			// carry the field, so this stays false there — byte-identical legacy).
+			let hostAbortedSettle = false;
 			const onParentAbort = (): void => {
 				abortDueToParentSignal = true;
 			};
@@ -710,17 +728,37 @@ async function runRpcSession(
 				armCancelHardKill();
 			};
 
-			const onAgentSettled = (): void => {
+			const onAgentSettled = (aborted: boolean): void => {
 				isStreaming = false;
 				if (settled || childExited) return;
+				// L2-1 (pi 1.1.0+ agent_settled.aborted): a worker-CANCELLED settle
+				// must NEVER (re)enter the pool as a healthy reuse candidate —
+				// evict an ACQUIRED entry and skip fresh registration. The run then
+				// settles through the normal close path with the cancelled marking
+				// (hostAbortedSettle below) instead of the warm-path healthy exit-0.
+				if (aborted) {
+					hostAbortedSettle = true;
+					if (poolEntry) {
+						evictPooledRpcClient(poolKey, poolEntry);
+						poolEntry = undefined;
+					}
+				}
 				// Pool registration (phase 1, opt-in): a fresh process that finished
 				// its run cleanly and is still live becomes the agent's reuse
 				// candidate — and a pool-enabled run NEVER closes stdin (the warm
 				// process must survive for the next task). The exit listener evicts
-				// dead entries on the acquire side's behalf.
-				if (!poolEntry && resolveChildPiRpcPoolEnabled() && child.exitCode === null && child.stdin && !child.stdin.destroyed) {
+				// dead entries on the acquire side's behalf. Aborted settles are
+				// excluded (L2-1 above).
+				if (
+					!poolEntry &&
+					!hostAbortedSettle &&
+					resolveChildPiRpcPoolEnabled() &&
+					child.exitCode === null &&
+					child.stdin &&
+					!child.stdin.destroyed
+				) {
 					poolEntry = { client, proc: child, idle: false };
-				rpcPool.set(poolKey, poolEntry);
+					rpcPool.set(poolKey, poolEntry);
 					attachPoolExitHook(poolKey, child);
 				}
 				if (poolEntry) {
@@ -780,7 +818,10 @@ async function runRpcSession(
 								});
 						}
 					} else if (record.type === "agent_settled") {
-						onAgentSettled();
+						// L2-1 feature-detect (pi 1.1.0 `types.d.ts` added `aborted: boolean`;
+						// 1.0.4 hosts have no such field): undefined === true → false —
+						// legacy behavior preserved exactly on pre-1.1.0 hosts.
+						onAgentSettled(record.aborted === true);
 					}
 					lineObserver.observeEvent(event);
 					if (!isFinalAssistantEvent(event) || childExited || settled || hasFinalDrainTimer()) return;
@@ -934,10 +975,15 @@ async function runRpcSession(
 					steeringController.getTurnCount() >=
 						(steeringController.getMaxTurns() ?? 0) + (steeringController.getGraceTurns() ?? 5);
 				const wasParentAborted = abortDueToParentSignal && !wasGraceAborted;
+				// L2-1: a host-side cancelled settle (agent_settled.aborted, pi
+				// 1.1.0+) marks the run cancelled exactly like the parent-signal
+				// abort — without this the close handler would report it healthy
+				// (exit 0) and the worker could be mistaken for a clean finish.
+				const wasHostAborted = hostAbortedSettle && !wasGraceAborted;
 				const crashClassification = classifyProcessCrash({
 					exitCode: finalExitCode,
 					signal: child.signalCode ?? undefined,
-					cancelled: abortRequested,
+					cancelled: abortRequested || hostAbortedSettle,
 					timedOut: responseTimeoutHit,
 					killed: hardKilled,
 					spawnError: undefined,
@@ -948,7 +994,7 @@ async function runRpcSession(
 					stdout: stdoutTail.value(),
 					stderr,
 					...(timeoutError ? { error: timeoutError.error } : {}),
-					aborted: wasGraceAborted || wasParentAborted,
+					aborted: wasGraceAborted || wasParentAborted || wasHostAborted,
 					steered: steeringController.isSoftLimitReached() && !wasGraceAborted,
 					exitStatus: {
 						...buildExitStatus({ exitCode: finalExitCode }),

@@ -7,6 +7,17 @@ import { atomicWriteFile } from "../../state/atomic-write.ts";
 import { hasRunStateLayout, packageRoot, userPiRoot } from "../../utils/paths.ts";
 import { PI_NO_MCP_FLOOR, piVersionAtLeast } from "../child-pi/pi-version.ts";
 
+/**
+ * L2-3 floor (2026-10-11): pi 1.1.0 added `+name`/`-name` modifier entries to
+ * `--tools` (coding-agent dist settings-manager.js getToolListError — modifiers
+ * may NOT be mixed with plain names and take exact names, not patterns). Kept
+ * LOCAL to pi-args.ts rather than the U9 floor registry in pi-version.ts
+ * (file-ownership boundary this wave); consolidate on the next touch.
+ * Semantics: below the floor / unknown piVersion → NEVER emit modifier syntax
+ * (a pre-1.1.0 host's strict parser would reject the flag value).
+ */
+const PI_TOOLS_MODIFIER_FLOOR = "1.1.0";
+
 // U4 (pi 1.0.4 adoption): pi's CLI documents 7 thinking levels (docs/cli.md:70);
 // `max` completes the surface — frontmatter `thinking: max` previously fell
 // back to Pi's default via isValidThinkingLevel.
@@ -386,8 +397,25 @@ export function buildPiWorkerArgs(input: BuildPiWorkerArgsInput): BuildPiWorkerA
 					? rawTools.map((t) => String(t).trim()).filter(Boolean)
 					: [];
 		if (declared.length > 0) {
-			const allow = new Set<string>([...declared, ...CONTROL_TOOLS]);
-			args.push("--tools", [...allow].join(","));
+			// L2-3 (pi 1.1.0 `+name` modifier syntax) — OPT-IN via
+			// PI_CREW_TOOLS_MODIFIERS=1, default OFF. Decision rationale (Wave A,
+			// 2026-10-11): host-version detection IS reliable (probePiVersion, U9 —
+			// single-flight, threaded here as input.piVersion), but switching the
+			// declared-`tools:` semantics from REPLACEMENT allowlist (least privilege,
+			// pinned by pi-args-loadout tests + battery 2026-09-10) to ADDITIVE
+			// `+name` (default toolset PLUS declarations) changes the worker
+			// privilege surface on every 1.1.0+ host — not a default-on change.
+			// Opt-in mode emits `--tools +a,+b` WITHOUT the CONTROL_TOOLS merge:
+			// additive mode keeps the full default surface, which already includes
+			// the runtime-registered control tools. Below the floor / unknown
+			// version → legacy replacement syntax (strict-parser safety).
+			const toolsEnv = input.env ?? process.env;
+			if (toolsEnv.PI_CREW_TOOLS_MODIFIERS === "1" && piVersionAtLeast(input.piVersion, PI_TOOLS_MODIFIER_FLOOR)) {
+				args.push("--tools", declared.map((tool) => `+${tool}`).join(","));
+			} else {
+				const allow = new Set<string>([...declared, ...CONTROL_TOOLS]);
+				args.push("--tools", [...allow].join(","));
+			}
 		}
 		// declared rỗng → KHÔNG truyền --tools (full default toolset — pattern
 		// buildSubagentToolAllowlist của pi-interactive-subagents index.ts:809-811).
