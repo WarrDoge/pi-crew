@@ -187,3 +187,69 @@ describe("T4: controller lifecycle", () => {
 		assert.doesNotThrow(() => ctrl.dispose());
 	});
 });
+
+describe("T4/B-1: OSC 7501 program-status channel", () => {
+	const ST = "\x1b\\";
+	const SEQ_7501_WORKING = `\x1b]7501;state=working:app=pi-crew${ST}`;
+	const SEQ_7501_IDLE = `\x1b]7501;state=idle:app=pi-crew${ST}`;
+	const SEQ_7501_CLEAR = `\x1b]7501;state=clear:app=pi-crew${ST}`;
+	const msgB64 = Buffer.from("task t1 waiting for leader", "utf8").toString("base64");
+	const SEQ_7501_BLOCKED = `\x1b]7501;state=blocked:app=pi-crew:kind=question:msg=${msgB64}${ST}`;
+
+	test("onRunsActive also reports OSC 7501 working", () => {
+		const cap = capturingWriter();
+		setGhosttyWriterForTest(cap.write);
+		const ctrl = createTerminalStatusController(mockCtx(true));
+		ctrl.onRunsActive();
+		assert.ok(cap.seqs.includes("\x1b]9;4;3\x07"), "Ghostty INDETERMINATE kept");
+		assert.ok(cap.seqs.includes(SEQ_7501_WORKING), `7501 working missing: ${JSON.stringify(cap.seqs)}`);
+		ctrl.dispose();
+	});
+
+	test("onBlocked reports blocked + kind + message and keeps the Ghostty pulse", () => {
+		const cap = capturingWriter();
+		setGhosttyWriterForTest(cap.write);
+		const ctx = mockCtx(true);
+		const ctrl = createTerminalStatusController(ctx);
+		ctrl.onBlocked("question", "task t1 waiting for leader");
+		assert.ok(cap.seqs.includes(SEQ_7501_BLOCKED), `7501 blocked missing: ${JSON.stringify(cap.seqs)}`);
+		assert.ok(cap.seqs.includes("\x1b]9;4;3\x07"), "Ghostty INDETERMINATE kept while blocked");
+		assert.equal(ctx.ui.titles.length, 0, "blocked must not touch the title");
+		ctrl.dispose();
+	});
+
+	test("onIdle reports OSC 7501 idle; dispose reports clear", () => {
+		const cap = capturingWriter();
+		setGhosttyWriterForTest(cap.write);
+		const ctrl = createTerminalStatusController(mockCtx(true));
+		ctrl.onIdle();
+		assert.ok(cap.seqs.includes(SEQ_7501_IDLE), `7501 idle missing: ${JSON.stringify(cap.seqs)}`);
+		ctrl.dispose();
+		assert.ok(cap.seqs.includes(SEQ_7501_CLEAR), `7501 clear missing: ${JSON.stringify(cap.seqs)}`);
+	});
+
+	test("a throwing writer never propagates (C-8 rule 4: no-throw)", () => {
+		setGhosttyWriterForTest(() => {
+			throw new Error("tty gone");
+		});
+		const ctrl = createTerminalStatusController(mockCtx(true));
+		assert.doesNotThrow(() => ctrl.onRunsActive());
+		assert.doesNotThrow(() => ctrl.onBlocked("question", "x"));
+		assert.doesNotThrow(() => ctrl.onRunCompleted());
+		assert.doesNotThrow(() => ctrl.onIdle());
+		assert.doesNotThrow(() => ctrl.dispose());
+	});
+
+	test("onBlocked after onIdle stops the idle re-assert loop (timers cleared)", () => {
+		const cap = capturingWriter();
+		setGhosttyWriterForTest(cap.write);
+		const ctx = mockCtx(true);
+		const parkedB64 = Buffer.from("parked", "utf8").toString("base64");
+		const seqParked = `\x1b]7501;state=blocked:app=pi-crew:kind=question:msg=${parkedB64}${ST}`;
+		const ctrl = createTerminalStatusController(ctx);
+		ctrl.onIdle(); // arms the idle re-assert timer (200ms, unref'd)
+		ctrl.onBlocked("question", "parked"); // must cancel it
+		ctrl.dispose(); // double-safety: clear timers again
+		assert.ok(cap.seqs.includes(seqParked), `blocked reported: ${JSON.stringify(cap.seqs)}`);
+	});
+});

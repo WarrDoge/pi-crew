@@ -101,3 +101,36 @@ export function setStatusFallback(ctx: UiContext, key: string, lines: string | r
 	const fn = record?.setStatus;
 	if (typeof fn === "function") fn.call(ctx.ui, segment ? `${key}:${segment}` : key, text);
 }
+
+/** Minimal structural shape of a host theme entry (`ctx.ui.getAllThemes()` item). */
+export interface HostThemeEntry {
+	name: string;
+	path?: string;
+}
+
+/**
+ * Delegate theme discovery to the host `ctx.ui.getAllThemes()` (available
+ * since ≤1.0.4 — `ExtensionUIContext`, types.d.ts:181). Returns `undefined`
+ * — NOT `[]` — when the API is missing, the call throws, or the host returns
+ * an empty/degenerate array: RPC-degraded hosts legitimately return `[]`, so
+ * callers MUST treat both outcomes as "fall back to the filesystem scan"
+ * (research round 2, B-4 cold-verify). Never throws.
+ */
+export function getAllThemes(ctx: { ui: unknown }): HostThemeEntry[] | undefined {
+	const record = maybeRecord(ctx.ui);
+	const fn = record?.getAllThemes;
+	if (typeof fn !== "function") return undefined;
+	try {
+		const themes = fn.call(ctx.ui) as unknown;
+		if (!Array.isArray(themes) || themes.length === 0) return undefined;
+		const out: HostThemeEntry[] = [];
+		for (const theme of themes) {
+			const entry = maybeRecord(theme);
+			if (typeof entry?.name !== "string") continue; // malformed entry — skip
+			out.push({ name: entry.name, path: typeof entry.path === "string" ? entry.path : undefined });
+		}
+		return out.length > 0 ? out : undefined;
+	} catch {
+		return undefined; // host call failed — RPC-degraded or older runtime
+	}
+}

@@ -214,3 +214,35 @@ test("M1-12: parser returns null for text with no elapsed/task signal", () => {
 	assert.equal(legacy?.completed, 2);
 	assert.equal(legacy?.total, 3);
 });
+
+// ── B-3: host-provided durationMs (pi ≥1.1.0 ToolRenderContext.durationMs) ──
+
+test("formatCompactToolProgress prefers a valid host durationMs over self-timing", () => {
+	const startedAt = Date.now() - 10 * 60 * 1000; // self-timing would say ~600s
+	const text = formatCompactToolProgress({ agentId: "agent_h", status: "running", startedAt, durationMs: 5000 });
+	assert.match(text, /elapsed=5s/, `host durationMs must win: ${text}`);
+});
+
+test("formatCompactToolProgress falls back to self-timing when durationMs is absent", () => {
+	const text = formatCompactToolProgress({ agentId: "agent_s", status: "running", startedAt: Date.now() });
+	assert.match(text, /elapsed=0s/, `fresh self-timed call → 0s: ${text}`);
+});
+
+test("invalid durationMs values (NaN/negative/Infinity) fall back to self-timing", () => {
+	const startedAt = Date.now() - 120_000; // self-timing says ~120s
+	for (const bad of [Number.NaN, -5, Number.POSITIVE_INFINITY, "7000" as unknown as number]) {
+		const text = formatCompactToolProgress({ agentId: "agent_b", status: "running", startedAt, durationMs: bad });
+		assert.match(text, /elapsed=12[01]s/, `invalid host value must fall back: ${text}`);
+	}
+});
+
+test("host durationMs round-trips through parseCompactToolProgress", () => {
+	const text = formatCompactToolProgress({
+		agentId: "agent_r",
+		status: "running",
+		startedAt: Date.now(),
+		durationMs: 65_000,
+	});
+	const parsed = parseCompactToolProgress(text);
+	assert.equal(parsed?.elapsedMs, 65_000);
+});

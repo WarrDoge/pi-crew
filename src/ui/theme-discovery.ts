@@ -20,6 +20,16 @@
  * `await import(` without a `// LAZY:` marker).
  */
 import * as fs from "node:fs";
+import { getAllThemes } from "./pi-ui-compat.ts";
+
+/**
+ * Minimal structural context for host delegation (B-4): anything with a
+ * `ui` object (the real `ExtensionContext` satisfies this). Callers without
+ * a live context (subagent/CI) omit it and get the filesystem fallback.
+ */
+export interface ThemeDiscoveryContext {
+	ui: unknown;
+}
 
 export interface PiThemeInfo {
 	/** Theme name (filename stem or builtin id). */
@@ -64,8 +74,34 @@ function settingsPath(): string {
 	return home ? `${home}/.pi/agent/settings.json` : "";
 }
 
-/** Discover all available Pi UI themes (builtins + custom). */
-export function discoverPiThemes(): PiThemeInfo[] {
+/** Discover all available Pi UI themes.
+ *
+ * B-4 (host delegation): when a caller supplies an extension context whose
+ * `ui.getAllThemes()` exists AND yields a non-empty list, the HOST list wins
+ * (it is the authority — sees the same builtins + user themes the running
+ * TUI sees, with no fs probing). Any miss (no ctx, missing API, throw, or an
+ * EMPTY result — RPC-degraded hosts return `[]`) falls back to the builtin +
+ * `~/.pi/agent/themes/*.json` scan below, unchanged.
+ */
+export function discoverPiThemes(ctx?: ThemeDiscoveryContext): PiThemeInfo[] {
+	if (ctx) {
+		const host = getAllThemes(ctx);
+		if (host && host.length > 0) {
+			return host
+				.map((theme) => ({
+					name: theme.name,
+					source: theme.path ? ("custom" as const) : ("builtin" as const),
+					...(theme.path ? { path: theme.path } : {}),
+					displayName: theme.name,
+				}))
+				.sort((a, b) => a.name.localeCompare(b.name));
+		}
+	}
+	return discoverPiThemesFromFs();
+}
+
+/** Filesystem fallback: builtins + ~/.pi/agent/themes/*.json (pre-B-4 path, unchanged). */
+function discoverPiThemesFromFs(): PiThemeInfo[] {
 	const out: PiThemeInfo[] = [];
 	const seen = new Set<string>();
 

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import test from "node:test";
 import {
+	getAllThemes,
 	requestRender,
 	requestRenderTarget,
 	setExtensionWidget,
@@ -100,4 +101,42 @@ test("showCustom passthrough pins factory and options when ui.custom exists", as
 	assert.equal(result, "host-result");
 	assert.equal(seen.factory, factory);
 	assert.deepEqual(seen.options, { overlay: true });
+});
+
+// ── B-4: getAllThemes delegation shim ─────────────────────────────────────
+
+test("getAllThemes shim delegates to the host API and maps entries", () => {
+	const ctx = {
+		ui: {
+			getAllThemes: () => [
+				{ name: "dark", path: undefined },
+				{ name: "mine", path: "/home/u/.pi/agent/themes/mine.json" },
+			],
+		},
+	} as never;
+	assert.deepEqual(getAllThemes(ctx), [
+		{ name: "dark", path: undefined },
+		{ name: "mine", path: "/home/u/.pi/agent/themes/mine.json" },
+	]);
+});
+
+test("getAllThemes shim returns undefined for missing API / empty result / throw / malformed entries", () => {
+	assert.equal(getAllThemes({ ui: {} } as never), undefined, "no API → undefined");
+	assert.equal(getAllThemes({ ui: { getAllThemes: () => [] } } as never), undefined, "RPC-degraded [] → undefined");
+	assert.equal(
+		getAllThemes({
+			ui: {
+				getAllThemes: () => {
+					throw new Error("rpc degraded");
+				},
+			},
+		} as never),
+		undefined,
+		"throw → undefined",
+	);
+	// Malformed entries are skipped; ALL-malformed → undefined (fallback).
+	assert.deepEqual(getAllThemes({ ui: { getAllThemes: () => [{ nope: 1 }, { name: "ok" }] } } as never), [
+		{ name: "ok", path: undefined },
+	]);
+	assert.equal(getAllThemes({ ui: { getAllThemes: () => [{ nope: 1 }] } } as never), undefined);
 });

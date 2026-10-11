@@ -229,3 +229,44 @@ describe("M1-1 guard: P0-1 cannot regress silently", () => {
 		assert.equal(typeof formatThemesListing, "function");
 	});
 });
+
+describe("B-4: host delegation via ctx.ui.getAllThemes()", () => {
+	it("delegates to a non-empty host list and never probes fs", () => {
+		const ctx = {
+			ui: {
+				getAllThemes: () => [
+					{ name: "zen-dark" }, // no path → builtin
+					{ name: "mine", path: "/home/u/.pi/agent/themes/mine.json" }, // path → custom
+				],
+			},
+		};
+		const themes = discoverPiThemes(ctx);
+		// Names unique to the host list prove the fs scan did NOT run.
+		assert.deepEqual(
+			themes.map((t) => `${t.name}:${t.source}`),
+			["mine:custom", "zen-dark:builtin"],
+		);
+		assert.equal(themes[0]?.path, "/home/u/.pi/agent/themes/mine.json");
+		assert.equal(themes[0]?.displayName, "mine");
+	});
+
+	it("empty host list (RPC-degraded) falls back to the fs scan", () => {
+		const ctx = { ui: { getAllThemes: () => [] } };
+		assert.deepEqual(discoverPiThemes(ctx), discoverPiThemes());
+	});
+
+	it("throwing host API falls back to the fs scan", () => {
+		const ctx = {
+			ui: {
+				getAllThemes: () => {
+					throw new Error("rpc degraded");
+				},
+			},
+		};
+		assert.deepEqual(discoverPiThemes(ctx), discoverPiThemes());
+	});
+
+	it("ctx without the API falls back to the fs scan", () => {
+		assert.deepEqual(discoverPiThemes({ ui: {} }), discoverPiThemes());
+	});
+});

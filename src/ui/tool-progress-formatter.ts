@@ -11,6 +11,14 @@ export interface ToolProgressInput {
 	runId?: string;
 	/** Timestamp (ms) when the parent tool call started. */
 	startedAt: number;
+	/**
+	 * Host-measured tool-call duration in ms (pi ≥1.1.0
+	 * `ToolRenderContext.durationMs`, new in 1.1.0 — tag v1.0.4 does not have
+	 * it). Feature-detected by PRESENCE + validation, never by host version:
+	 * when absent or not a finite non-negative number the formatter
+	 * self-times from `startedAt` (pre-1.1.0 behavior, unchanged).
+	 */
+	durationMs?: number;
 	/** Optional manifest snapshot for richer detail. */
 	manifest?: TeamRunManifest;
 	/** Optional materialized task list for waiting/running counts. */
@@ -178,7 +186,15 @@ function taskCounts(tasks: TeamTaskState[] | undefined): string | undefined {
  * the chat widget overlay does not jitter.
  */
 export function formatCompactToolProgress(input: ToolProgressInput): string {
-	const elapsedSec = Math.max(0, Math.round((spinnerClockNow() - input.startedAt) / 1000));
+	// B-3: prefer the host-measured duration when present and well-formed
+	// (1.1.0-only field; do NOT trust the value blindly — validate it), else
+	// self-time from startedAt (fallback preserved verbatim).
+	const hostDurationMs = input.durationMs;
+	const elapsedMs =
+		typeof hostDurationMs === "number" && Number.isFinite(hostDurationMs) && hostDurationMs >= 0
+			? hostDurationMs
+			: Math.max(0, spinnerClockNow() - input.startedAt);
+	const elapsedSec = Math.round(elapsedMs / 1000);
 	const head = input.agentId ? `${PROGRESS_FORMAT.agentKey}=${input.agentId}` : PROGRESS_FORMAT.agentKey;
 	// Emitted from PROGRESS_FORMAT so the parser can never drift from the wire format.
 	const lines: string[] = [

@@ -14,6 +14,14 @@
  *    subprocess). state 3 = indeterminate pulsing while runs are active;
  *    state 1 value 100 = green completion flash; state 0 = clear. Compatible
  *    with all libghostty-based terminals (Ghostty, cmux, muxy).
+ * 3. **OSC 7501 program-status** (B-1, upstream pi 1.1.0 adoption) — a
+ *    terminal-side "idle/working/blocked" indicator. pi-crew reports
+ *    `working` while runs are active, `blocked` (+ `kind` + message) while a
+ *    crew is waiting on the USER (plan-approval gate, `ask`/wait park,
+ *    stuck-blocked subagent), `idle` when the crew settles and `clear` on
+ *    dispose. Wire format is vendored in `./program-status.ts` (no pi-tui
+ *    import — peer dep has no 1.1.0 floor). Blocked-state is derived from
+ *    durable run state by `terminal-status-wiring.ts`.
  *
  * All writes are BEST-EFFORT: `/dev/tty` may be absent (non-interactive /
  * subagent / CI context) and `setTitle` may be unavailable — failures are
@@ -37,6 +45,10 @@
 
 import { writeFileSync } from "node:fs";
 import { listLiveAgents } from "../runtime/live-session/live-agent-manager.ts";
+import { formatProgramStatus, type ProgramStatus } from "./program-status.ts";
+
+/** Blocked-kind alias for wiring/test consumers. */
+export type ProgramStatusKind = NonNullable<ProgramStatus["kind"]>;
 
 /**
  * Minimal UI surface this module needs. Deliberately narrower than
@@ -58,6 +70,8 @@ export const GHOSTTY_PROGRESS = {
 
 /** Title prefix so the source is identifiable in the tab. */
 const TITLE_PREFIX = "π-crew";
+/** `app=` value for OSC 7501 reports (must match the upstream APP_PATTERN). */
+const PROGRAM_STATUS_APP = "pi-crew";
 /** Separator between summary segments. */
 const SEP = " · ";
 /** Max roles listed in the title (keep it short for narrow tabs). */
@@ -92,7 +106,26 @@ function defaultGhosttyWriter(seq: string): void {
 }
 
 function writeGhostty(seq: string): void {
-	(ghosttyWriter ?? defaultGhosttyWriter)(seq);
+	try {
+		(ghosttyWriter ?? defaultGhosttyWriter)(seq);
+	} catch {
+		// Writer failed (tty gone / throwing seam) — cosmetic channel, never
+		// surface (C-8 rule 4: best-effort NO-THROW on every path).
+	}
+}
+
+/**
+ * Emit an OSC 7501 program-status report through the same raw-sequence
+ * writer (both channels are best-effort `/dev/tty` writes). NO-THROW on
+ * every path (C-8 rule 4): a throwing injected writer, a format failure or a
+ * missing tty must never surface — this channel is purely cosmetic.
+ */
+function writeProgramStatus(status: Omit<ProgramStatus, "app">): void {
+	try {
+		writeGhostty(formatProgramStatus({ ...status, app: PROGRAM_STATUS_APP }));
+	} catch {
+		// cosmetic channel — swallow (C-8 rule 4)
+	}
 }
 
 /**
@@ -117,6 +150,31 @@ export function ghosttyComplete(): void {
 /** Clear the progress indicator. */
 export function ghosttyClear(): void {
 	setGhosttyProgress(GHOSTTY_PROGRESS.CLEAR);
+}
+
+/** OSC 7501 `working` — use while crew runs are active. */
+export function programStatusWorking(): void {
+	writeProgramStatus({ state: "working" });
+}
+
+/**
+ * OSC 7501 `blocked` — a crew is waiting on the USER (plan-approval gate,
+ * `ask`/wait park, stuck-blocked subagent). `kind` per the upstream protocol
+ * (permission|question|auth); research round 2 maps every pi-crew blocked
+ * source to `question` (waiting on a human decision/answer).
+ */
+export function programStatusBlocked(kind: ProgramStatusKind, message: string): void {
+	writeProgramStatus({ state: "blocked", kind, message });
+}
+
+/** OSC 7501 `idle` — crew settled, no runs active. */
+export function programStatusIdle(): void {
+	writeProgramStatus({ state: "idle" });
+}
+
+/** OSC 7501 `clear` — remove our status report entirely (dispose). */
+export function programStatusClear(): void {
+	writeProgramStatus({ state: "clear" });
 }
 
 /**
@@ -179,6 +237,8 @@ interface TerminalStatusState {
  */
 export interface TerminalStatusController {
 	onRunsActive(): void;
+	/** B-1: crew blocked waiting on the user — OSC 7501 `blocked` + kind. */
+	onBlocked(kind: ProgramStatusKind, message: string): void;
 	onRunCompleted(): void;
 	onIdle(): void;
 	dispose(): void;
@@ -233,6 +293,22 @@ export function createTerminalStatusController(ctx: TerminalStatusUi): TerminalS
 			const segment = buildCrewTitleSegment();
 			if (segment) setTerminalTitle(ctx, segment);
 			ghosttyWorking();
+			// B-1: also assert OSC 7501 working — the wiring only calls this on
+			// transitions (and to re-assert after a blocked phase clears), so this
+			// is not a per-event spam path.
+			programStatusWorking();
+		},
+		onBlocked(kind: ProgramStatusKind, message: string): void {
+			if (state.destroyed) return;
+			// Blocked IS active (a crew run is in flight) — own the lifecycle so
+			// the idle re-assert loop and any pending flash stop fighting the
+			// blocked report. The title is left untouched (blocked can occur with
+			// zero live-session agents, where there is no role segment to show).
+			clearIdleTimer();
+			clearFlashTimer();
+			state.showingActive = true;
+			ghosttyWorking(); // OSC 9;4 has no blocked state — keep the pulse alive
+			programStatusBlocked(kind, message);
 		},
 		onRunCompleted(): void {
 			if (state.destroyed) return;
@@ -257,6 +333,7 @@ export function createTerminalStatusController(ctx: TerminalStatusUi): TerminalS
 			state.showingActive = false;
 			clearFlashTimer();
 			ghosttyClear();
+			programStatusIdle(); // B-1: crew settled — report idle on 7501 too
 			setTerminalTitle(ctx, buildIdleTitle());
 			scheduleIdleReassert(IDLE_REASSERT_START_MS);
 		},
@@ -264,9 +341,11 @@ export function createTerminalStatusController(ctx: TerminalStatusUi): TerminalS
 			state.destroyed = true;
 			clearIdleTimer();
 			clearFlashTimer();
-			// Best-effort: clear the Ghostty progress so we don't leave a stale bar.
+			// Best-effort: clear the Ghostty progress and our 7501 report so we
+			// don't leave a stale bar / blocked indicator behind.
 			try {
 				ghosttyClear();
+				programStatusClear();
 			} catch {
 				// swallow
 			}

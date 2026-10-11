@@ -1908,6 +1908,18 @@ export class CrewBroker {
 		}).catch((err) =>
 			logInternalError("crew-broker.wait.ask-requested-event", err instanceof Error ? err : new Error(String(err)), `runId=${runId}`),
 		);
+		// B-1 (OSC 7501 program-status): wake the in-process terminal-status
+		// wiring — neither `task.waiting` nor `ask.requested` is forwarded on the
+		// live UI bus (teamEventToRunEventType maps neither), so without this
+		// nudge the blocked-state channels would lag until the next unrelated
+		// event. Best-effort: detached brokers emit into their own process
+		// (harmless no-op for the host UI; durable state still re-reads on the
+		// next host-side wake). The park itself already succeeded above.
+		try {
+			runEventBus.emit({ type: "mailbox_updated", runId, taskId });
+		} catch {
+			/* UI wake is best-effort only. */
+		}
 		this.sendResult(conn, id, {
 			ok: true,
 			questionId,
