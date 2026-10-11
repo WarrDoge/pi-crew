@@ -54,6 +54,11 @@ function runSettings(args: string) {
 	return handleTeamTool({ action: "settings", config: { args } } as never, { cwd: tmpCwd } as never);
 }
 
+/** Same call shape with an explicit ctx (FIX-ROUND MAJOR 3 delegation tests). */
+function runSettingsWithCtx(args: string, ctx: unknown) {
+	return handleTeamTool({ action: "settings", config: { args } } as never, ctx as never);
+}
+
 function makeTempDir(prefix: string): string {
 	return fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), prefix));
 }
@@ -174,8 +179,55 @@ describe("M1-3 guard: the theme branch really uses discovery", () => {
 			path.join(import.meta.dirname ?? __dirname, "../../../src/extension/team-tool/handle-settings.ts"),
 			"utf8",
 		);
-		assert.ok(source.includes("discoverPiThemes()"), "the exists check must be backed by discoverPiThemes()");
+		// FIX-ROUND MAJOR 3: both theme-branch call-sites now thread the host
+		// ctx (single discovery per invocation) instead of a bare call.
+		assert.ok(source.includes("discoverPiThemes({ ui: ctx.ui })"), "theme discovery must be wired to the host ctx (B-4 delegation)");
+		assert.ok(!source.includes("discoverPiThemes()"), "no unwired discovery call may remain");
 		assert.ok(source.includes("Unknown Pi theme"), "the rejection message must stay reachable");
 		assert.ok(source.includes("setPiTheme(name)"), "the success path must persist via setPiTheme()");
+	});
+});
+
+// FIX-ROUND MAJOR 3 (review 0.11.17): B-4 built host delegation into
+// discoverPiThemes(ctx?) but the settings handler never passed a ctx — the
+// host ui.getAllThemes() list could never win. These tests pin the wiring
+// through the REAL entry symbol (same routing as runSettings above).
+describe("MAJOR 3: theme discovery delegates to the host ctx when present", () => {
+	const HOST_ONLY = "host-only-theme";
+	function hostCtx(themes: unknown): unknown {
+		return { cwd: tmpCwd, ui: { getAllThemes: () => themes } };
+	}
+
+	it("non-empty host list WINS over the on-disk themes (delegate-when-ctx-nonempty)", async () => {
+		// The fs fixture installed 11 crew themes into the sandbox HOME — the
+		// host list must still be the authority.
+		const text = textFromToolResult(await runSettingsWithCtx("theme", hostCtx([{ name: HOST_ONLY }, { name: "dark" }])));
+		assert.ok(text.includes(HOST_ONLY), `host themes must be listed, got:\n${text}`);
+		assert.ok(!text.includes(NON_BUILTIN_THEME), `the fs scan must be superseded by the host list:\n${text}`);
+
+		// The exists check is host-backed too: a host-only theme SWITCHES (it is
+		// not on disk), and an on-disk-only crew theme is now unknown.
+		const switched = textFromToolResult(await runSettingsWithCtx(`theme ${HOST_ONLY}`, hostCtx([{ name: HOST_ONLY }])));
+		assert.ok(switched.includes("✓ Pi theme set to"), `host-listed theme must switch, got:\n${switched}`);
+		assert.equal(
+			JSON.parse(fs.readFileSync(settingsFile(), "utf8") as string).theme,
+			HOST_ONLY,
+			"the switch must still persist through setPiTheme",
+		);
+		const unknown = textFromToolResult(await runSettingsWithCtx(`theme ${NON_BUILTIN_THEME}`, hostCtx([{ name: HOST_ONLY }])));
+		assert.ok(unknown.includes(`Unknown Pi theme: ${NON_BUILTIN_THEME}`), `fs themes must not leak past the host list:\n${unknown}`);
+	});
+
+	it("ctx WITHOUT ui keeps the filesystem fallback (fs-fallback khi ctx rỗng)", async () => {
+		const text = textFromToolResult(await runSettingsWithCtx("theme", { cwd: tmpCwd }));
+		assert.ok(text.includes(NON_BUILTIN_THEME), `fs crew themes must still be listed, got:\n${text}`);
+		assert.ok(!text.includes(HOST_ONLY), `no host theme can appear without a host list:\n${text}`);
+	});
+
+	it("degenerate host lists (empty array / missing API) fall back to the fs scan", async () => {
+		const emptyList = textFromToolResult(await runSettingsWithCtx("theme", hostCtx([])));
+		assert.ok(emptyList.includes(NON_BUILTIN_THEME), `an EMPTY host result must fall back to fs (RPC-degraded), got:\n${emptyList}`);
+		const noApi = textFromToolResult(await runSettingsWithCtx("theme", { cwd: tmpCwd, ui: {} }));
+		assert.ok(noApi.includes(NON_BUILTIN_THEME), `a ctx whose ui lacks getAllThemes must fall back to fs, got:\n${noApi}`);
 	});
 });

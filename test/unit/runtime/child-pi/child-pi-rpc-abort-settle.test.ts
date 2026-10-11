@@ -161,6 +161,15 @@ test("1.1.0 shape: aborted:true marks the run cancelled (pool OFF default) and d
 			`host-aborted settle must mark the run cancelled; result=${JSON.stringify({ exitCode: result.exitCode, error: result.error })}`,
 		);
 		assert.equal(result.exitStatus?.crashClass, "cancelled", "crash classification must be cancelled, not clean_exit");
+		// FIX-ROUND MAJOR 1: exitStatus.cancelled is the field the task runner
+		// reads (evidenceStatusFor → worker.cancelled event). Pre-fix it stayed
+		// false for host-aborted settles, so a host-cancelled worker with exit 0
+		// was recorded as "completed" evidence.
+		assert.equal(
+			result.exitStatus?.cancelled,
+			true,
+			`exitStatus.cancelled must be true for a host-aborted settle; exitStatus=${JSON.stringify(result.exitStatus)}`,
+		);
 		assert.ok(pid, "onSpawn must have fired");
 		assert.ok(await waitForPidGone(pid!), `rpc child pid ${pid} must not survive the aborted settle`);
 	} finally {

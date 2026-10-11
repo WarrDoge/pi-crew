@@ -120,6 +120,52 @@ finalize ran the full gate battery + real-test T1/T3 + a fresh Linux bench basel
   the full bench (184s) would roughly triple the fast gate. `bench:check` remains the
   deliberate comparison tool against the (now Linux) baseline.
 
+### Fix round (2026-10-11 C-8 review — 3 MAJOR wiring gaps closed)
+
+Post-verdict FIX_THEN_SHIP round: the review caught three "code đúng nhưng không
+wiring" gaps (feature built, producer/consumer never connected) plus two minors.
+All five closed; each fix carries a regression test that fails on the pre-fix tree
+(mutation-checked for MAJOR 1/2).
+
+- **fix(child-pi): host-aborted settle marks `exitStatus.cancelled` (MAJOR 1)** —
+  `buildExitStatus` reported `cancelled: abortRequested` only, so a pi-1.1.0
+  host-cancelled settle (`agent_settled.aborted:true`) kept `exitStatus.cancelled`
+  false: `evidenceStatusFor()` (which reads exactly that field, not `result.aborted`)
+  classified the worker "completed" and the `worker.cancelled` evidence event in
+  child-executor.ts never fired for host aborts. Now `abortRequested || hostAbortedSettle`
+  (consistent with the crash classification in the same close handler). Regression:
+  `child-pi-rpc-abort-settle.test.ts` asserts `exitStatus.cancelled === true` (fails
+  pre-fix) + `assemble-attempt-outcome.test.ts` pins the host-aborted shape
+  (exit 0, no error, cancelled flag) → "cancelled".
+- **fix(ui): team-tool progress binder feeds `durationMs` to the formatter (MAJOR 2)**
+  — B-3 taught `formatCompactToolProgress` to prefer a producer `durationMs`, but no
+  streaming binder supplied one (the field existed only on the render-side path). The
+  team tool binder now plumbs `durationMs: Date.now() - startedAt` on every tick.
+  Regression: `team-tool-progress-binder.test.ts` pins the spinner clock 600s into the
+  future — self-timing would report `elapsed=600s`; the producer value wins (`elapsed=0s`)
+  and the test fails the moment the wiring drops.
+- **fix(ui): `team-settings theme*` threads the host ctx into theme discovery
+  (MAJOR 3)** — B-4 built host delegation (`ctx.ui.getAllThemes()` wins when non-empty)
+  but both theme-branch call-sites in handle-settings.ts called `discoverPiThemes()`
+  bare, so the host list could never win from the tool surface. `TeamContext` now
+  carries the optional runtime `ui` (the tool-execute ctx is an ExtensionToolContext,
+  so `ui` was already riding along at runtime) and both call-sites pass it. Regression:
+  `theme-settings-routing.test.ts` pins delegate-when-ctx-nonempty (host-only theme
+  listed + switches; fs-only crew theme becomes "Unknown") AND fs-fallback khi ctx
+  rỗng (no `ui` / missing API / empty `[]` → on-disk crew themes still listed).
+- **chore(notice): attribution for the vendored OSC 7501 module (MINOR 1)** — NOTICE.md
+  now records `src/ui/program-status.ts` as adapted from `@earendil-works/pi-tui` v1.1.0
+  `packages/tui/src/program-status.ts` (MIT © 2025 Mario Zechner).
+- **chore: `.gitignore` gains `temp/` (MINOR 2)** — local scratch dir was untracked
+  noise (`?? temp/`) on every status; now ignored.
+- **Follow-up (MINOR 3, not fixed this round — deliberately out of fix-round scope):**
+  `src/extension/registration/terminal-status-wiring.ts:254-275` —
+  `deriveTerminalBlockedSignal` does sync fs reads (≤16 manifests + ≤50 subagent
+  JSONs) inside an eval that runs on every runEventBus event (250ms debounce) —
+  sync IO on the UI thread when a run is busy. Candidate fix: mtime-keyed cache or
+  async evaluation. Low severity (reviewer-flagged MINOR); tracked here for the next
+  wave.
+
 ## [0.11.16] — fix(bug #4): steer racing executor start no longer wiped by on-spawn truncate (2026-10-11)
 
 Third live-caught fix from the 2026-10-10 full battery (run team_20261010172900).

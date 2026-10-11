@@ -384,20 +384,23 @@ export function handleSettings(params: { config?: Record<string, unknown> }, ctx
 	// team-settings theme <name> — switch the Pi UI theme
 	if (args === "theme" || args.startsWith("theme ")) {
 		const name = args === "theme" ? "" : args.slice(6).trim();
+		// FIX-ROUND MAJOR 3 (review 0.11.17): thread the host context into theme
+		// discovery — when the tool ctx carries a live ExtensionContext.ui the
+		// HOST list (ui.getAllThemes) is authoritative; without it (subagent/CI
+		// or a ctx with no UI API) discoverPiThemes falls back to the builtin +
+		// ~/.pi/agent/themes filesystem scan, unchanged.
+		const piThemes = discoverPiThemes({ ui: ctx.ui });
 		if (!name) {
-			const available = discoverPiThemes()
-				.map((t) => t.name)
-				.join(", ");
+			const available = piThemes.map((t) => t.name).join(", ");
 			return result(
 				`Usage: team-settings theme <name>\n\nAvailable Pi themes: ${available}\n\nBrowse all: team-settings themes`,
 				{ ...ERR },
 				true,
 			);
 		}
-		const available = discoverPiThemes();
-		const exists = available.some((t) => t.name === name);
+		const exists = piThemes.some((t) => t.name === name);
 		if (!exists) {
-			const hint = available.map((t) => t.name).join(", ");
+			const hint = piThemes.map((t) => t.name).join(", ");
 			return result(
 				`Unknown Pi theme: ${name}\n\nAvailable: ${hint}\n\nCustom themes live in ~/.pi/agent/themes/<name>.json`,
 				{ ...ERR },

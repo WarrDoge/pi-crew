@@ -31,6 +31,26 @@ test("QW11 evidenceStatus: cancelled > failed > completed precedence", () => {
 	assert.equal(evidenceStatusFor(mkResult({ exitCode: 0 })), "completed");
 });
 
+// FIX-ROUND MAJOR 1 (review 0.11.17): child-pi-rpc.ts buildExitStatus now sets
+// `cancelled: abortRequested || hostAbortedSettle`, so a HOST-aborted settle
+// (agent_settled.aborted, pi 1.1.0+) reaches the task runner as a clean-shaped
+// result — exit 0, no error — whose ONLY cancel signal is
+// exitStatus.cancelled. Pre-fix that field stayed false and the run was
+// classified "completed": the worker.cancelled evidence branch in
+// child-executor.ts (the `evidenceStatus === "cancelled"` path that appends the
+// worker.cancelled event) never fired for host aborts.
+test("MAJOR 1 regression: host-aborted shape (exit 0, no error, exitStatus.cancelled) classifies as cancelled", () => {
+	const hostAborted = mkResult({
+		exitCode: 0, // warm-path/normal close exits 0 even when host-aborted
+		exitStatus: { cancelled: true } as any, // as produced by buildExitStatus after the fix
+	});
+	assert.equal(evidenceStatusFor(hostAborted), "cancelled", "host-aborted settle must drive the worker.cancelled branch");
+	// Counterfactual pinning the pre-fix symptom: identical result WITHOUT the
+	// cancelled flag is a genuine clean finish.
+	const clean = mkResult({ exitCode: 0, exitStatus: { cancelled: false } as any });
+	assert.equal(evidenceStatusFor(clean), "completed");
+});
+
 test("QW11 attemptErrorFor: childResult.error is the base error", () => {
 	const err = attemptErrorFor(mkResult({ error: "hard fail", exitCode: 0 }), undefined, "t1");
 	assert.equal(err, "hard fail");

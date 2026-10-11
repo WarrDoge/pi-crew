@@ -20,6 +20,12 @@ export type TeamContext = Pick<ExtensionContext, "cwd"> &
 		onJsonEvent?: (taskId: string, runId: string, event: unknown) => void;
 		config?: PiTeamsConfig;
 		getRunSnapshotCache?: (cwd: string) => RunSnapshotCache;
+		// FIX-ROUND MAJOR 3 (review 0.11.17): the tool-execute ctx is an
+		// ExtensionToolContext (extends ExtensionContext), so `ui` rides along
+		// at runtime even though this type narrowed it away. Optional because
+		// synthesized contexts (subagent/CI/tests) have no live host UI — theme
+		// discovery then keeps its filesystem fallback.
+		ui?: unknown;
 	};
 
 export function withSessionId<T extends Pick<ExtensionContext, "sessionManager">>(ctx: T): T & { sessionId?: string } {

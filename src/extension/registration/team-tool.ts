@@ -323,7 +323,8 @@ interface TeamToolProgressBinder {
 	stop: () => void;
 }
 
-function startTeamToolProgressBinder(onUpdate: OnUpdate | undefined): TeamToolProgressBinder {
+// Exported for the FIX-ROUND MAJOR 2 regression test (durationMs plumbing).
+export function startTeamToolProgressBinder(onUpdate: OnUpdate | undefined): TeamToolProgressBinder {
 	if (!onUpdate) {
 		return { attach: () => undefined, stop: () => undefined };
 	}
@@ -356,6 +357,11 @@ function startTeamToolProgressBinder(onUpdate: OnUpdate | undefined): TeamToolPr
 				status: loaded.manifest.status,
 				runId,
 				startedAt,
+				// FIX-ROUND MAJOR 2 (review 0.11.17): plumb the producer-measured
+				// duration so the formatter consumes a real durationMs instead of
+				// always self-timing from startedAt (B-3 path was built but no
+				// streaming binder fed it).
+				durationMs: Date.now() - startedAt,
 				manifest: loaded.manifest,
 				tasks: loaded.tasks,
 				agents,

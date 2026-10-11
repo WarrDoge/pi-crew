@@ -61,3 +61,6 @@ docs/archive/perf-report-team/
 
 # RR-021 WI-3.1: incremental tsc build-info cache (cold ~5s -> warm ~1.7s)
 node_modules/.cache/pi-crew/
+
+# Local scratch space (ad-hoc probe logs / bench notes — never shipped)
+temp/

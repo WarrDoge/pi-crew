@@ -612,7 +612,14 @@ async function runRpcSession(
 
 			const buildExitStatus = (result: { exitCode: number | null }): WorkerExitStatus => ({
 				exitCode: result.exitCode,
-				cancelled: abortRequested,
+				// FIX-ROUND MAJOR 1 (review 0.11.17): a host-aborted settle
+				// (agent_settled.aborted, pi 1.1.0+) must mark cancelled HERE too —
+				// downstream evidenceStatusFor() reads exitStatus.cancelled (not
+				// result.aborted), so without this a host-cancelled worker settled
+				// with exit 0 classified as "completed" and the worker.cancelled
+				// event never fired. Matches the crash classification 30 lines below
+				// (abortRequested || hostAbortedSettle).
+				cancelled: abortRequested || hostAbortedSettle,
 				timedOut: responseTimeoutHit,
 				killed: hardKilled,
 				...(finalDrainArmed || forcedFinalDrain

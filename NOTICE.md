@@ -36,6 +36,15 @@ pipe).
 
 Current scaffold status: no substantial source files have been copied verbatim; implementation is a fresh scaffold based on documented design lessons.
 
+### OSC 7501 program-status wire format (2026-10-11)
+
+`src/ui/program-status.ts` is VENDORED (adapted) from upstream
+`@earendil-works/pi-tui` v1.1.0 `packages/tui/src/program-status.ts`
+(MIT © 2025 Mario Zechner). Upstream is a pure-declaration module (no
+imports); the vendoring rationale (no peer version floor + the symbol is not
+re-exported from the package root before 1.1.0) is documented in the file
+header and `src/ui/pi-ui-compat.ts`.
+
 ## crew-vibes font assets
 
 - `assets/runner-spritesheet.png` and the 16 runner glyphs (U+E700..U+E70F) traced
