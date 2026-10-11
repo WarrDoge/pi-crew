@@ -49,7 +49,7 @@ test("[steer-race-1] live bug #4 timeline: steer between manifest creation and e
 	// NEW: baseline = manifest creation → steer mtime (.088) ≥ baseline → skip.
 	assert.ok(
 		skipTruncate(T.steerAppendedAt, baseline),
-		"steer accepted before executor start must survive the on-spawn truncate (battery bug #4 shape: \"Steer delivered\" + 0-byte file)",
+		'steer accepted before executor start must survive the on-spawn truncate (battery bug #4 shape: "Steer delivered" + 0-byte file)',
 	);
 	// OLD (pre-fix) formula for contrast — this is what wiped the live steer:
 	assert.ok(

@@ -862,13 +862,13 @@ export async function runChildProcessTask(ctx: TaskExecutionContext): Promise<Ta
 							try {
 								const safeSteeringPath = resolveRealContainedPath(steeringDir, `${task.id}.jsonl`);
 								// F7 fix, revised 2026-10-10 (battery bug #4): baseline = the run's
-							// creation (see steerRaceBaselineMs) — the earliest instant a steer
-							// could have been accepted, so steers racing in between manifest
-							// creation and executor start survive this truncate. Residue older
-							// than the run is impossible (fresh artifacts root), so the wipe
-							// path stays armed for it. stat→truncate gap is microseconds; a steer
-							// landing inside it is lost — best-effort, same trade-off as before
-							// (reliable channel: task.pendingSteers).
+								// creation (see steerRaceBaselineMs) — the earliest instant a steer
+								// could have been accepted, so steers racing in between manifest
+								// creation and executor start survive this truncate. Residue older
+								// than the run is impossible (fresh artifacts root), so the wipe
+								// path stays armed for it. stat→truncate gap is microseconds; a steer
+								// landing inside it is lost — best-effort, same trade-off as before
+								// (reliable channel: task.pendingSteers).
 								const racedSteerBaseMs = steerRaceBaselineMs(manifest, taskDispatchStartedAtMs);
 								let racedSteerArrived = false;
 								try {

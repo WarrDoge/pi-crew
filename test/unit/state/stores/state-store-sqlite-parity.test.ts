@@ -13,7 +13,6 @@
  * test/integration/state-store-sqlite-crash.test.ts.
  */
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -21,7 +20,6 @@ import test from "node:test";
 import { __test__closeAllSqliteStores, getSqliteRunStateStore, sqliteDbPath } from "../../../../src/state/stores/sqlite-run-state.ts";
 import {
 	__test__clearManifestCache,
-	createRunPaths,
 	createRunManifest,
 	loadRunManifestById,
 	loadRunManifestByIdAsync,
@@ -341,11 +339,17 @@ test("U8 FIX: saveRunTasksCoalesced mirrors into sqlite (live-caught P2 probe 20
 			__test__clearManifestCache();
 			const { manifest, tasks, paths } = createRunManifest({ cwd, team, workflow, goal: "coalesced mirror" });
 			// The hot path from persistSingleTaskUpdate — coalesced, NOT plain saveRunTasks:
-			saveRunTasksCoalesced(manifest, tasks.map((t) => ({ ...t, status: "completed" as const })), false, "best-effort");
+			saveRunTasksCoalesced(
+				manifest,
+				tasks.map((t) => ({ ...t, status: "completed" as const })),
+				false,
+				"best-effort",
+			);
 			const fromDb = getSqliteRunStateStore(paths.stateRoot).loadManifestAndTasks();
 			assert.ok(fromDb, "db readable");
 			assert.ok(fromDb.tasks.length > 0, "tasks present");
-			for (const t of fromDb.tasks) assert.equal(t.status, "completed", `task ${t.id} must be completed in the db, not stuck at createRun status`);
+			for (const t of fromDb.tasks)
+				assert.equal(t.status, "completed", `task ${t.id} must be completed in the db, not stuck at createRun status`);
 		});
 	} finally {
 		__test__closeAllSqliteStores();

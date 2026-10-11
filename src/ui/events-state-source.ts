@@ -166,7 +166,13 @@ function createEventsStateSource(
 			 * committed state (the empty root at creation) instead of wiping
 			 * committed events/seq on a transient read error (review MINOR-1). */
 		}
-		if (scanned !== undefined && scanned.length === 0 && scannedSeq === 0 && (seq > 0 || events.length > 0) && !fs.existsSync(eventsPath)) {
+		if (
+			scanned !== undefined &&
+			scanned.length === 0 &&
+			scannedSeq === 0 &&
+			(seq > 0 || events.length > 0) &&
+			!fs.existsSync(eventsPath)
+		) {
 			// readEventsCursor reports a MISSING log as an empty cursor — but a
 			// log that carried committed events a beat ago and now does not exist
 			// is a transient disappearance (run dir moving / the rename→wx-create

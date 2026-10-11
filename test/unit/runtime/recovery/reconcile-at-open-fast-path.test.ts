@@ -425,7 +425,11 @@ test("U9 fast-path: an abandoned `waiting` task (ask past TTL / waitState lost) 
 			const running = reloaded.tasks.find((t) => t.id === tasks[0].id)!;
 			const wasWaiting = reloaded.tasks.find((t) => t.id === parked.id)!;
 			assert.equal(running.status, "queued", "running task requeued as before");
-			assert.equal(wasWaiting.status, "queued", "abandoned waiting task must be requeued too — `team resume` requeues queued, not waiting");
+			assert.equal(
+				wasWaiting.status,
+				"queued",
+				"abandoned waiting task must be requeued too — `team resume` requeues queued, not waiting",
+			);
 			assert.equal(wasWaiting.waiting, undefined, "no parked wait state on the requeued task");
 			assert.equal(wasWaiting.heartbeat, undefined);
 			assert.deepEqual(wasWaiting.attempts, parked.attempts, "attempt history preserved");
