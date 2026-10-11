@@ -46,8 +46,31 @@ const cases: Record<string, { wallMs: number; budgetMs: number; pass: boolean; n
 {
 	// Warm: same cwd, DIFFERENT keywords — discovery must come from cache,
 	// only scoring re-runs. This is the per-task steady state inside a run.
+	//
+	// R3-2 (2026-10-11): the previous warm query ("verify package exports
+	// typecheck bundle" — 5 abstract tokens) was retired. Under the G23b
+	// floor (MIN_SUGGEST_SCORE=0.5) its best repo file scores 0.42 — a single
+	// keyword hit, (1/5)*0.6 + 0.3 — TIED with 40+ runtime-state grazers
+	// (state/runs/**/03_verify/status.json matching "verify"), so the old
+	// pre-G23b PASS was satisfied by exactly the junk suggestions G23b
+	// deliberately blocks, with no ordering signal to separate gold from
+	// junk in the tie. Measured: NO floor value separates the bands (real
+	// 1-hit gold 0.42 ≤ grazer junk 0.45–0.47), so the floor stays and the
+	// query moves to the regime real per-task queries live in: module-path
+	// vocabulary that multi-hits genuinely relevant paths (G23b's own note:
+	// "useful path-only scores reach ~0.64"). This replacement models the
+	// session's next task; measured 2026-10-11 it puts the true gold first
+	// (test/unit/runtime/task-runner/retrieval-orchestrator.test.ts 0.60,
+	// src/runtime/task-runner/retrieval-orchestrator.ts 0.56; 28 files ≥
+	// floor). Unit-pinned in retrieval-orchestrator.test.ts ("R3-2: warm
+	// cache … non-empty") — see CHANGELOG 0.11.17 and
+	// pi-crew-upgrade-research-round3-deep.md §4.2.
 	const t0 = performance.now();
-	const r = await runRetrievalCycle("verify package exports typecheck bundle", "typecheck the bundle", repoRoot);
+	const r = await runRetrievalCycle(
+		"Fix the retrieval orchestrator floor in the task runner module, then re-run the retrieval orchestrator test",
+		"Adjust the retrieval orchestrator min score floor and keep the task runner test suite green",
+		repoRoot,
+	);
 	const wallMs = ms(t0);
 	cases.retrievalWarmCacheHit = {
 		wallMs,

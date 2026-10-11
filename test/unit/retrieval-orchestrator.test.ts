@@ -446,3 +446,65 @@ test("G23b: all candidates below floor → empty files + no section header", asy
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}
 });
+
+/**
+ * R3-2 (2026-10-11) regression: warm-cache retrieval must stay NON-EMPTY.
+ *
+ * Evidence chain (b13 bench + live runs, see round3-deep §4.2): after the
+ * G23b floor, a query only surfaces files in the multi-hit band —
+ * path-only score (h/N)*0.6 + min(0.3*h, 0.4) ≥ 0.5 needs h ≥ N/6. The
+ * retired b13 warm query (5 abstract tokens) topped out at 0.42 (single
+ * hit) TIED with runtime-state grazers, which G23b correctly zeroes — and
+ * no floor value separates those bands (real 1-hit gold 0.42 ≤ grazer junk
+ * 0.45–0.47), so the floor is kept and the regime that must keep working
+ * is pinned here, bench-harness free: same cwd (discovery cache hit), NEW
+ * keywords that multi-hit genuinely relevant paths.
+ */
+function makeR32FixtureDir(): string {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-r32-fixture-"));
+	fs.mkdirSync(path.join(cwd, "src"), { recursive: true });
+	// Gold files whose paths hit MULTIPLE keywords of their query (created
+	// before the cold call so the cached discovery includes them).
+	fs.writeFileSync(path.join(cwd, "src", "alpha-beta-gamma.ts"), "// r3-2 warm gold: alpha beta gamma\n", "utf-8");
+	fs.writeFileSync(path.join(cwd, "src", "omega-sigma-tau.ts"), "// r3-2 cold gold: omega sigma tau\n", "utf-8");
+	return cwd;
+}
+
+test("R3-2: warm cache (cached discovery, new keywords) stays non-empty for multi-hit queries", async () => {
+	const cwd = makeR32FixtureDir();
+	__test_resetRipgrepCache();
+	__test_resetDiscoveredCache();
+	try {
+		const rg = await detectRipgrep();
+		if (!rg.available) return; // discovery cache only exists on the rg path — skip where rg is missing
+
+		// Cold call (task A): populates the per-cwd discovery cache and finds
+		// its own multi-hit gold.
+		const cold = await runRetrievalCycle("omega sigma tau", "cold phase omega", cwd);
+		assert.ok(cold.files.length > 0, `cold call should find the omega-sigma-tau gold, got ${JSON.stringify(cold.files)}`);
+		// A NEW strongly-matching file appears AFTER discovery was cached.
+		fs.writeFileSync(path.join(cwd, "src", "late-added-alpha-beta-gamma.ts"), "// late\n", "utf-8");
+
+		// Warm call (task B): same cwd, different keywords — the per-task
+		// steady state. Discovery must come from the cache (proven by the late
+		// file staying invisible) and the multi-hit gold must still surface.
+		const warm = await runRetrievalCycle("alpha beta gamma delta epsilon zeta eta theta", "alpha beta gamma probe", cwd);
+		assert.ok(warm.files.length > 0, "warm-cache retrieval must stay non-empty (R3-2 regression)");
+		const paths = warm.files.map((f) => f.path);
+		assert.ok(
+			paths.some((p) => p.endsWith("alpha-beta-gamma.ts")),
+			`warm multi-hit gold (3/8 keyword hits → 0.625) must be suggested, got ${JSON.stringify(warm.files)}`,
+		);
+		assert.ok(
+			!paths.some((p) => p.includes("late-added")),
+			"warm call must be served by the cached discovery (late file invisible) — proves the cache hit",
+		);
+		// Every suggested file cleared the G23b floor — the non-empty result
+		// comes from the multi-hit band, not from a floor bypass.
+		for (const f of warm.files) {
+			assert.ok(f.score >= MIN_SUGGEST_SCORE, `suggested ${f.path} scored ${f.score} < floor ${MIN_SUGGEST_SCORE}`);
+		}
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
