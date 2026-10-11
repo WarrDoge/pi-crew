@@ -280,11 +280,53 @@ function runTmpSweep(suiteStartMs) {
 	}
 }
 
+/**
+ * Global crew-home isolation (2026-10-11 leak fix).
+ *
+ * Unit fixtures that create runs from tmpdir cwds resolve scopeBaseRoot()'s
+ * no-repo fallback to the REAL user root (findRepoRoot stops at os.tmpdir →
+ * userCrewRoot() = ~/.pi/agent/extensions/pi-crew), so every such test
+ * leaked run dirs into the user's live crew state — and every live Pi
+ * session's async-notifier (listRecentRuns unions the user root) then
+ * toasted those fixture runs as real failures: "Error: pi-crew run failed:
+ * team_... (inline-seam-fixture/none)".
+ *
+ * Redirecting the crew home for the whole suite makes those fallback writes
+ * land in a per-suite temp dir instead. BOTH names of the mirror pair are
+ * set: PI_TEAMS_HOME WINS (env-vars.ts mirrorPrecedence "teams"), so setting
+ * only PI_CREW_HOME would be silently overridden by an inherited
+ * PI_TEAMS_HOME. PI_CREW_SKIP_HOME_CHECK (set below) already exempts the
+ * tmpdir home from config.ts's outside-user-home escape check.
+ *
+ * Lazily created so importing this module for unit tests (resolveExitCode
+ * and friends) never touches the filesystem. Named `pi-crew-*` so a home
+ * orphaned by a killed runner is swept by a later suite's pre-existing-
+ * debris tmp-sweep. Opt-out for debugging against the real home:
+ * PI_CREW_TEST_NO_HOME_ISOLATION=1.
+ */
+let cachedIsolatedHome = "";
+function isolatedCrewHome() {
+	if (!cachedIsolatedHome) cachedIsolatedHome = mkdtempSync(path.join(tmpdir(), "pi-crew-test-home-"));
+	return cachedIsolatedHome;
+}
+function cleanIsolatedCrewHome() {
+	if (!cachedIsolatedHome) return;
+	try {
+		rmSync(cachedIsolatedHome, { recursive: true, force: true });
+	} catch {
+		/* best-effort — never affects the test verdict */
+	}
+	cachedIsolatedHome = "";
+}
+
 function buildChildEnv() {
 	const env = {
 		...process.env,
 		NODE_ENV: "test",
 		PI_CREW_SKIP_HOME_CHECK: "1",
+		...(process.env.PI_CREW_TEST_NO_HOME_ISOLATION === "1"
+			? {}
+			: { PI_CREW_HOME: isolatedCrewHome(), PI_TEAMS_HOME: isolatedCrewHome() }),
 		// F-01: trust project-sourced .dwf.ts fixtures under test. The test
 		// runner is a trusted context (our own fixtures, never hostile), so
 		// opt into the project-dwf trust gate globally. Individual unit
@@ -405,6 +447,7 @@ if (watchMode) {
 		process.on(sig, () => child.kill(sig));
 	}
 	child.on("exit", (code, signal) => {
+		cleanIsolatedCrewHome();
 		if (signal) process.kill(process.pid, signal);
 		else process.exit(code ?? 0);
 	});
@@ -530,6 +573,7 @@ if (watchMode) {
 		// Post-suite sweep of pre-existing leaked test tmpdirs (best-effort).
 		runTmpSweep(suiteStartMs);
 		cleanTapDir();
+		cleanIsolatedCrewHome();
 		process.exit(shardFailed ? 1 : 0);
 	}
 
@@ -555,10 +599,12 @@ if (watchMode) {
 		);
 		runTmpSweep(suiteStartMs);
 		cleanTapDir();
+		cleanIsolatedCrewHome();
 		process.exit(1);
 	}
 	runTmpSweep(suiteStartMs);
 	cleanTapDir();
+	cleanIsolatedCrewHome();
 	process.exit(resolveExitCode(result));
 }
 

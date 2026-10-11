@@ -1,5 +1,30 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **fix(state): stop unit-test runs leaking into the real user crew root** — the
+  test runner now isolates the crew home per suite (`scripts/test-runner.mjs`
+  sets BOTH `PI_CREW_HOME` and `PI_TEAMS_HOME` to a per-suite temp dir; PI_TEAMS_HOME
+  wins the mirror pair, so setting only one is silently defeatable; opt-out
+  `PI_CREW_TEST_NO_HOME_ISOLATION=1`; cleanup on all exit paths). Until now every
+  fixture that created a run from a bare `/tmp` cwd routed its state to
+  `~/.pi/agent/extensions/pi-crew/` via `scopeBaseRoot()`'s no-repo fallback — and
+  every live Pi session's async-notifier toasted those fixture failures as
+  `Error: pi-crew run failed: team_… (inline-seam-fixture/none)` (104 leaked run
+  dirs since June; quarantined + cleaned 2026-10-11).
+- **fix(run-index): hide terminal bare-temp-cwd runs from non-temp crew roots**
+  (defense-in-depth for the same leak) — `collectRuns()`'s 2.19 temp guard now
+  also covers the CWD dimension: in NON-temp roots (the real project/user roots)
+  a TERMINAL run whose cwd sits under a temp dir WITHOUT repo markers is a
+  test/isolated-workspace fixture parked by the no-repo fallback and is hidden.
+  Temp-root scans keep their original semantics (active runs liveness-gated,
+  terminal runs listed — prune/health consumers rely on it); temp cwds WITH repo
+  markers (deliberate /tmp projects, isolated worktrees) and active bare-temp-cwd
+  runs stay listed. By-ID resolution (`team status <runId>`) is unchanged.
+  Covered by `test/unit/extension/core/run-index-temp-cwd.test.ts`.
+
 ## [0.11.17] — upgrade wave A: pi-1.1.0 adoption, central env registry, OSC 7501 program-status (2026-10-11)
 
 Implements the 10-item Wave A from `pi-crew-upgrade-research-round2.md` +

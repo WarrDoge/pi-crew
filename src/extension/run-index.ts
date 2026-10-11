@@ -19,6 +19,19 @@ function readManifest(filePath: string): TeamRunManifest | undefined {
 	}
 }
 
+/**
+ * Temp-workspace origins (2.19): run state parked under these roots, or run
+ * CWDs living under them, belong to tests/isolated workspaces — "phantom
+ * runs" that must not appear in production dashboards unless the process is
+ * actually alive.
+ */
+const TEMP_DIR_ROOTS = [os.tmpdir(), "/var/tmp", "/tmp"];
+
+function isTempWorkspacePath(p: string | undefined): boolean {
+	if (!p) return false;
+	return TEMP_DIR_ROOTS.some((t) => p.startsWith(t + path.sep));
+}
+
 function collectRuns(root: string, maxEntries?: number, signal?: AbortSignal): TeamRunManifest[] {
 	const runsRoot = path.join(root, DEFAULT_PATHS.state.runsSubdir);
 	if (!fs.existsSync(runsRoot)) return [];
@@ -26,8 +39,7 @@ function collectRuns(root: string, maxEntries?: number, signal?: AbortSignal): T
 	// 2.19 — skip temp directories to avoid phantom runs from test/isolated workspaces.
 	// Runs in /tmp/ are typically from tests or isolated worktrees and should not
 	// appear in production dashboards unless the process is actually alive.
-	const tempDirs = [os.tmpdir(), "/var/tmp", "/tmp"];
-	const isTempRoot = tempDirs.some((t) => root.startsWith(t + path.sep));
+	const isTempRoot = isTempWorkspacePath(root);
 	const token = createCancellationToken({ signal });
 	const entries = fs
 		.readdirSync(runsRoot, { withFileTypes: true })
@@ -49,9 +61,11 @@ function collectRuns(root: string, maxEntries?: number, signal?: AbortSignal): T
 				!fs.existsSync(manifest.cwd)
 			)
 				continue;
-			// 2.19 — for runs in temp directories, verify the background process is alive.
-			// Without this, runs that completed/crashed but left stale manifests will still show.
-			if (isTempRoot && (manifest.status === "running" || manifest.status === "queued" || manifest.status === "planning")) {
+			// 2.19 — TEMP-ROOT scans keep the original semantics: active runs are
+			// gated by runner liveness; terminal runs stay listed (prune/health
+			// consumers in isolated homes rely on it).
+			const activeStatus = manifest.status === "running" || manifest.status === "queued" || manifest.status === "planning";
+			if (isTempRoot && activeStatus) {
 				const asyncPidPath = path.join(path.dirname(manifest.stateRoot), "async.pid");
 				try {
 					const pidData = JSON.parse(fs.readFileSync(asyncPidPath, "utf-8"));
@@ -67,6 +81,17 @@ function collectRuns(root: string, maxEntries?: number, signal?: AbortSignal): T
 					/* no async.pid or parse error — keep the run */
 				}
 			}
+			// 2026-10-11 user-root leak hardening (the CWD dimension). In NON-temp
+			// roots (the real project/user roots), a TERMINAL run whose cwd sits in
+			// a temp dir WITHOUT repo markers is a test/isolated-workspace fixture
+			// parked there by scopeBaseRoot()'s no-repo fallback — every live
+			// session's async-notifier toasted those failures as
+			// "Error: pi-crew run failed: … (inline-seam-fixture/none)". Hide them.
+			// Temp cwds WITH markers stay listed (deliberate /tmp projects,
+			// isolated worktrees); active bare-temp-cwd runs stay listed (the
+			// no-repo fallback also serves users working from scratch dirs, and
+			// the toast only fires on the terminal transition anyway).
+			if (!isTempRoot && !activeStatus && isTempWorkspacePath(manifest.cwd) && findRepoRoot(manifest.cwd) === undefined) continue;
 			results.push(manifest);
 		} catch {
 			/* skip unreadable manifests */
