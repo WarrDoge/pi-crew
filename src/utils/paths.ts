@@ -51,14 +51,29 @@ export function packageRoot(): string {
 
 let cachedUserPiRoot: { home: string; value: string } | undefined;
 
+/**
+ * Junk-literal path guard (shared, F4 pattern): shell expansion of an unset
+ * variable yields the LITERAL string "undefined"/"null" (e.g.
+ * `PI_TEAMS_HOME=$UNSET_VAR` in .env or a JSON-serialized undefined), which
+ * path.join happily turns into a relative `"undefined/.pi/…"` junk tree next
+ * to the process cwd (the stray `pi-crew/undefined/` dir was exactly this).
+ * userPiRoot() has guarded its own env read inline since F4; config.ts
+ * resolveHomeDir() and state-store createRunPaths() adopt the same rule
+ * through this helper. Input is trimmed first so `" undefined "` is caught.
+ */
+export function isJunkPathLiteral(value: string | null | undefined): value is null | undefined | "" {
+	const trimmed = value?.trim();
+	return trimmed === undefined || trimmed === "" || trimmed === "undefined" || trimmed === "null";
+}
+
 export function userPiRoot(): string {
 	// F4: a misconfigured PI_TEAMS_HOME can be the literal string "undefined"
 	// (e.g. PI_TEAMS_HOME=$UNSET_VAR in a shell), which would build paths like
 	// "undefined/.pi/agent" relative to cwd and silently create a junk "undefined/"
-	// tree. Treat the literal "undefined" (and empty) as unset and fall back to
-	// os.homedir().
+	// tree. Guard via the shared helper — also catches the literal "null"
+	// (round3 audit extension of the same F4 hole).
 	const rawHome = getCrewEnv("PI_CREW_HOME")?.trim();
-	const home = rawHome && rawHome !== "undefined" ? rawHome : os.homedir();
+	const home = isJunkPathLiteral(rawHome) ? os.homedir() : rawHome;
 	// NEW-P2: memoize but KEY ON HOME. Tests (withIsolatedHome / isolateHome)
 	// change PI_TEAMS_HOME mid-process; an unkeyed cache would leak the first
 	// test's root across the suite (broken isolation — surfaced by active-run-

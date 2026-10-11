@@ -778,14 +778,19 @@ function usageFromStats(stats: unknown): UsageState | undefined {
  * (in-process abort is cooperative-only; see agent-loop.ts:798-830).
  */
 export class LiveSessionHungToolError extends Error {
-	constructor(
-		label: string,
-		readonly timeoutMs: number,
-		readonly graceMs: number,
-	) {
+	// R3-1: TS parameter properties (`constructor(readonly x)`) are rejected by
+	// --experimental-strip-types (strip-only mode), breaking the bench tooling
+	// (test/bench loads this file outside tsx). Declare plain fields and assign
+	// them in the constructor body instead — same public API.
+	readonly timeoutMs: number;
+	readonly graceMs: number;
+
+	constructor(label: string, timeoutMs: number, graceMs: number) {
 		super(
 			`${label} hung: prompt did not settle within ${graceMs}ms after the ${timeoutMs}ms timeout and cooperative abort — dropping session reference and failing the task (escape hatch).`,
 		);
+		this.timeoutMs = timeoutMs;
+		this.graceMs = graceMs;
 		this.name = "LiveSessionHungToolError";
 	}
 }

@@ -6,7 +6,7 @@ import { errors } from "../../errors.ts";
 import type { TeamConfig } from "../../teams/team-config.ts";
 import { createRunId, createTaskId } from "../../utils/ids.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
-import { findRepoRoot, projectCrewRoot, userCrewRoot } from "../../utils/paths.ts";
+import { findRepoRoot, isJunkPathLiteral, projectCrewRoot, userCrewRoot } from "../../utils/paths.ts";
 import { assertSafePathId, resolveContainedRelativePath, resolveRealContainedPath } from "../../utils/safe-paths.ts";
 import { toPiSessionId } from "../../utils/session-utils.ts";
 import type { WorkflowConfig } from "../../workflows/workflow-config.ts";
@@ -310,7 +310,11 @@ function validateRunManifestPaths(cwd: string, runId: string, manifest: TeamRunM
 }
 
 export function createRunPaths(cwd: string, runId = createRunId()): RunPaths {
-	if (!cwd || typeof cwd !== "string") {
+	if (!cwd || typeof cwd !== "string" || isJunkPathLiteral(cwd)) {
+		// Junk-literal cwd ("undefined"/"null" from unset-var expansion) previously
+		// scoped the run under a relative "undefined/.pi/teams/state/runs/…"
+		// tree (round3 audit — the stray pi-crew/undefined/ dir). Reject it like
+		// any invalid cwd instead of creating junk directories.
 		throw new Error(`Invalid cwd: ${cwd}`);
 	}
 	assertSafePathId("runId", runId);

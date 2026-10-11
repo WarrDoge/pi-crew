@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { atomicWriteFile } from "../state/atomic-write.ts";
 import { withFileLockSync } from "../state/coordination/locks.ts";
 import { logInternalError } from "../utils/internal-error.ts";
-import { projectCrewRoot, projectPiRoot } from "../utils/paths.ts";
+import { isJunkPathLiteral, projectCrewRoot, projectPiRoot } from "../utils/paths.ts";
 import { mergeConfig } from "./config-merge.ts";
 import { parseConfig, parseConfigWithWarnings } from "./config-validation.ts";
 import { DEFAULT_BROKER, DEFAULT_NESTING, DEFAULT_PERSISTENCE, resolveBrokerEnvOverride } from "./defaults.ts";
@@ -164,6 +164,11 @@ export function invalidateConfigCache(): void {
 function resolveHomeDir(): string {
 	const envValue = getCrewEnv("PI_CREW_HOME")?.trim();
 	const defaultHome = os.homedir();
+	// Junk-literal guard (round3 audit, shared F4 helper): PI_CREW_HOME=$UNSET_VAR
+	// expands to the literal "undefined"/"null" — previously fell through to the
+	// containment check and could anchor config paths on a junk
+	// "undefined/.pi/…" tree. Treat as unset, fall back to the real home.
+	if (isJunkPathLiteral(envValue)) return defaultHome;
 	if (!envValue) return defaultHome;
 	// FIX (Round 14): When PI_TEAMS_HOME is explicitly set, validate that
 	// it points within the real user home directory. This prevents a

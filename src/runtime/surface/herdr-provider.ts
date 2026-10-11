@@ -20,10 +20,16 @@
  * pane.closed). Subscription socket EOF (server chết/restart) → "mux-dead"
  * cho mọi handle còn sống.
  *
- * closeSurface A1: herdr không có signal-theo-pid trên socket API —
- * `pane.close` để herdr tự terminate cả cây process trong pane, nên graceful
- * và force cùng đường (khác tmux provider). TODO(A2): kill theo pid worker
- * từ manifest (pane.process_info) trước khi pane.close cho graceful thật.
+ * closeSurface A1/A2: herdr không có signal-theo-pid trên socket API. Force
+ * path dùng `pane.close` — herdr tự terminate cả cây process trong pane
+ * (nguyên vẹn như trước). Graceful path (A2, TODO→DONE 2026-10-11): khi host
+ * cung cấp pid worker qua deps.resolveWorkerPid (nguồn dự kiến:
+ * manifest.surface.workerPids đảo ngược panes — `pane.process_info` chưa có
+ * trên wire 0.8.2 đã verify), SIGTERM cây process worker TRƯỚC qua
+ * killProcessTree của child-pi (group kill + escalation SIGKILL sẵn có, tự
+ * no-throw), đợi grace window cho worker flush, rồi pane.close vẫn chạy làm
+ * kill-tree fallback (idempotent). Không wire resolveWorkerPid (default
+ * null) → graceful giữ nguyên hành vi cũ (chỉ pane.close).
  */
 
 import * as fs from "node:fs";
@@ -31,8 +37,12 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { killProcessTree } from "../child-pi/child-pi-kill.ts";
 import type { SurfaceDetection, SurfaceExitReason, SurfaceHandle, SurfaceProvider, SurfaceSpawnOpts } from "./surface-provider.ts";
 import { MAX_PANES_PER_TAB, splitDirectionFor } from "./surface-provider.ts";
+
+/** Grace window giữa SIGTERM worker pid và pane.close fallback (đối chiều tmux provider). */
+const GRACEFUL_TERM_WAIT_MS = 3000;
 
 /**
  * Socket abstraction injectable. Quy ước EOF/error: onLine được gọi đúng một
@@ -51,6 +61,18 @@ export interface HerdrProviderDeps {
 	connect?: (path: string) => HerdrSocket;
 	/** Nguồn HERDR_SOCKET_PATH / HERDR_SESSION (default process.env). */
 	env?: NodeJS.ProcessEnv;
+	/**
+	 * A2 graceful: pane id → pid worker. Host tra nguồn pid của mình (dự kiến
+	 * manifest.surface.workerPids đảo ngược panes map). Default trả null →
+	 * graceful về đúng hành vi cũ (chỉ pane.close). Caller được best-effort
+	 * bảo vệ (try/catch tại closeSurface) nhưng KHÔNG nên throw.
+	 */
+	resolveWorkerPid?: (paneId: string) => number | null;
+	/** A2 graceful: SIGTERM cây process theo pid (default killProcessTree của
+	 * child-pi — no-throw, group kill + SIGKILL escalation). */
+	killTree?: (pid: number) => void;
+	/** A2 graceful: chờ grace window sau SIGTERM (default setTimeout). */
+	sleep?: (ms: number) => Promise<void>;
 }
 
 /** herdr socket path theo docs: HERDR_SOCKET_PATH → HERDR_SESSION → default. */
@@ -127,6 +149,9 @@ interface PaneWatcher {
 export function createHerdrProvider(deps: HerdrProviderDeps = {}): SurfaceProvider {
 	const env = deps.env ?? process.env;
 	const connect = deps.connect ?? defaultConnect;
+	const resolveWorkerPid = deps.resolveWorkerPid ?? (() => null);
+	const killTree = deps.killTree ?? ((pid: number) => killProcessTree(pid));
+	const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
 	const watchers = new Map<string, PaneWatcher>();
 	let reqSeq = 0;
@@ -487,10 +512,36 @@ export function createHerdrProvider(deps: HerdrProviderDeps = {}): SurfaceProvid
 			return result.read?.text ?? "";
 		},
 
-		async closeSurface(handle: SurfaceHandle, _opts?: { force?: boolean }): Promise<void> {
+		async closeSurface(handle: SurfaceHandle, opts?: { force?: boolean }): Promise<void> {
 			assertHerdrHandle(handle);
-			// A1: graceful lẫn force đều pane.close — herdr terminate cả cây
-			// process trong pane (xem header TODO(A2) cho graceful theo pid).
+			// A2 (graceful kill-by-pid, TODO→DONE): không force + host biết pid
+			// worker → SIGTERM cây process worker trước (grace window cho worker
+			// flush stdout/đóng session), pane.close sau đó vẫn chạy — vừa là
+			// kill-tree fallback (herdr terminate cả cây trong pane) vừa dọn shell.
+			// Mọi bước best-effort NO-THROW: pid đã chết (killTree tự nuốt ESRCH),
+			// resolveWorkerPid/sleep throw, pid rác (0/1/âm) — đều không chặn close.
+			if (!opts?.force) {
+				let pid: number | null = null;
+				try {
+					pid = resolveWorkerPid(handle.id);
+				} catch {
+					pid = null; // seam của host — không để lỗi seam chặn close
+				}
+				if (typeof pid === "number" && Number.isInteger(pid) && pid > 1) {
+					try {
+						killTree(pid);
+					} catch {
+						// best-effort — signal fail không được chặn pane.close
+					}
+					try {
+						await sleep(GRACEFUL_TERM_WAIT_MS);
+					} catch {
+						// timer fault — tiếp tục close
+					}
+				}
+			}
+			// A1: pane.close (force path nguyên vẹn như cũ) — herdr terminate cả cây
+			// process trong pane.
 			try {
 				await call("pane.close", { pane_id: handle.id });
 			} catch (err) {
