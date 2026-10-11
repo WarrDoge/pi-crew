@@ -113,6 +113,72 @@ Use scaffold mode only when you want durable prompts/artifacts without launching
 }
 ```
 
+## Hybrid 2-tier workers: embedded tier (U11, DEFAULT-OFF)
+
+`pi-crew` ships a second worker tier — the **embedded tier**: the worker's Pi
+session runs **in-process** (the U4 live-session stack) instead of a child
+process. It trades subprocess crash isolation for ~instant spawn, shared-slot
+steering, and zero orphan risk. The subprocess tier stays the **only** tier
+unless you explicitly opt roles in — with `runtime.embeddedWorkers` absent or
+`enabled: false`, behavior is byte-identical to the default (no imports, no
+events, no budget reads).
+
+Opt in per role (roles NOT listed always run as subprocess):
+
+```json
+{
+  "action": "run",
+  "team": "default",
+  "goal": "Research + implement",
+  "config": {
+    "runtime": {
+      "embeddedWorkers": {
+        "enabled": true,
+        "roles": ["explorer", "verifier"],
+        "maxConcurrent": 2,
+        "faultThreshold": 2
+      }
+    }
+  }
+}
+```
+
+- `roles` — roles allowed to run embedded. `isolationPolicy.isolatedRoles`
+  and the nesting guard (`PI_CREW_DEPTH > 0`) ALWAYS beat the opt-in: a
+crash-isolated or nested worker never leaves the subprocess tier. The
+  legacy `runtime.mode: "live-session"` path is unaffected by this block.
+- `maxConcurrent` — ceiling on concurrently in-flight embedded sessions
+  (default `max(1, floor(worker-cap/2))`). At the ceiling, new tasks fail-fast
+  back to the subprocess tier immediately (never queue on the ceiling).
+- `faultThreshold` — per-task budget before that task is permanently rerouted
+  to subprocess (default `2`). Aborts/cancellations never count.
+
+**Safety model** (all enforced only on the embedded path, fail-closed):
+
+- **Builtin-tools-only** — no MCP/extension tools, verified after apply;
+  degradation fails the task instead of running unsandboxed.
+- **Provider `timeoutMs`** — every model HTTP call is clamped so a hung
+  provider cannot hold a worker slot; concurrent sessions share one clamped
+  registration restored exactly when the last one leaves.
+- **Turn-count watchdog** — a turn-spinning session that ignores the soft
+  wrap-up is disposed after a bounded grace.
+- **Shared slot budget** — embedded and subprocess workers draw from the SAME
+  global worker cap; there is no concurrency bypass for the embedded tier.
+- **Blast-radius guard** — a process-level `uncaughtException` guard
+  quarantines (dispose + unregister) every in-flight embedded session and
+  keeps the host alive, bounded by a circuit breaker (20 quarantines → normal
+  crash behavior); memory metrics are emitted rate-limited and ring-capped.
+- **Global-state asserts** — factory-surface and services-cache post-condition
+  checks fail/fault loudly on drift.
+
+Automatic fallback: after `faultThreshold` counted embedded faults (fault kinds
+like `session-error`, `hung-tool`, `turn-watchdog`), the task reroutes to the
+subprocess tier for all remaining attempts — sticky across retries and
+recovery (persisted in `task.diagnostics.embeddedTier`). Routing decisions and
+fallbacks are visible as `tier.decision` / `tier.fault` / `tier.fallback`
+structured events; embedded-session telemetry as `live-session.embedded_*`
+events.
+
 ## Async run
 
 ```json

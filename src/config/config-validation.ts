@@ -312,6 +312,28 @@ function parseSurfacePolicy(value: unknown): CrewRuntimeConfig["surface"] | unde
 	};
 }
 
+/** U11 (hybrid 2-tier worker model): embedded-tier opt-in policy. Same
+ *  field-wise-drop discipline as parseIsolationPolicy — invalid fields are
+ *  dropped silently (never thrown) and an all-invalid block collapses to
+ *  undefined so the tier stays DEFAULT-OFF for malformed input. */
+function parseEmbeddedWorkersPolicy(value: unknown): CrewRuntimeConfig["embeddedWorkers"] | undefined {
+	const obj = asRecord(value);
+	if (!obj) return undefined;
+	const enabled = parseWithSchema(Type.Boolean(), obj.enabled);
+	const roles = parseStringList(obj.roles);
+	const maxConcurrent = parsePositiveInteger(obj.maxConcurrent, 1024);
+	const faultThreshold = parsePositiveInteger(obj.faultThreshold, 100);
+	if (enabled === undefined && roles === undefined && maxConcurrent === undefined && faultThreshold === undefined) {
+		return undefined;
+	}
+	return {
+		...(enabled !== undefined ? { enabled } : {}),
+		...(roles !== undefined ? { roles } : {}),
+		...(maxConcurrent !== undefined ? { maxConcurrent } : {}),
+		...(faultThreshold !== undefined ? { faultThreshold } : {}),
+	};
+}
+
 /**
  * F19-1 (Round 19 parity): runtime.modelFallback was declared in types.ts and the
  * schema (PiTeamsModelFallbackConfigSchema) but parseRuntimeConfig never emitted
@@ -394,6 +416,7 @@ function parseRuntimeConfig(value: unknown): CrewRuntimeConfig | undefined {
 		handoffBudgetTokens: parseHandoffBudgetTokens(obj.handoffBudgetTokens),
 		agentExtensions: parseStringList(obj.agentExtensions),
 		isolationPolicy: parseIsolationPolicy(obj.isolationPolicy),
+		embeddedWorkers: parseEmbeddedWorkersPolicy(obj.embeddedWorkers),
 		surface: parseSurfacePolicy(obj.surface),
 		modelFallback: parseModelFallbackConfig(obj.modelFallback),
 		// F19-1 discipline: every key declared in types.ts + schema MUST be
@@ -401,7 +424,9 @@ function parseRuntimeConfig(value: unknown): CrewRuntimeConfig | undefined {
 		// W2/P1-1; runtime.workerTransport — W7/P2-3, experimental;
 		// runtime.hermeticWorkers — R3-19/D5 reversal, hermetic spawns;
 		// runtime.classifierEnabled/classifierModel — P2-1 dormant classifier
-		// seam, consumed at child-executor's retry triage).
+		// seam, consumed at child-executor's retry triage;
+		// runtime.embeddedWorkers — U11 hybrid 2-tier, DEFAULT-OFF, consumed by
+		// task-runner's lazy hybrid-tier planning).
 		// Necessary but NOT sufficient: emission still needs a CONSUMER at the
 		// seam — workerTransport was parse+emit-only dead until D1/DR2 threaded
 		// it to resolveWorkerTransport (run-worker seam).

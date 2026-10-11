@@ -297,6 +297,15 @@ export const TEAM_EVENT_TYPES = [
 	"worker.cancelled",
 	"worker.kill_stale",
 	"worker.message",
+	// U11 (hybrid 2-tier worker model, 2026-10-11): embedded-tier routing
+	// bookkeeping — emitted by task-runner/hybrid-tier.ts for embedded-routed
+	// tasks only (DEFAULT-OFF policy: zero events with the tier off).
+	// Observability; no run/task state transition. The lane-B
+	// `live-session.embedded_*` events flow through a dynamic event sink and
+	// are intentionally NOT literal-registered here.
+	"tier.decision",
+	"tier.fault",
+	"tier.fallback",
 	// Workflow phase advance (note: supersedes the legacy `phase.*` names
 	// above, which are kept registered for backward compatibility)
 	"workflow.phase_completed",

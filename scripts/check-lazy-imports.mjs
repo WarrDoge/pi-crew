@@ -108,7 +108,10 @@ const DECLARED = new Set([
 // by using index.bundle.ts instead of index.ts).
 const BUDGETS = {
 	"index.bundle.ts": {
-		maxFiles: 521,
+		// U11 (2026-10-11): 521 → 523 — task-runner/hybrid-tier.ts (policy-gated
+		// lazy import) + live-session/embedded-tier.ts (static import from
+		// live-session-runtime.ts) both ship in the single-file bundle.
+		maxFiles: 523,
 		forbid: ["test/", "scripts/", "docs/", "dist/"],
 	},
 };

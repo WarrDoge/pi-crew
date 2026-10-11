@@ -15,6 +15,10 @@ import {
 } from "../crew-agent-records.ts";
 import { createWorkerHeartbeat, touchWorkerHeartbeat } from "../heartbeat/worker-heartbeat.ts";
 import { createStartupEvidence, type WorkerStartupEvidence } from "../heartbeat/worker-startup.ts";
+// Type-only imports (erased at runtime): lane-B U11 contract types. The
+// live-session layer OWNS the mitigation/fault taxonomy; this seam only
+// threads + surfaces it (Phase-1 interface contract).
+import type { LiveSessionEmbeddedMitigations, LiveSessionFault } from "../live-session/embedded-tier.ts";
 import { runLiveSessionTask } from "../live-session/live-session-runtime.ts";
 import type { ParsedPiJsonOutput } from "../output/pi-json-output.ts";
 import { type ProgressEventSummary, shouldAppendProgressEventUpdate } from "../output/progress-event-coalescer.ts";
@@ -42,6 +46,15 @@ export interface RunLiveTaskInput {
 	workspaceId: string;
 	/** Phase 2: Output schema for validating yield data. */
 	outputSchema?: unknown;
+	/**
+	 * U11 (hybrid 2-tier): embedded-tier mitigation knobs, passed by the
+	 * hybrid orchestration layer (task-runner/hybrid-tier.ts) ONLY for a task
+	 * routed to the embedded tier. Forwarded verbatim to runLiveSessionTask —
+	 * the live-session layer keeps every mitigation inert when this is
+	 * undefined (lane-B DEFAULT-OFF contract). Never set on the legacy
+	 * live-session path.
+	 */
+	embeddedMitigations?: LiveSessionEmbeddedMitigations;
 }
 
 export interface RunLiveTaskOutput {
@@ -50,10 +63,41 @@ export interface RunLiveTaskOutput {
 	startupEvidence: WorkerStartupEvidence;
 	exitCode: number | null;
 	error?: string;
+	/**
+	 * U11 fault-signal surfacing (Phase-1 interface contract between the
+	 * hybrid-tier orchestration layer and the live-session layer): the
+	 * classified fault for a FAILED live attempt. Prefers the fault the
+	 * live-session runtime attached (embedded path) and falls back to a
+	 * string-shape classifier at this seam (legacy shapes / hand-built
+	 * results). `undefined` = the attempt did not fault. `countAsFault`
+	 * is the hybrid layer's counting gate (aborted / capacity-rejected are
+	 * routing signals, not worker faults).
+	 */
+	fault?: LiveSessionFault;
 	parsedOutput?: ParsedPiJsonOutput;
 	resultArtifact: ArtifactDescriptor;
 	logArtifact?: ArtifactDescriptor;
 	transcriptArtifact?: ArtifactDescriptor;
+}
+
+/**
+ * U11 fault classification fallback (Phase-1 interface contract). Used only
+ * when the live-session runtime did NOT attach a `fault` (embedded path
+ * always attaches; legacy results and hand-built test results do not).
+ * Ordered most-specific-first because the live-session error strings overlap
+ * (the hung-tool message contains both "timeout" and "cooperative abort").
+ * `countAsFault` follows the lane-B contract: "aborted" is a routing
+ * signal (never counted toward the 2-fault budget), everything else counts.
+ */
+export function classifyLiveTaskFault(error: string | undefined, stderr: string, exitCode: number | null): LiveSessionFault | undefined {
+	const faulted = error !== undefined || (exitCode !== null && exitCode !== 0);
+	if (!faulted) return undefined;
+	const text = `${error ?? ""}\n${stderr}`;
+	if (text.includes("escape hatch")) return { kind: "hung-tool", detail: text, countAsFault: true };
+	if (/\babort/i.test(text)) return { kind: "aborted", detail: text, countAsFault: false };
+	if (/timed?\s?out|timeout/i.test(text)) return { kind: "response-timeout", detail: text, countAsFault: true };
+	if (error !== undefined) return { kind: "session-error", detail: text, countAsFault: true };
+	return { kind: "nonzero-exit", detail: text, countAsFault: true };
 }
 
 function updateTask(tasks: TeamTaskState[], updated: TeamTaskState): TeamTaskState[] {
@@ -140,6 +184,9 @@ export async function runLiveTask(input: RunLiveTaskInput): Promise<RunLiveTaskO
 		teamRoleThinking: input.teamRoleThinking,
 		isCurrent,
 		workspaceId: input.workspaceId,
+		// U11: embedded-tier mitigation knobs (lane-B contract) — forwarded
+		// verbatim; undefined keeps every mitigation inert (legacy path).
+		embeddedMitigations: input.embeddedMitigations,
 		// Phase 2: Pass output schema for yield validation
 		outputSchema: undefined,
 		onOutput: (text) => {
@@ -173,6 +220,11 @@ export async function runLiveTask(input: RunLiveTaskInput): Promise<RunLiveTaskO
 		(liveResult.exitCode && liveResult.exitCode !== 0
 			? liveResult.stderr || `Live session exited with ${liveResult.exitCode}`
 			: undefined);
+	// U11 (Phase-1 interface contract): surface the classified fault for the
+	// hybrid tier's counting gate. Prefer the fault attached by the
+	// live-session runtime (embedded path); fall back to the seam classifier
+	// for legacy/hand-built result shapes.
+	const fault = liveResult.fault ?? classifyLiveTaskFault(liveResult.error, liveResult.stderr, liveResult.exitCode);
 	const parsedOutput = {
 		finalText: liveResult.stdout,
 		textEvents: liveResult.stdout ? [liveResult.stdout] : [],
@@ -231,6 +283,7 @@ export async function runLiveTask(input: RunLiveTaskInput): Promise<RunLiveTaskO
 		startupEvidence,
 		exitCode,
 		error: error || undefined,
+		fault,
 		parsedOutput,
 		resultArtifact,
 		logArtifact,

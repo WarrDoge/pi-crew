@@ -27,6 +27,32 @@ export function defaultNestedSlotBudget(globalWorkerSemaphore: number): number {
 	return Math.max(1, Math.floor(globalWorkerSemaphore / 2));
 }
 
+/**
+ * U11 (hybrid 2-tier worker model): default ceiling for concurrently
+ * in-flight EMBEDDED sessions — the same conservative half-of-cap heuristic
+ * as the nested-slot budget. This is the blast-radius bound (spec U11 risk
+ * #2: "1 worker exception/OOM hạ host + mọi team" — mitigation: limit N
+ * embedded đồng thời), NOT a throughput bound: total tier concurrency is
+ * bounded by the SHARED global worker semaphore; this ceiling only caps how
+ * much of that budget may be embedded at once.
+ */
+export function defaultEmbeddedSlotCeiling(globalWorkerSemaphore: number): number {
+	return Math.max(1, Math.floor(globalWorkerSemaphore / 2));
+}
+
+/**
+ * U11: build the embedded-session ceiling. Reuses the NestedSlotBudget
+ * fail-fast shape on purpose (budget extension per spec: "slot budget toàn
+ * cục chung 2 tier (nested-slots mở rộng)"): id-keyed, idempotent
+ * re-acquire, exhausted → tryAcquire returns false and the caller reroutes
+ * the task to the subprocess tier IMMEDIATELY (never queues on the ceiling
+ * — a rerouted task still queues on the shared global worker budget like
+ * any other subprocess task).
+ */
+export function createEmbeddedSlotBudget(globalWorkerSemaphore: number, maxConcurrent?: number): NestedSlotBudget {
+	return new NestedSlotBudget(globalWorkerSemaphore, maxConcurrent ?? defaultEmbeddedSlotCeiling(globalWorkerSemaphore));
+}
+
 export class NestedSlotBudget {
 	private readonly held = new Set<string>();
 	readonly max: number;

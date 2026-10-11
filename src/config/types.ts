@@ -141,6 +141,42 @@ export interface CrewRuntimeConfig {
 		/** Default runtime for roles not in isolatedRoles. Default: "live-session" (uses live-session). */
 		defaultRuntime?: "live-session" | "child-process";
 	};
+	/**
+	 * U11 (hybrid 2-tier worker model, upgrade spec 2026-10-11): per-role
+	 * opt-in to the EMBEDDED tier — in-process live-session workers (the U4
+	 * stack) — with subprocess as the automatic fallback tier.
+	 *
+	 * DEFAULT-OFF: subprocess stays the ONLY tier unless a role explicitly
+	 * opts in via `roles`. With the block absent/disabled, tier routing is a
+	 * byte-identical no-op (no imports, no events, no budget reads).
+	 *
+	 * Routing guards (resolveTaskRuntimeKind): isolatedRoles and the
+	 * depth>0 child-process guard ALWAYS beat embedded opt-in — an embedded
+	 * session never nests inside a pi-crew worker and a crash-isolated role
+	 * never leaves the subprocess tier. Not sensitive — behavior pick, not
+	 * authority.
+	 */
+	embeddedWorkers?: {
+		/** Global gate for the embedded tier. Default false (tier inert). */
+		enabled?: boolean;
+		/** Roles that opt into the embedded tier. Default: [] (nobody). */
+		roles?: string[];
+		/**
+		 * Ceiling on concurrently in-flight embedded sessions. When exhausted,
+		 * new routed tasks fail-fast back to the subprocess tier (never queue
+		 * on this ceiling — they queue only on the SHARED global worker budget
+		 * once rerouted). Blast-radius bound (spec U11 risk #2 mitigation:
+		 * "limit N embedded đồng thời"). Default: max(1, floor(worker-cap/2)).
+		 */
+		maxConcurrent?: number;
+		/**
+		 * Counted embedded faults per task before that task reroutes to the
+		 * subprocess tier for all subsequent attempts (sticky, persisted per
+		 * task in task.diagnostics). Aborts are NOT faults. Default 2
+		 * (spec: "embedded worker fault 2 lần → hạ cấp xuống subprocess").
+		 */
+		faultThreshold?: number;
+	};
 	/** Mark certain bash commands as excludeFromContext to reduce context tokens. Default: false */
 	excludeContextBash?: boolean;
 	/**

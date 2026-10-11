@@ -13,6 +13,8 @@ import { awaitRuntimeWarmup } from "./model/runtime-warmup.ts";
 import type { ParsedPiJsonOutput } from "./output/pi-json-output.ts";
 import type { ResultArtifactReadCache } from "./task-output-context.ts";
 import { runChildProcessTask } from "./task-runner/child-executor.ts";
+// Type-only imports (erased at runtime — hybrid-tier stays lazily loaded).
+import type { EmbeddedLiveOutcome, EmbeddedTierPlan } from "./task-runner/hybrid-tier.ts";
 import { finalizeTaskResult, type TaskExecutionResult } from "./task-runner/post-execution.ts";
 import { prepareTaskExecutionContext } from "./task-runner/pre-execution.ts";
 import { cleanResultText } from "./task-runner/result-utils.ts";
@@ -106,7 +108,44 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 	let streamBridge: ReturnType<typeof registerStreamBridge> | undefined;
 	try {
 		streamBridge = registerStreamBridge(manifest.runId);
-		const prepared = await prepareTaskExecutionContext(input, manifest, streamBridge);
+		// ── U11 (hybrid 2-tier worker model): embedded-tier routing — DEFAULT-OFF ──
+		// When runtime.embeddedWorkers is enabled AND the task's role opted in,
+		// an otherwise-child-process task runs on the EMBEDDED tier (an
+		// in-process live-session worker) with the SHARED global slot budget, a
+		// fail-fast embedded ceiling, and the automatic 2-fault fallback to
+		// subprocess. All of it lives in the lazily imported hybrid-tier
+		// module — with the policy off (the default) this block never imports
+		// it: no events, no budget reads, zero behavior change. The routing
+		// guards (scaffold / depth>0 / isolatedRoles) are resolved inside
+		// resolveTaskRuntimeKind and cannot be weakened by the opt-in.
+		let tierPlan: EmbeddedTierPlan | undefined;
+		if (
+			input.runtimeConfig?.embeddedWorkers?.enabled === true &&
+			input.executeWorkers &&
+			input.runtimeKind !== "scaffold" &&
+			input.taskRuntimeOverride !== "scaffold"
+		) {
+			// LAZY: hybrid-tier (tier planning + fault ledger + budget guard) loads only
+			// when the embedded tier policy is enabled.
+			const { planEmbeddedTier } = await import("./task-runner/hybrid-tier.ts"); // LAZY: embedded-tier policy path only
+			tierPlan = planEmbeddedTier({
+				baseRuntimeKind: input.taskRuntimeOverride ?? input.runtimeKind ?? "child-process",
+				role: input.task.role,
+				isolationPolicy: input.runtimeConfig?.isolationPolicy,
+				runtimeConfig: input.runtimeConfig,
+				task: input.task,
+				manifest,
+				env: process.env,
+			});
+		}
+		const prepared = await prepareTaskExecutionContext(
+			// Embedded-routed tasks execute as live-session (consistent agent
+			// records + startup evidence labels; the child-only "started"
+			// checkpoint stays off — the embedded attempt has no child pid).
+			tierPlan?.route === "embedded" ? { ...input, taskRuntimeOverride: "live-session" } : input,
+			manifest,
+			streamBridge,
+		);
 		if (prepared.kind === "cancelled") return prepared.result;
 		const ctx = prepared.ctx;
 		// ── U13 (upgrade spec 2026-10-09): deterministic verifier pre-gate ──
@@ -261,13 +300,11 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 		// rawFinalText above, or finalizeTaskResult's deterministic
 		// stderr/none-source gate silently degrades to classifier-only.
 		let resultSource: TaskExecutionResult["resultSource"];
-		if (runtimeKind === "child-process") {
-			// CORE-5 extraction 4: the entire child-process branch (model routing +
-			// model-fallback attempt loop, runWorker callbacks, R3 listener-leak
-			// cleanup, heartbeat persistence, transcript parsing, artifact assembly)
-			// now lives in task-runner/child-executor.ts. It mutates ctx.task /
-			// ctx.tasks in place and returns the branch output bag.
-			const child = await runChildProcessTask(ctx);
+		// Maps a completed child-executor run onto the branch locals. Shared by
+		// the child-process branch and the U11 embedded→subprocess FALLBACK
+		// path (which runs the child executor on the same task after the
+		// embedded attempt resolved — sequential, single-writer preserved).
+		const applyChildOutcome = (child: Awaited<ReturnType<typeof runChildProcessTask>>): void => {
 			task = ctx.task;
 			tasks = ctx.tasks;
 			resultArtifact = child.resultArtifact ?? resultArtifact;
@@ -284,53 +321,124 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 			surfaceLost = child.surfaceLost;
 			rawFinalText = child.rawFinalText;
 			resultSource = child.resultSource;
+		};
+		if (runtimeKind === "child-process") {
+			// CORE-5 extraction 4: the entire child-process branch (model routing +
+			// model-fallback attempt loop, runWorker callbacks, R3 listener-leak
+			// cleanup, heartbeat persistence, transcript parsing, artifact assembly)
+			// now lives in task-runner/child-executor.ts. It mutates ctx.task /
+			// ctx.tasks in place and returns the branch output bag.
+			// U11: embedded-routed tasks never reach this branch — the tier plan
+			// overrode taskRuntimeOverride to "live-session" before pre-execution.
+			applyChildOutcome(await runChildProcessTask(ctx));
 		} else if (runtimeKind === "live-session") {
-			// LAZY: live-executor is only needed for live-session runtime branches.
-			const { runLiveTask } = await import("./task-runner/live-executor.ts");
-			const live = await runLiveTask({
-				manifest,
-				tasks,
-				task,
-				step: input.step,
-				agent: input.agent,
-				prompt,
-				signal: input.signal,
-				runtimeConfig: input.runtimeConfig,
-				parentContext: input.parentContext,
-				parentModel: input.parentModel,
-				modelRegistry: input.modelRegistry,
-				modelOverride: input.modelOverride,
-				teamRoleModel: input.teamRoleModel,
-				teamRoleFallbackModels: input.teamRoleFallbackModels,
-				teamRoleThinking: input.teamRoleThinking,
-				workspaceId: input.workspaceId,
-			});
-			task = live.task;
-			tasks = live.tasks;
-			startupEvidence = live.startupEvidence;
-			exitCode = live.exitCode;
-			error = live.error;
-			parsedOutput = live.parsedOutput;
-			// Bug #21 fix: live-session may not produce structured output via submit_result,
-			// leaving finalText empty. Re-write resultArtifact with parsedOutput.finalText
-			// so downstream tasks that depend on this task can read meaningful output.
-			const liveText = cleanResultText(parsedOutput?.finalText);
-			if (liveText) {
-				// Re-write the artifact with the captured stdout — this is the content
-				// downstream tasks will read via task.resultArtifact.path.
-				resultArtifact = writeArtifact(manifest.artifactsRoot, {
-					kind: "result",
-					relativePath: `results/${task.id}.txt`,
-					content: liveText,
-					producer: task.id,
+			// One live-session attempt as a closure so the U11 hybrid-tier wrapper
+			// (shared slot budget + fault ledger + fallback decision) can run it,
+			// while the legacy path (tierPlan undefined) keeps the pre-U11 flow.
+			const runLiveBranch = async (): Promise<EmbeddedLiveOutcome> => {
+				// LAZY: live-executor is only needed for live-session runtime branches.
+				const { runLiveTask } = await import("./task-runner/live-executor.ts");
+				const live = await runLiveTask({
+					manifest,
+					tasks,
+					task,
+					step: input.step,
+					agent: input.agent,
+					prompt,
+					signal: input.signal,
+					runtimeConfig: input.runtimeConfig,
+					parentContext: input.parentContext,
+					parentModel: input.parentModel,
+					modelRegistry: input.modelRegistry,
+					modelOverride: input.modelOverride,
+					teamRoleModel: input.teamRoleModel,
+					teamRoleFallbackModels: input.teamRoleFallbackModels,
+					teamRoleThinking: input.teamRoleThinking,
+					workspaceId: input.workspaceId,
+					// U11: embedded-tier mitigation knobs (lane-B contract) — passed
+					// ONLY on the hybrid-routed path so the live-session layer keeps
+					// every mitigation inert on the legacy live-session path. The
+					// session-side cap mirrors the routing-side ceiling above.
+					...(tierPlan?.route === "embedded"
+						? {
+								embeddedMitigations: {
+									...(tierPlan.policy.maxConcurrent !== undefined
+										? { maxConcurrentEmbedded: tierPlan.policy.maxConcurrent }
+										: {}),
+									tier: "embedded",
+								},
+							}
+						: {}),
 				});
-			} else {
+				// Bug #21 fix: live-session may not produce structured output via submit_result,
+				// leaving finalText empty. Re-write resultArtifact with parsedOutput.finalText
+				// so downstream tasks that depend on this task can read meaningful output.
+				const liveText = cleanResultText(live.parsedOutput?.finalText);
+				const liveResultArtifact = liveText
+					? // Re-write the artifact with the captured stdout — this is the content
+						// downstream tasks will read via task.resultArtifact.path.
+						writeArtifact(manifest.artifactsRoot, {
+							kind: "result",
+							relativePath: `results/${live.task.id}.txt`,
+							content: liveText,
+							producer: live.task.id,
+						})
+					: live.resultArtifact;
+				return {
+					// Sync task.resultArtifact with the re-written artifact (if liveText was truthy)
+					task: { ...live.task, resultArtifact: liveResultArtifact },
+					tasks: live.tasks,
+					startupEvidence: live.startupEvidence,
+					exitCode: live.exitCode,
+					error: live.error,
+					fault: live.fault,
+					parsedOutput: live.parsedOutput,
+					resultArtifact: liveResultArtifact,
+					logArtifact: live.logArtifact,
+					transcriptArtifact: live.transcriptArtifact,
+				};
+			};
+			const applyLiveOutcome = (live: EmbeddedLiveOutcome): void => {
+				task = live.task;
+				tasks = live.tasks;
+				startupEvidence = live.startupEvidence;
+				exitCode = live.exitCode;
+				error = live.error;
+				parsedOutput = live.parsedOutput;
 				resultArtifact = live.resultArtifact;
+				logArtifact = live.logArtifact;
+				transcriptArtifact = live.transcriptArtifact;
+			};
+			if (tierPlan?.route !== "embedded") {
+				applyLiveOutcome(await runLiveBranch());
+			} else {
+				// U11 hybrid tier — shared global slot budget, embedded ceiling, fault
+				// ledger, and the 2-fault fallback decision around the embedded attempt.
+				const { runEmbeddedTier } = await import("./task-runner/hybrid-tier.ts"); // LAZY: embedded-routed path only
+				const tier = await runEmbeddedTier({
+					plan: tierPlan,
+					manifest,
+					task,
+					tasks,
+					signal: input.signal,
+					runLive: runLiveBranch,
+				});
+				if (tier.kind === "live") {
+					applyLiveOutcome(tier.live);
+				} else {
+					// U11 automatic fallback: the embedded attempt exhausted its fault
+					// budget (or hit the embedded ceiling) — reroute THIS attempt to
+					// the subprocess tier. Sequential by construction (runLive
+					// resolved and flushed its sinks before the decision), so the
+					// single-writer invariant (crew-agent-records.ts) holds. Flip
+					// ctx.runtimeKind so child-executor labels the attempt
+					// child-process (agent records + transcript path resolution).
+					ctx.task = tier.task;
+					ctx.tasks = tier.tasks;
+					ctx.runtimeKind = "child-process";
+					applyChildOutcome(await runChildProcessTask(ctx));
+				}
 			}
-			// Sync task.resultArtifact with the re-written artifact (if liveText was truthy)
-			task = { ...task, resultArtifact };
-			logArtifact = live.logArtifact;
-			transcriptArtifact = live.transcriptArtifact;
 		} else {
 			resultArtifact = runScaffoldTask(manifest, task);
 		}

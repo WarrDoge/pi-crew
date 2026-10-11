@@ -124,6 +124,7 @@ Most-used keys (full set: [docs/usage.md](docs/usage.md) · [schema.json](schema
 | Key | What it does |
 |-----|--------------|
 | `runtime.mode` 🔒 | `auto \| scaffold \| child-process \| live-session` — how workers execute |
+| `runtime.embeddedWorkers` | U11 hybrid tier, **DEFAULT-OFF**: opt roles into in-process (embedded) workers with 2-fault fallback to subprocess — see [docs/usage.md](docs/usage.md#hybrid-2-tier-workers-embedded-tier-u11-default-off) |
 | `executeWorkers` 🔒 | `false` = dry-run planning only, no child processes |
 | `asyncByDefault` 🔒 | detach every run by default (survives session switches) |
 | `limits.maxConcurrentWorkers` | hard cap on parallel workers |

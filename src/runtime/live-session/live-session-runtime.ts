@@ -53,6 +53,24 @@ import {
 	validateYieldData,
 	type YieldResult,
 } from "../yield-handler.ts";
+import {
+	admitEmbeddedSession,
+	applyEmbeddedProviderTimeout,
+	armTurnWatchdog,
+	buildEmbeddedEventSink,
+	classifyEmbeddedCatchFault,
+	EMBEDDED_DEFAULT_WATCHDOG_GRACE_MS,
+	type EmbeddedAdmissionHandle,
+	type EmbeddedEventSink,
+	enforceEmbeddedBuiltinTools,
+	finalizeEmbeddedFaultCheck,
+	LiveSessionEmbeddedEnforcementError,
+	type LiveSessionEmbeddedMitigations,
+	type LiveSessionFault,
+	LiveSessionTurnWatchdogError,
+	maybeEmitEmbeddedMemoryMetrics,
+	type TurnWatchdogHandle,
+} from "./embedded-tier.ts";
 import { applyLiveAgentControlRequest, applyLiveAgentControlRequests, type LiveAgentControlCursor } from "./live-agent-control.ts";
 import {
 	disposeLiveAgentSession,
@@ -135,6 +153,15 @@ export interface LiveSessionSpawnInput {
 	 * imports the faux module). Must stay undefined in production runs.
 	 */
 	modelProviderOverride?: unknown;
+	/**
+	 * U11 embedded-tier mitigations (DEFAULT-OFF). Present ONLY when the hybrid
+	 * orchestration layer routed this task to the embedded tier for an
+	 * opted-in role: builtin-tools-only enforcement, provider timeoutMs,
+	 * turn-count watchdog, embedded concurrency cap, process-level fault
+	 * guard, bounded memory metrics and factory/global-state asserts. When
+	 * undefined this function behaves byte-identically to pre-U11.
+	 */
+	embeddedMitigations?: LiveSessionEmbeddedMitigations;
 }
 
 export interface LiveSessionRunResult {
@@ -147,6 +174,13 @@ export interface LiveSessionRunResult {
 	error?: string;
 	/** Phase 1: Extracted yield result from submit_result tool call. */
 	yieldResult?: YieldResult;
+	/**
+	 * U11: classified fault for the hybrid layer's 2-fault fallback budget.
+	 * Attached only on the embedded path (embeddedMitigations present);
+	 * `classifyLiveSessionFault()` (embedded-tier.ts) re-derives kinds for
+	 * any result shape.
+	 */
+	fault?: LiveSessionFault;
 	/** Model routing diagnostics for the task state. */
 	modelRouting?: {
 		requested?: string;
@@ -208,6 +242,9 @@ type LiveSessionLike = {
 	/** U3 test-seam surface: SDK AgentSession exposes its ModelRuntime here. */
 	modelRuntime?: {
 		registerNativeProvider?: (provider: unknown) => void;
+		/** U11 (b): surfaces used to wrap/restore the provider with a default timeoutMs. */
+		getProvider?: (providerId: string) => unknown;
+		getRegisteredNativeProvider?: (providerId: string) => unknown;
 	};
 	/** U4 recursion guard (layer 1): public SDK accessor for loaded extension paths. */
 	extensionRunner?: { getExtensionPaths?: () => string[] };
@@ -1030,7 +1067,52 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 	// inside the try), so declaring it here is safe.
 	let onSignalAbort: (() => void) | undefined;
 
+	// U11 embedded-tier state (DEFAULT-OFF: gated on `embedded` throughout).
+	const embedded = input.embeddedMitigations;
+	let embeddedHandle: EmbeddedAdmissionHandle | undefined;
+	let faultSignal: Promise<never> | undefined;
+	let faultSignalReject: ((error: Error) => void) | undefined;
+	let embeddedWatchdogFired = false;
+	let embeddedEscalated = false;
+	let embeddedProviderRestore: (() => string | undefined) | undefined;
+	let embeddedWatchdogTimer: TurnWatchdogHandle | undefined;
+	const emitEmbedded: EmbeddedEventSink | undefined = embedded
+		? buildEmbeddedEventSink(appendEventFireAndForget, input.manifest.eventsPath, input.manifest.runId, input.task.id)
+		: undefined;
+
 	try {
+		// U11 admission (fail-closed): factory assert → cap (fail-fast, never
+		// queue) → process guard → baseline → memory sample. Inert by default.
+		if (embedded && emitEmbedded) {
+			const admission = admitEmbeddedSession({
+				mod,
+				agentId,
+				runId: input.manifest.runId,
+				taskId: input.task.id,
+				role: input.task.role,
+				mitigations: embedded,
+				emit: emitEmbedded,
+				servicesCacheKeys: liveSessionServicesCacheStatsForTest().keys,
+			});
+			if (admission.status === "rejected") {
+				emitEmbedded(admission.event.type, admission.event.data, admission.event.message);
+				return {
+					available: true,
+					exitCode: 1,
+					stdout: "",
+					stderr: admission.result.stderr,
+					jsonEvents: 0,
+					error: admission.result.error,
+					fault: admission.result.fault,
+				};
+			}
+			embeddedHandle = admission;
+			faultSignal = admission.escapeSignal;
+			faultSignalReject = (error: Error) => {
+				embeddedEscalated = true;
+				admission.escalate(error);
+			};
+		}
 		const agentDir = typeof mod.getAgentDir === "function" ? mod.getAgentDir() : undefined;
 		// G2 (SDD-2 W-B, least-privilege): live-session workers inherit the
 		// parent's MCP servers ONLY when the role is MCP-permitted
@@ -1041,7 +1123,17 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 		// no longer exists — so enforcement happens HERE, at the resource
 		// loader: the MCP extension(s) are dropped from the child's extension
 		// list for non-permitted roles (no MCP code load, no server connect).
-		const mcpPermitted = mcpPermittedForRole(input.task.role);
+		// U11 mitigation (a): embedded tier is builtin-tools-only — MCP
+		// inheritance disabled even for MCP-permitted roles (nomcp bundle; the
+		// post-creation asserts then expect zero foreign extensions).
+		const roleMcpPermitted = mcpPermittedForRole(input.task.role);
+		const mcpPermitted = embedded ? false : roleMcpPermitted;
+		if (embedded && emitEmbedded && roleMcpPermitted)
+			emitEmbedded(
+				"live-session.embedded_builtin_only",
+				{ role: input.task.role ?? null },
+				`Embedded tier forces builtin-tools-only for role "${input.task.role ?? "unknown"}" — MCP inheritance disabled on this path (U11 mitigation a).`,
+			);
 		// U4 fast path availability: shared services bundle + fromServices. Any
 		// missing export (foreign/older SDK) falls back to the legacy per-worker
 		// DefaultResourceLoader path below, unchanged.
@@ -1243,6 +1335,16 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 		// anything streams. No-op in production (modelProviderOverride stays
 		// undefined there).
 		applyModelProviderOverride(session, input.modelProviderOverride);
+		// U11 mitigation (b): re-register the resolved model's provider wrapped
+		// with a default timeoutMs; restored in the finally (shared runtime must
+		// not stay mutated).
+		if (embedded && emitEmbedded)
+			embeddedProviderRestore = applyEmbeddedProviderTimeout({
+				session,
+				modelRef: resolvedModelRef,
+				timeoutMs: embedded.providerTimeoutMs,
+				emit: emitEmbedded,
+			}).restore;
 		// P7 (perf): fire-and-forget — return value not needed, blocks the
 		// event loop less than the sync appendEvent under file-lock contention.
 		appendEventFireAndForget(input.manifest.eventsPath, {
@@ -1258,6 +1360,18 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 			},
 		});
 		filterActiveTools(session, input.agent, input.task.role);
+		// U11 mitigation (a): builtin-tools-only, fail-closed on degradation.
+		if (embedded && emitEmbedded) {
+			const enforcement = enforceEmbeddedBuiltinTools(session, input.agent, input.task.role);
+			if (!enforcement.ok) {
+				emitEmbedded(
+					"live-session.embedded_enforcement_degraded",
+					{ reason: enforcement.reason, active: enforcement.active ?? null, role: input.task.role ?? null },
+					`Embedded builtin-tools-only enforcement degraded (${enforcement.reason}) — failing closed (U11 mitigation a).`,
+				);
+				throw new LiveSessionEmbeddedEnforcementError(enforcement.reason, enforcement.active ?? []);
+			}
+		}
 
 		// Diagnostic: log before bindExtensions so we can identify extension-loading hangs
 		const bindExtensionsStart = Date.now();
@@ -1335,6 +1449,8 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 			if (!isCurrent() || controlBusy || !session) return;
 			controlBusy = true;
 			try {
+				// U11: bounded memory metrics on the control-poll cadence (5s rate limit).
+				if (emitEmbedded) maybeEmitEmbeddedMemoryMetrics(emitEmbedded);
 				controlCursor = await applyLiveAgentControlRequests({
 					manifest: input.manifest,
 					taskId: input.task.id,
@@ -1405,7 +1521,23 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 							softLimitReached = true;
 							void session?.steer?.("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
 						} else if (maxTurns !== undefined && softLimitReached && turnCount >= maxTurns + graceTurns) {
-							void session?.abort?.();
+							// U11 mitigation (c): abort + bounded watchdog — if the prompt does
+							// not settle within the grace, dispose the session (drop-reference,
+							// U4 escape discipline) and fail via the escape signal.
+							if (embedded && !embeddedWatchdogFired) {
+								embeddedWatchdogFired = true;
+								void session?.abort?.();
+								embeddedWatchdogTimer = armTurnWatchdog({
+									agentId,
+									maxTurns,
+									graceTurns,
+									watchdogGraceMs: embedded.watchdogGraceMs ?? EMBEDDED_DEFAULT_WATCHDOG_GRACE_MS,
+									turnCount,
+									escalate: (error: Error) => faultSignalReject?.(error),
+								});
+							} else {
+								void session?.abort?.();
+							}
 						}
 					}
 					// Accumulate lifetime usage that survives compaction
@@ -1488,9 +1620,12 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 		const sessionTimeoutMs = input.runtimeConfig?.liveSession?.responseTimeoutMs ?? DEFAULT_LIVE_SESSION.responseTimeoutMs;
 		const hungToolGraceMs = input.runtimeConfig?.liveSession?.hungToolGraceMs ?? DEFAULT_LIVE_SESSION.hungToolGraceMs;
 		try {
-			await liveAgentContext.run({ agentId, modelRef: resolvedModelRef ?? "" }, () =>
-				promptWithTimeout(session!, effectivePrompt, sessionTimeoutMs, "Live-session", hungToolGraceMs),
-			);
+			await liveAgentContext.run({ agentId, modelRef: resolvedModelRef ?? "" }, () => {
+				const promptCall = promptWithTimeout(session!, effectivePrompt, sessionTimeoutMs, "Live-session", hungToolGraceMs);
+				// U11: race the escape signal (watchdog / process guard) so the task
+				// fails fast instead of awaiting a disposed-out session.
+				return faultSignal ? Promise.race([promptCall, faultSignal]) : promptCall;
+			});
 		} catch (promptError) {
 			const msg = promptError instanceof Error ? promptError.message : String(promptError);
 			// P7: fire-and-forget — return value not needed.
@@ -1510,6 +1645,7 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 					stderr: msg,
 					jsonEvents,
 					error: msg,
+					...(embedded ? { fault: { kind: "response-timeout" as const, detail: msg, countAsFault: true } } : {}),
 				};
 			}
 			throw promptError;
@@ -1587,7 +1723,14 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 			// Reminder loop — only if yield not yet received
 			const maxReminders = yieldConfig.maxReminders ?? DEFAULT_LIVE_SESSION.maxYieldRetries;
 			let retryCount = 0;
-			while (!customToolYieldResolved && !yieldResult && retryCount < maxReminders && !input.signal?.aborted) {
+			while (
+				!customToolYieldResolved &&
+				!yieldResult &&
+				retryCount < maxReminders &&
+				!input.signal?.aborted &&
+				!embeddedWatchdogFired &&
+				!embeddedEscalated
+			) {
 				retryCount++;
 				const reminder = buildYieldReminder(retryCount, maxReminders, yieldConfig.reminderPrompt);
 				const prevTools = typeof session.getActiveToolNames === "function" ? session.getActiveToolNames() : [];
@@ -1643,6 +1786,18 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 			}
 		}
 
+		// U11: post-condition global-state assert + aborted classification
+		// (embedded path only — default result shape unchanged).
+		const embeddedFault =
+			embedded && emitEmbedded
+				? finalizeEmbeddedFaultCheck({
+						baseline: embeddedHandle?.baseline,
+						signalAborted: input.signal?.aborted === true,
+						servicesCacheKeys: liveSessionServicesCacheStatsForTest().keys,
+						servicesCacheCap: MAX_LIVE_SESSION_SERVICES_BUNDLES,
+						emit: emitEmbedded,
+					})
+				: undefined;
 		const usage = usageFromStats(typeof session.getStats === "function" ? session.getStats() : session.stats);
 		updateLiveAgentStatus(agentId, "completed");
 		markLiveAgentCompleted(agentId);
@@ -1654,6 +1809,7 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 			jsonEvents,
 			usage,
 			yieldResult,
+			...(embeddedFault ? { fault: embeddedFault } : {}),
 			modelRouting: {
 				requested: modelRouting.requested,
 				resolved: modelRefToString(resolvedModel) ?? modelRouting.candidates[0] ?? "default",
@@ -1664,6 +1820,33 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 			},
 		};
 	} catch (error) {
+		// U11 mitigation (c) escape: turn-count watchdog fired — the session was
+		// already disposed (drop-reference) by the watchdog timer.
+		if (error instanceof LiveSessionTurnWatchdogError) {
+			appendEventFireAndForget(input.manifest.eventsPath, {
+				type: "live-session.turn_watchdog_escape",
+				runId: input.manifest.runId,
+				taskId: input.task.id,
+				message: `Turn-count watchdog escape: ${error.message}`,
+				data: {
+					maxTurns: error.maxTurns,
+					graceTurns: error.graceTurns,
+					watchdogGraceMs: error.watchdogGraceMs,
+					turnCount: error.turnCount,
+					agentId,
+				},
+			});
+			updateLiveAgentStatus(agentId, "failed");
+			return {
+				available: true,
+				exitCode: 1,
+				stdout: stdoutTail.value().trim(),
+				stderr: error.message,
+				jsonEvents,
+				error: error.message,
+				...(embedded ? { fault: { kind: "turn-watchdog" as const, detail: error.message, countAsFault: true } } : {}),
+			};
+		}
 		// U4 hung-tool escape hatch (drop-reference + fail task): a timed-out
 		// prompt that ignored the cooperative abort can never settle — emit the
 		// dedicated event, terminate (abort + dispose + unregister) the handle,
@@ -1688,6 +1871,7 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 				stderr: error.message,
 				jsonEvents,
 				error: error.message,
+				...(embedded ? { fault: { kind: "hung-tool" as const, timeoutMs: error.timeoutMs, countAsFault: true } } : {}),
 			};
 		}
 		const message = error instanceof Error ? error.message : String(error);
@@ -1706,6 +1890,15 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 		}
 
 		updateLiveAgentStatus(`${input.manifest.runId}:${input.task.id}`, "failed");
+		// U11: classify the failure for the hybrid layer's fault budget (embedded
+		// path only — default result shape unchanged).
+		const embeddedCatchFault = embedded
+			? classifyEmbeddedCatchFault({
+					error,
+					message,
+					quarantined: embeddedEscalated && message.includes("uncaught-exception guard"),
+				})
+			: undefined;
 		return {
 			available: true,
 			exitCode: 1,
@@ -1713,8 +1906,22 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 			stderr: message,
 			jsonEvents,
 			error: message,
+			...(embeddedCatchFault ? { fault: embeddedCatchFault } : {}),
 		};
 	} finally {
+		// U11 teardown (every exit path): provider restore + admission teardown
+		// (guard unregister + capacity release + final memory sample). Inert by default.
+		if (embeddedHandle) {
+			embeddedWatchdogTimer?.cancel();
+			const restoreDrift = embeddedProviderRestore?.();
+			if (restoreDrift && emitEmbedded)
+				emitEmbedded(
+					"live-session.embedded_global_state_drift",
+					{ violations: [restoreDrift] },
+					`Embedded provider-timeout wrapper not restored: ${restoreDrift}.`,
+				);
+			embeddedHandle.teardown();
+		}
 		// Unregister the live-agent model FIRST: a synchronous Map.delete that must run on
 		// every exit path. If skipped (e.g. terminateLiveAgent throws on session.abort()),
 		// hasActiveLiveAgents() stays true for the process lifetime and permanently disables

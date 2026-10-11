@@ -157,6 +157,19 @@ export const PiTeamsRuntimeConfigSchema = Type.Object(
 				{ additionalProperties: false, sensitive: true },
 			),
 		),
+		// U11 (hybrid 2-tier worker model): per-role embedded-tier opt-in.
+		// DEFAULT-OFF — behavior pick, not authority (no sensitive mark).
+		embeddedWorkers: Type.Optional(
+			Type.Object(
+				{
+					enabled: Type.Optional(Type.Boolean()),
+					roles: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+					maxConcurrent: Type.Optional(Type.Integer({ minimum: 1 })),
+					faultThreshold: Type.Optional(Type.Integer({ minimum: 1 })),
+				},
+				{ additionalProperties: false },
+			),
+		),
 		modelFallback: Type.Optional(PiTeamsModelFallbackConfigSchema),
 		// W7 (P2-3) EXPERIMENTAL: worker transport selector, WIRED at the
 		// run-worker seam since e2728f68 (D1/DR2 plumbing, 2026-10-06): "rpc"
