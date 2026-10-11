@@ -242,6 +242,10 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		parser: "boolean",
 		doc: "'1' runs async team runs IN-PROCESS instead of spawning a detached background-runner (test seam; requires PI_CREW_ALLOW_MOCK=1 — see async-runner.ts spawnBackgroundTeamRun)",
 	},
+	PI_CREW_ASYNC_RUN: {
+		name: "PI_CREW_ASYNC_RUN",
+		doc: "async telemetry marker STAMPED onto the detached runner env by buildBackgroundRunnerEnv (async-runner.ts), read by resolve-surface.ts SurfaceGateEnvSnapshot — NOT a surface gate (registry entry added with the C-1 env-allowlist registry 2026-10-11 — was a read/write site missing from this registry)",
+	},
 	PI_CREW_BACKGROUND_RUNNER_ENTRY: {
 		name: "PI_CREW_BACKGROUND_RUNNER_ENTRY",
 		parser: "boolean",
@@ -433,6 +437,10 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		name: "PI_CREW_MSG_ENABLED",
 		doc: "'1' enables the worker-side message tool (D9/§15.2) — dormant-until-env gate (written UNCONDITIONALLY by child-pi-spawn.ts, read by prompt-runtime.ts)",
 	},
+	PI_CREW_DELEGATE_ENABLED: {
+		name: "PI_CREW_DELEGATE_ENABLED",
+		doc: "'1' enables the worker-side delegate tool — dormant-until-env gate (written UNCONDITIONALLY by child-pi-spawn.ts, read by prompt-runtime.ts; registry entry added with the C-1 env-allowlist registry 2026-10-11 — was a read/write site missing from this registry)",
+	},
 	PI_CREW_STATE_ROOT: {
 		name: "PI_CREW_STATE_ROOT",
 		doc: "run stateRoot for the ask-tool mailbox poll (<stateRoot>/mailbox; written by child-pi-spawn.ts, read by prompt-runtime.ts per ADR-0 WP-2 item 2)",
@@ -454,6 +462,11 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		name: "PI_CREW_HERMETIC_WORKERS",
 		parser: "boolean",
 		doc: "R3-19/D5 hermetic worker spawn override: '1' forces --no-extensions on worker argv, '0' restores the old ambient-stack parity (discovered/configured/built-in extensions load); beats BuildPiWorkerArgsInput.hermeticWorkers / runtime.hermeticWorkers; default ON (pi-args.ts:resolveHermeticWorkers). Explicit -e prompt-runtime + agent extensions + --skill flags are unaffected (cli.md:186-191)",
+	},
+	PI_CREW_TOOLS_MODIFIERS: {
+		name: "PI_CREW_TOOLS_MODIFIERS",
+		parser: "boolean",
+		doc: "L2-3 (pi 1.1.0 `+name`/`-name` --tools modifier syntax) OPT-IN, default OFF: '1' emits a declared agent tool list as --tools +a,+b (default toolset PLUS the declarations) instead of the legacy replacement allowlist, but ONLY when the probed host piVersion >= 1.1.0 (PI_TOOLS_MODIFIER_FLOOR, pi-args.ts); below the floor or unknown version falls back to the legacy syntax (pi's strict parser + getToolListError must never see modifiers on a pre-1.1.0 host). Additive semantics: the worker keeps the FULL default tool surface (incl. runtime-registered control tools), so CONTROL_TOOLS are not merged in modifier mode (pi-args.ts)",
 	},
 	PI_CREW_STATE_BACKEND: {
 		name: "PI_CREW_STATE_BACKEND",

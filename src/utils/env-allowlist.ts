@@ -17,7 +17,10 @@
  *   `allowList: ["PATH", "HOME", ...WINDOWS_ESSENTIAL_ENV_VARS, ...]`
  *
  * The regression test `test/unit/env-allowlist.test.ts` enforces that no
- * `src/` file hardcodes these vars inline — all sites MUST use this constant.
+ * `src/` file hardcodes these vars inline — all sites MUST use this constant
+ * (which is why the DEFINITION stays in this file: the test pins THIS path as
+ * the only literal-bearing location; src/config/env-allowlist-registry.ts
+ * imports it as a building block for the generated allowlists — C-1).
  */
 export const WINDOWS_ESSENTIAL_ENV_VARS: readonly string[] = [
 	"APPDATA",

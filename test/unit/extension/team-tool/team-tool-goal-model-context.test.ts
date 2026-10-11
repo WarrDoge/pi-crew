@@ -19,6 +19,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import test from "node:test";
+import { backgroundRunnerEnvAllowlist } from "../../../../src/config/env-allowlist-registry.ts";
 
 function readSource(relative: string): string {
 	return fs.readFileSync(new URL(`../../../../${relative}`, import.meta.url), "utf-8");
@@ -82,9 +83,18 @@ test("goal-loop-runner.ts: per-turn runs restore model routing from the outer ma
 test("async-runner.ts: model env forwards without weakening the secret guard", () => {
 	// Cross-file consistency pin: the two env channels must stay in sync with
 	// the allowlist test in test/unit/runtime/core/async-runner.test.ts.
+	// Since C-1 (0.11.17) the allowlist literals live in the central registry
+	// (src/config/env-allowlist-registry.ts) — pin the async-runner→registry
+	// consumption by source anchor and the model keys by runtime value so the
+	// pin survives registry-internal regrouping but still catches a dropped key.
 	const source = readSource("src/runtime/async-runner.ts");
-	assert.match(source, /"PI_CREW_MODEL",/, "PI_CREW_MODEL must be allowlisted for detached runs");
-	assert.match(source, /"PI_CREW_MODEL_FALLBACK_ORDER",/, "PI_CREW_MODEL_FALLBACK_ORDER must be allowlisted");
+	assert.match(
+		source,
+		/BACKGROUND_RUNNER_ENV_ALLOWLIST: string\[\] = backgroundRunnerEnvAllowlist\(\)/,
+		"async-runner must source its detached allowlist from the central env registry",
+	);
+	assert.ok(backgroundRunnerEnvAllowlist().includes("PI_CREW_MODEL"), "PI_CREW_MODEL must be allowlisted for detached runs");
+	assert.ok(backgroundRunnerEnvAllowlist().includes("PI_CREW_MODEL_FALLBACK_ORDER"), "PI_CREW_MODEL_FALLBACK_ORDER must be allowlisted");
 	// The credentials flag rides forwardModelControlEnv instead (isSecretKey
 	// false-positive on "_CREDENTIALS" would throw sanitizeEnvSecrets when unset).
 	assert.match(

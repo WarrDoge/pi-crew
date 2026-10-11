@@ -3,10 +3,10 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import { backgroundRunnerEnvAllowlist } from "../config/env-allowlist-registry.ts";
 import { getCrewEnv } from "../config/env-vars.ts";
 import { appendEventAsync } from "../state/event-log/event-log.ts";
 import type { TeamRunManifest } from "../state/types.ts";
-import { WINDOWS_ESSENTIAL_ENV_VARS } from "../utils/env-allowlist.ts";
 import { sanitizeEnvSecrets } from "../utils/env-filter.ts";
 import { logInternalError } from "../utils/internal-error.ts";
 import { packageRoot } from "../utils/paths.ts";
@@ -159,6 +159,15 @@ export interface SpawnBackgroundTeamRunResult {
 /**
  * Env vars explicitly forwarded to the detached background runner.
  *
+ * GENERATED (C-1, 2026-10-11) by the central forwarding registry —
+ * src/config/env-allowlist-registry.ts (seeded from env-vars.ts). Content is
+ * pinned byte-identical to the pre-registry literal by
+ * test/unit/config/env-allowlist-registry.test.ts; crew-family membership is
+ * validated there (no orphan entries, every declared control var forwarded
+ * or explicitly classified). Incident history this guards: PI_CREW_MODEL
+ * stripped 2026-09-29 (real-test full battery Finding #1); PI_CREW_STATE_BACKEND
+ * / CHILD_PI_MODE / CHILD_PI_POOL stripped 2026-10-10 (fix 44d16d94).
+ *
  * Provider API keys (MINIMAX/OPENAI/ANTHROPIC/...) are INTENTIONALLY OMITTED
  * (security review M1): the background runner only spawns child Pi workers,
  * which read keys from the Pi config file (not env). Passing keys via env
@@ -166,101 +175,7 @@ export interface SpawnBackgroundTeamRunResult {
  * `environmentVariables` section unredacted). Matches child-pi.ts policy.
  * Exported so the invariant is unit-testable (test/unit/async-runner.test.ts).
  */
-export const BACKGROUND_RUNNER_ENV_ALLOWLIST: string[] = [
-	// Essential non-secret vars
-	"PATH",
-	"HOME",
-	"USER",
-	"SHELL",
-	"TERM",
-	"LANG",
-	"LC_ALL",
-	"LC_COLLATE",
-	"LC_CTYPE",
-	"LC_MESSAGES",
-	"LC_MONETARY",
-	"LC_NUMERIC",
-	"LC_TIME",
-	"XDG_CONFIG_HOME",
-	"XDG_DATA_HOME",
-	"XDG_CACHE_HOME",
-	"XDG_RUNTIME_DIR",
-	// Windows essentials — see WINDOWS_ESSENTIAL_ENV_VARS (src/utils/env-allowlist.ts).
-	...WINDOWS_ESSENTIAL_ENV_VARS,
-	"NVM_BIN",
-	"NVM_DIR",
-	"NVM_INC",
-	"NODE_PATH",
-	"NODE_DISABLE_COLORS",
-	"NODE_EXTRA_CA_CERTS",
-	"NPM_CONFIG_REGISTRY",
-	"NPM_CONFIG_USERCONFIG",
-	"NPM_CONFIG_GLOBALCONFIG",
-	// PI_CREW_PARENT_PID is needed for parent-guard (liveness check).
-	"PI_CREW_DEPTH",
-	"PI_CREW_MAX_DEPTH",
-	"PI_CREW_INHERIT_PROJECT_CONTEXT",
-	"PI_CREW_INHERIT_SKILLS",
-	"PI_CREW_PARENT_PID",
-	"PI_TEAMS_DEPTH",
-	"PI_TEAMS_MAX_DEPTH",
-	"PI_TEAMS_INHERIT_PROJECT_CONTEXT",
-	"PI_TEAMS_INHERIT_SKILLS",
-	"PI_TEAMS_PI_BIN",
-	"PI_TEAMS_MOCK_CHILD_PI",
-	"PI_CREW_ALLOW_MOCK",
-	// Entry guard for the detached runner main() (background-runner.ts skips main()
-	// on plain imports — the inline async test seam lazy-imports it).
-	"PI_CREW_BACKGROUND_RUNNER_ENTRY",
-	// Phase 1.5: worker-thread atomic writer opt-in (RFC 15).
-	"PI_CREW_WORKER_ATOMIC_WRITER",
-	"PI_TEAMS_WORKER_ATOMIC_WRITER",
-	// Phase 1.5 #1: verification env sanitization opt-out (RFC 13 §6).
-	"PI_CREW_VERIFICATION_SANITIZE_ENV",
-	"PI_TEAMS_VERIFICATION_SANITIZE_ENV",
-	"PI_CREW_VERIFICATION_PRESERVE_ENV",
-	"PI_TEAMS_VERIFICATION_PRESERVE_ENV",
-	// Phase 1.5 #2: verification git-worktree sandbox opt-in (RFC 16).
-	"PI_CREW_VERIFICATION_WORKTREE",
-	"PI_TEAMS_VERIFICATION_WORKTREE",
-	// Phase 1.5 #3: V8 diagnostic report on fatal error (RFC 17 — investigation).
-	"PI_CREW_BG_REPORT_ON_FATAL",
-	"PI_TEAMS_BG_REPORT_ON_FATAL",
-	// MuxSurface: multiplexer env the detached runner needs to DETECT and
-	// REACH the host's tmux/herdr — surface follows env + config for async runs
-	// too (2026-08-30 Finding 2: without these, every async run gates to no-mux
-	// and stays headless). None of these are secret-named (sanitizeEnvSecrets
-	// would reject them from the allowlist otherwise).
-	"TMUX",
-	"TMUX_PANE",
-	"TMUX_TMPDIR",
-	"HERDR_ENV",
-	"HERDR_SESSION",
-	"HERDR_PANE_ID",
-	"HERDR_SOCKET_PATH",
-	"HERDR_WORKSPACE_ID",
-	"HERDR_PING_TIMEOUT_MS",
-	// Model-selection control vars (Finding #1, full battery 2026-09-29): the
-	// detached runner resolves subagent model routing from env (PI_CREW_MODEL →
-	// resolveDefaultSubagentModel; PI_CREW_MODEL_FALLBACK_ORDER →
-	// resolveModelFallbackPolicy) for manifests without a persisted modelContext
-	// (older manifests) and as a user override channel. Stripping them made
-	// every async run silently fall back to the DEFAULT chain (live: 3 parallel
-	// runs died on minimax/MiniMax-M3 402 while the parent ran zai/glm-5.3).
-	// PI_CREW_MODEL_REQUIRE_CREDENTIALS is NOT here — see forwardModelControlEnv.
-	"PI_CREW_MODEL",
-	"PI_CREW_MODEL_FALLBACK_ORDER",
-	// U8/U14 state+transport control (2026-10-10, live-caught P2 probe run
-	// team_20261010165359): the detached runner OWNS task-state writes for async
-	// runs — stripping PI_CREW_STATE_BACKEND made the host create the run with
-	// the sqlite backend while every runner-side task update silently used the
-	// JSON default (state.sqlite stuck at its createRun snapshot; tasks.json
-	// correct). PI_CREW_CHILD_PI_MODE/POOL ride along for the same parity
-	// reason (runner spawns the child-pi workers).
-	"PI_CREW_STATE_BACKEND",
-	"PI_CREW_CHILD_PI_MODE",
-	"PI_CREW_CHILD_PI_POOL",
-];
+export const BACKGROUND_RUNNER_ENV_ALLOWLIST: string[] = backgroundRunnerEnvAllowlist();
 
 /**
  * Stamp the async telemetry marker onto the background runner's env.

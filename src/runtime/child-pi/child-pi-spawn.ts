@@ -19,8 +19,8 @@
 import type { SpawnOptions } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { childPiBaseAllowlist } from "../../config/env-allowlist-registry.ts";
 import { isScratchpadEnabledForRole } from "../../config/role-tools.ts";
-import { WINDOWS_ESSENTIAL_ENV_VARS } from "../../utils/env-allowlist.ts";
 import { buildScopedAllowList, sanitizeEnvSecrets } from "../../utils/env-filter.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
 import { resolveRealContainedPath } from "../../utils/safe-paths.ts";
@@ -32,36 +32,10 @@ import type { ChildPiRunInput, ChildPiRunResult } from "./child-pi.ts";
 // ── Env allowlist (base set always passed to children) ──────────────────
 // Provider API keys are injected dynamically via buildScopedAllowList() only
 // when a model is assigned to the task (per-task key scoping).
-export const BASE_ALLOWLIST: string[] = [
-	"PATH",
-	"HOME",
-	"USER",
-	"SHELL",
-	"TERM",
-	"LANG",
-	"LC_ALL",
-	"LC_COLLATE",
-	"LC_CTYPE",
-	"LC_MESSAGES",
-	"LC_MONETARY",
-	"LC_NUMERIC",
-	"LC_TIME",
-	"XDG_CONFIG_HOME",
-	"XDG_DATA_HOME",
-	"XDG_CACHE_HOME",
-	"XDG_RUNTIME_DIR",
-	// Windows essentials — see WINDOWS_ESSENTIAL_ENV_VARS (src/utils/env-allowlist.ts).
-	...WINDOWS_ESSENTIAL_ENV_VARS,
-	"NVM_BIN",
-	"NVM_DIR",
-	"NVM_INC",
-	"NODE_DISABLE_COLORS",
-	"NODE_EXTRA_CA_CERTS",
-	"NPM_CONFIG_REGISTRY",
-	"NPM_CONFIG_USERCONFIG",
-	"NPM_CONFIG_GLOBALCONFIG",
-	"PI_CREW_DEPTH",
-];
+// GENERATED (C-1, 2026-10-11) by src/config/env-allowlist-registry.ts —
+// content pinned byte-identical to the pre-registry literal by
+// test/unit/config/env-allowlist-registry.test.ts.
+export const BASE_ALLOWLIST: string[] = childPiBaseAllowlist();
 
 /**
  * Build the SpawnOptions for a child Pi worker process. Pure function — does

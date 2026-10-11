@@ -51,6 +51,7 @@ const SRC_READ_NAMES: readonly string[] = [
 	// singles read via process.env (dot)
 	"PI_CREW_ALLOW_MOCK",
 	"PI_CREW_TEST_ASYNC_INLINE",
+	"PI_CREW_ASYNC_RUN", // registry gap fixed with the C-1 env-allowlist registry
 	"PI_CREW_BACKGROUND_RUNNER_ENTRY",
 	"PI_CREW_ASYNC_EARLY_EXIT_GUARD",
 	"PI_CREW_PROMPT_BREAKDOWN",
@@ -78,6 +79,7 @@ const SRC_READ_NAMES: readonly string[] = [
 	"PI_CREW_TRUST_PROJECT_DWF",
 	"PI_CREW_SESSION_RECOVERY",
 	"PI_CREW_HERMETIC_WORKERS",
+	"PI_CREW_TOOLS_MODIFIERS", // L2-3 (Wave A 2026-10-11): +name modifier opt-in
 	"PI_CREW_CHILD_PI_MODE",
 	"PI_CREW_CHILD_PI_POOL",
 	"PI_CREW_WORKER_TRANSPORT",
@@ -103,6 +105,7 @@ const SRC_READ_NAMES: readonly string[] = [
 	"PI_CREW_BROKER_RUN_ID",
 	"PI_CREW_ARTIFACTS_ROOT",
 	"PI_CREW_ASK_ENABLED",
+	"PI_CREW_DELEGATE_ENABLED", // registry gap fixed with the C-1 env-allowlist registry
 	"PI_CREW_SCRATCHPAD_SNAPSHOT",
 	"PI_CREW_ATTEMPT",
 	"PI_CREW_SCRATCHPAD_RESTORE",
