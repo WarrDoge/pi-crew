@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.11.16] — fix(bug #4): steer racing executor start no longer wiped by on-spawn truncate (2026-10-11)
+
+Third live-caught fix from the 2026-10-10 full battery (run team_20261010172900).
+
+### Fixed
+
+- **`steer_subagent` claimed "Steer delivered" while the steering file stayed
+  0 bytes** — root cause: the F7 on-spawn truncate's race guard compared the
+  file mtime against `taskDispatchStartedAtMs` (captured when the executor's
+  attempt loop STARTS), but `steer_subagent` accepts a steer as soon as the
+  manifest + subagent record exist — which can be EARLIER (queue/semaphore
+  gap; live timeline: manifest 17:29:00.100, steer appended 17:29:05.088,
+  executor baseline captured later, truncate wiped it at 17:29:05.753). The
+  baseline is now the run's creation time (`steerRaceBaselineMs(manifest, …)`)
+  — the earliest instant a steer could have been accepted. Fresh per-run
+  artifacts roots cannot hold pre-run residue, so the baseline only moves
+  earlier: the original F7 post-dispatch race case is unchanged, pre-run
+  residue is still wiped. Regression: `child-executor-steer-race.test.ts`
+  (live timeline replay + boundary + legacy-manifest fallback + structural
+  wiring pin).
+
 ## [0.11.15] — U8 sqlite async parity: coalesced mirror + runner env allowlist (2026-10-10)
 
 Second live-caught pair from the real-test battery (P2/P2b/P2c probes).

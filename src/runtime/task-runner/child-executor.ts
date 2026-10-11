@@ -100,6 +100,27 @@ async function appendSteeringAsync(steeringDir: string, taskId: string, steers: 
 	}
 }
 
+/**
+ * Baseline (ms) for the on-spawn steering-truncate race guard — F7 revised
+ * 2026-10-10 (battery bug #4, run team_20261010172900).
+ *
+ * steer_subagent accepts a steer as soon as the manifest + subagent record
+ * exist — which can PRECEDE this executor's dispatch start (observed live:
+ * steer accepted + appended at 17:29:05.088; the executor captured its own
+ * taskDispatchStartedAtMs LATER, so the old baseline failed the guard and the
+ * 17:29:05.753 on-spawn truncate wiped the line → tool said "Steer delivered",
+ * file stayed 0 bytes). The RUN'S creation time is the earliest instant a
+ * steer could have been appended, and the fresh per-run artifacts root cannot
+ * hold pre-run residue — so it is the correct skip-truncate baseline. The
+ * baseline only moves EARLIER vs the old dispatch-start guard, so post-
+ * dispatch race protection is unchanged. Fallback to dispatchStartedMs only
+ * for legacy manifests with an unparsable createdAt.
+ */
+export function steerRaceBaselineMs(manifest: Pick<TeamRunManifest, "createdAt">, dispatchStartedMs: number): number {
+	const base = Date.parse(manifest.createdAt);
+	return Number.isFinite(base) ? base : dispatchStartedMs;
+}
+
 /** Async helper for writing background logs — fire-and-forget for non-blocking writes. */
 async function appendBackgroundLogAsync(bgLogPath: string, eventLine: string): Promise<void> {
 	try {
@@ -840,15 +861,18 @@ export async function runChildProcessTask(ctx: TaskExecutionContext): Promise<Ta
 							const steeringDir = `${manifest.artifactsRoot}/steering`;
 							try {
 								const safeSteeringPath = resolveRealContainedPath(steeringDir, `${task.id}.jsonl`);
-								// F7 fix: skip the truncate when the file's last write happened at or
-								// after THIS task's dispatch began — that is a live steer racing the
-								// spawn (observed live: "Steer delivered" + 0-byte file). Residue
-								// predating the dispatch (stale terminal-era steers) is still wiped.
-								// stat→truncate gap is microseconds; a steer landing inside it is
-								// lost — best-effort, same trade-off as before.
+								// F7 fix, revised 2026-10-10 (battery bug #4): baseline = the run's
+							// creation (see steerRaceBaselineMs) — the earliest instant a steer
+							// could have been accepted, so steers racing in between manifest
+							// creation and executor start survive this truncate. Residue older
+							// than the run is impossible (fresh artifacts root), so the wipe
+							// path stays armed for it. stat→truncate gap is microseconds; a steer
+							// landing inside it is lost — best-effort, same trade-off as before
+							// (reliable channel: task.pendingSteers).
+								const racedSteerBaseMs = steerRaceBaselineMs(manifest, taskDispatchStartedAtMs);
 								let racedSteerArrived = false;
 								try {
-									racedSteerArrived = fs.statSync(safeSteeringPath).mtimeMs >= taskDispatchStartedAtMs - 1;
+									racedSteerArrived = fs.statSync(safeSteeringPath).mtimeMs >= racedSteerBaseMs - 1;
 								} catch {
 									/* no file yet — nothing to truncate */
 								}
