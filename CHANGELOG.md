@@ -25,6 +25,20 @@
   runs stay listed. By-ID resolution (`team status <runId>`) is unchanged.
   Covered by `test/unit/extension/core/run-index-temp-cwd.test.ts`.
 
+### Docs
+
+- **docs(u12): upstream pi-durable tracking doc** — new
+  `docs/reviews/pi-upstream-tracking-u12.md` (living re-check log, rerun every pi npm
+  release). Records the U12 spec's 4 adoption triggers with verdicts pinned at upstream
+  `origin/main` = `cdaf6c227`: T1 banner/API-freeze NOT met (`README.md:3` banner stands,
+  `[Unreleased]` opens with 5 breaking bullets), T2 multi-process NOT met (everything still
+  under `packages/coding-agent/src/experimental/`, `PI_EXPERIMENTAL=1`-gated), T3 subagent
+  conversations via services NOT met (TODO open at `services/README.md:44`), T4 concurrency
+  cap MET via pi-crew's own `resolveBatchConcurrency` cap (upstream `cb4375493` changed the
+  pass algorithm, added no cap). Appends the 7-item blacklist of unreleased post-1.1.0 churn
+  from the 2026-10-11 delta §5, each with verbatim `[Unreleased]` changelog wording. Overall:
+  still track-only (1/4 vs ≥3/4 bar); exact-pin policy unchanged.
+
 ## [0.11.17] — upgrade wave A: pi-1.1.0 adoption, central env registry, OSC 7501 program-status (2026-10-11)
 
 Implements the 10-item Wave A from `pi-crew-upgrade-research-round2.md` +
