@@ -32,9 +32,13 @@ Scope: FULL T1→T13 per skill done-criteria. Report filled DURING the run.
    17:32:38): success message returned, steering file stayed 0 bytes (mtime = creation
    17:29), STEER string nowhere on disk (both crew roots + tmp swept), worker's own
    post-run sweep found no note. NOT reproduced mid-run (9g probe landed in 1s) —
-   timing-window anomaly at the turn-end/task-terminal seam; needs a dedicated
-   investigation (suspect: late steer lands after last turn boundary → file lifecycle).
-   Filed as follow-up; 9g canonical path PASS.
+   ROOT-CAUSED post-battery from the session transcript (ground truth): the steer
+   fired at 17:29:05.086 — the SPAWN window, not the completion window — and the
+   F7 on-spawn truncate's baseline (taskDispatchStartedAtMs, captured when the
+   executor starts, i.e. AFTER the steer) failed the guard and wiped it at .753.
+   **FIXED in v0.11.16** (fcef4db3): baseline = run creation time via
+   steerRaceBaselineMs(); regression child-executor-steer-race.test.ts 6/6.
+   9g canonical mid-run path PASS.
 2. **render_png tofu-guard fired on OSC8 hyperlink escapes** in 15-inline-panel.txt
    capture (8 ESC bytes vs 0 in committed capture — OSC8 landed v0.9.x, catalog wasn't
    regenerated since): fixed by stripping OSC8 wrappers (keep link text) in
