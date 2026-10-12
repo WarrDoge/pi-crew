@@ -135,11 +135,19 @@ test("U15 redteam: double and concurrent dispose share one settled result and is
 	const before = liveOwnedProcessCount();
 	const marker = tmpMarkerFile("concurrent-dispose");
 	const ready = `${marker}.ready`;
-	const owner = spawnOwnedProcess(
-		"sh",
-		["-c", `trap 'echo term >> ${marker}; exit 0' TERM; echo up > ${ready}; while :; do sleep 1; done`],
-		{ name: "u15-concurrent-dispose", gracefulMs: 500 },
-	);
+	// Fork-free busy loop (2026-10-12 flake fix): with `while :; do sleep 1; done`
+	// there is a write→fork gap right after `echo up > ${ready}` — the 20ms
+	// readiness poll makes dispose's group TERM land inside that gap on loaded
+	// runners, dash defers the pending trap until the NEXT (post-signal) sleep
+	// dies (~1s) > gracefulMs 500, so SIGKILL beats the trap and the marker
+	// never appears (~30% flake, pinned by probe: fail runs always had
+	// tReady<6ms, pass runs tReady>20ms). `while :; do :; done` has no fork to
+	// straddle: dash runs the pending trap at the next simple-command boundary
+	// (~ms), far inside the grace window.
+	const owner = spawnOwnedProcess("sh", ["-c", `trap 'echo term >> ${marker}; exit 0' TERM; echo up > ${ready}; while :; do :; done`], {
+		name: "u15-concurrent-dispose",
+		gracefulMs: 500,
+	});
 	try {
 		await waitForFileContains(ready, "up", 2_000);
 		const first = owner.dispose();
