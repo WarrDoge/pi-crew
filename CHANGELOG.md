@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.11.18] — U11 hybrid 2-tier worker + Δ-wave benches/gates + windows CI repair (2026-10-12)
+
 ### Added
 
 - **bench(runtime): b15 — broker/scheduler task-array scan-cost microbench (Δ3)** — `bench/b15-broker-scan-cost.bench.ts` (b14 convention): measures the REAL scheduler paths (`taskGraphSnapshot`, `getReadyTasks`), a line-cited replica of the module-private `dagReadyTaskIds` call-site, the REAL crew-broker delegate/wait call-sites over a unix socket with an injected instant fake spawner, `loadRunManifestById` cold/warm floors, and the `scanZombieTempWorkspaces` walk at N=10/100/1000 in isolated mkdtemp homes. Scan-count instrumentation is bench-local (Array.prototype wrapped in-process only) — zero hot-file edits. **Δ3 verdict (bench-first rule): all 6 candidate index sites NOT-JUSTIFIED** — at realistic N≤11 tasks/run, scans cost 0.006-0.05 ms/call vs ms-scale I/O floors (loadCold 8.1 ms, DAG planner 28.8 ms @ n1000); even at 90× N, scans (0.86 ms) sit below the parse floor. **Held-lifetime audit closed no-op:** no structure is UNBOUNDED-RISK (details: `docs/perf/broker-scan-audit-2026-10-11.md`).
