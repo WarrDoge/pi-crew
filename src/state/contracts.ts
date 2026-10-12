@@ -243,6 +243,12 @@ export const TEAM_EVENT_TYPES = [
 	"mailbox.acknowledged",
 	"mailbox.message",
 	"mailbox.replayed",
+	// U5 exactly-once delivery audit: mailbox.send (crew-broker.ts:993) →
+	// mailbox.pickup (inbox-poll.ts:111) → mailbox.pickup_deduped
+	// (inbox-poll.ts:88). Dedup key + receipt only — never the message body.
+	"mailbox.send",
+	"mailbox.pickup",
+	"mailbox.pickup_deduped",
 	// Recovery
 	"recovery.rerun_task",
 	// Run-level budget/effectiveness/export/lifecycle bookkeeping
