@@ -120,7 +120,9 @@ describe("F-BAT1: removeStaleBrokerSocket unlinks ONLY on definitive ECONNREFUSE
 				once: () => {
 					/* silent: probe must not even be consulted */
 				},
-				destroy: () => {},
+				destroy: () => {
+					/* nothing to tear down on a fake socket */
+				},
 			}),
 		};
 		const verdict = await removeStaleBrokerSocket(sockPath, 5000, neverResponds as never);
@@ -135,7 +137,9 @@ describe("F-BAT1: removeStaleBrokerSocket unlinks ONLY on definitive ECONNREFUSE
 		const srcDir = fs.mkdtempSync(path.join(os.tmpdir(), "pc-fbat1-corpse-"));
 		const livePath = path.join(srcDir, "live.sock");
 		const corpsePath = path.join(tmpBase, "probe-corpse.sock");
-		const server = net.createServer(() => {});
+		const server = net.createServer(() => {
+			/* no connection handler needed — we only need a bound socket to rename */
+		});
 		await new Promise<void>((resolve) => server.listen(livePath, resolve));
 		fs.renameSync(livePath, corpsePath);
 		server.close();
@@ -147,7 +151,9 @@ describe("F-BAT1: removeStaleBrokerSocket unlinks ONLY on definitive ECONNREFUSE
 				once: (ev: string, fn: (arg?: unknown) => void) => {
 					if (ev === "error") fn({ code: "ECONNREFUSED" });
 				},
-				destroy: () => {},
+				destroy: () => {
+					/* nothing to tear down on a fake socket */
+				},
 			}),
 		};
 		assert.equal(await removeStaleBrokerSocket(corpsePath, 5000, refused as never), "removed");
@@ -158,7 +164,9 @@ describe("F-BAT1: removeStaleBrokerSocket unlinks ONLY on definitive ECONNREFUSE
 		// the deterministic lstat branch above and be removed.
 		const live2 = path.join(srcDir, "live2.sock");
 		const corpse2 = path.join(tmpBase, "probe-corpse2.sock");
-		const server2 = net.createServer(() => {});
+		const server2 = net.createServer(() => {
+			/* no connection handler needed — we only need a bound socket to rename */
+		});
 		await new Promise<void>((resolve) => server2.listen(live2, resolve));
 		fs.renameSync(live2, corpse2);
 		server2.close();
@@ -169,7 +177,9 @@ describe("F-BAT1: removeStaleBrokerSocket unlinks ONLY on definitive ECONNREFUSE
 				once: () => {
 					/* silent: only the timer can fire */
 				},
-				destroy: () => {},
+				destroy: () => {
+					/* nothing to tear down on a fake socket */
+				},
 			}),
 		};
 		assert.equal(await removeStaleBrokerSocket(corpse2, 5, timedOut as never), "kept", "timeout on a socket entry must never unlink");
