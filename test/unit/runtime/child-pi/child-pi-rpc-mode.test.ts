@@ -112,7 +112,7 @@ async function makeHarness(fixtureArgs: string[] = []): Promise<Harness> {
 				if (saved[key] === undefined) delete process.env[key];
 				else process.env[key] = saved[key];
 			}
-			fs.rmSync(workRoot, { recursive: true, force: true });
+			fs.rmSync(workRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); // maxRetries: Windows EBUSY while a killed child's handle drains
 		},
 	};
 	// Default trace target for the rpc fixture (tests can restage with knobs).

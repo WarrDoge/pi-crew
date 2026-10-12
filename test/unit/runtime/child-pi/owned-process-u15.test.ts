@@ -131,7 +131,12 @@ test("U15: bounded awaitExit reports a live long-runner without killing it, neve
 	await waitFor(() => liveOwnedProcessCount() === before, 3_000, "live count baseline after bounded-await dispose");
 });
 
-test("U15 redteam: double and concurrent dispose share one settled result and issue one terminating signal", async () => {
+test("U15 redteam: double and concurrent dispose share one settled result and issue one terminating signal", {
+	skip:
+		process.platform === "win32"
+			? "POSIX-only: TERM-trap + process-group semantics via sh; Windows taskkill path has no TERM delivery (B4-g precedent — fail closed, skip with reason)"
+			: false,
+}, async () => {
 	const before = liveOwnedProcessCount();
 	const marker = tmpMarkerFile("concurrent-dispose");
 	const ready = `${marker}.ready`;

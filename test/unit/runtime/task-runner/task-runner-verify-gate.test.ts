@@ -89,7 +89,7 @@ test("U13 acceptance: green gate → verifier task completes WITHOUT spawning th
 });
 
 test("U13: red gate → verifier still spawns, WITH the gate results in its prompt", async () => {
-	const cwd = makeRepoDir("pi-crew-u13-red-", { typecheck: "node -e 'process.exit(5)'" });
+	const cwd = makeRepoDir("pi-crew-u13-red-", { typecheck: 'node -e "process.exit(5)"' }); // DOUBLE quotes: cmd.exe keeps single-quoted -e args as inert string literals → exit 0 → gate turns GREEN on Windows (live-caught CI 2026-10-12)
 	const created = createRunManifest({ cwd, team: team as never, workflow: workflow as never, goal: "u13-red" });
 	const task = created.tasks[0]!;
 	const prevMock = process.env.PI_TEAMS_MOCK_CHILD_PI;

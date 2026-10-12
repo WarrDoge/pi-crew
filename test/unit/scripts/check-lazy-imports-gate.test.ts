@@ -74,7 +74,7 @@ test("undeclared static import is caught (exit 1, file:line reported)", () => {
 	const result = runGate(dir);
 	assert.equal(result.status, 1, `gate output:\n${result.stdout}\n${result.stderr}`);
 	const all = result.stdout + result.stderr;
-	assert.match(all, /src\/main\.ts:1/);
+	assert.match(all, /src[\\/]main\.ts:1/); // separator-agnostic: Windows gate output uses backslashes
 	assert.match(all, /leftpad is not declared in fixture-pkg's dependencies/);
 });
 
@@ -103,7 +103,7 @@ test("unmarked runtime import() in an object-property position (old regex blind 
 	const result = runGate(dir);
 	assert.equal(result.status, 1, `gate output:\n${result.stdout}\n${result.stderr}`);
 	const all = result.stdout + result.stderr;
-	assert.match(all, /src\/main\.ts:2/);
+	assert.match(all, /src[\\/]main\.ts:2/); // separator-agnostic: Windows gate output uses backslashes
 	assert.match(all, /without `\/\/ LAZY:` marker/);
 });
 
