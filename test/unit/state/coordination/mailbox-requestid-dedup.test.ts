@@ -64,7 +64,23 @@ function makeFixture(prefix: string): Fixture {
 		eventsPath: path.join(stateRoot, "events.jsonl"),
 		artifacts: [],
 	} as unknown as TeamRunManifest;
-	return { manifest, stateRoot, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+	// Best-effort teardown: an async mailbox/event writer can still be flushing
+	// when cleanup fires (ENOTEMPTY/EBUSY rmdir — live-caught Nightly 2026-10-12,
+	// passes 3× isolated); the dir is pi-crew-* prefixed so the runner's debris
+	// sweep removes leftovers. A passed test must not fail on teardown.
+	return {
+		manifest,
+		stateRoot,
+		cleanup: () => {
+			try {
+				fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+			} catch (err) {
+				const code = (err as NodeJS.ErrnoException).code;
+				if (code !== "EBUSY" && code !== "EPERM" && code !== "ENOTEMPTY" && code !== "EACCES") throw err;
+				console.warn(`[test] tmpdir locked (${code}): ${root} — left for debris sweep`);
+			}
+		},
+	};
 }
 
 function readEvents(stateRoot: string): Array<{ type: string; data?: Record<string, unknown> }> {
