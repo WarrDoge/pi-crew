@@ -64,6 +64,26 @@ function makeResolvedTempDir(prefix: string): string {
 	return fs.realpathSync(dir);
 }
 
+/**
+ * Best-effort recursive remove for test tmpdirs. On Windows a just-killed
+ * child or an open sqlite handle can hold a lock past every sane retry window
+ * (live-caught CI 2026-10-12: EPERM/EBUSY on GH windows runners) — the test
+ * body already passed, so a locked temp dir must NOT fail the run. Leftovers
+ * live in %TEMP% (ephemeral on CI; swept locally by the runner's debris pass).
+ */
+function bestEffortRm(target: string): void {
+	try {
+		fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code === "EBUSY" || code === "EPERM" || code === "ENOTEMPTY" || code === "EACCES") {
+			console.warn(`[test] bestEffortRm: ${code} on ${target} (locked handle) — leaving for temp sweeper`);
+			return;
+		}
+		throw err;
+	}
+}
+
 /** Run a block with PI_CREW_STATE_BACKEND pinned, restoring the previous value. */
 function withBackend(backend: "json" | "sqlite", fn: () => void): void {
 	const prev = process.env.PI_CREW_STATE_BACKEND;
@@ -126,7 +146,7 @@ function runScenario(backend: "json" | "sqlite"): { outcome: ScenarioOutcome; st
 			hasTasksJson: fs.existsSync(path.join(stateRoot, "tasks.json")),
 		};
 	});
-	fs.rmSync(cwd, { recursive: true, force: true });
+	bestEffortRm(cwd);
 	return { outcome: outcome!, stateRoot, runId };
 }
 
@@ -191,7 +211,7 @@ test("U8 sqlite: createRunManifest commits manifest+tasks to the db in one batch
 		});
 	} finally {
 		__test__closeAllSqliteStores();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		bestEffortRm(cwd);
 	}
 });
 
@@ -221,7 +241,7 @@ test("U8 sqlite: db is authoritative — load survives missing/stale json mirror
 		});
 	} finally {
 		__test__closeAllSqliteStores();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		bestEffortRm(cwd);
 	}
 });
 
@@ -253,7 +273,7 @@ test("U8 sqlite: terminal-preserve guard reads the authoritative db (stale runni
 		});
 	} finally {
 		__test__closeAllSqliteStores();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		bestEffortRm(cwd);
 	}
 });
 
@@ -271,7 +291,7 @@ test("U8 sqlite: ST-4 empty-refuse guard reads the authoritative db", () => {
 		});
 	} finally {
 		__test__closeAllSqliteStores();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		bestEffortRm(cwd);
 	}
 });
 
@@ -294,7 +314,7 @@ test("U8 sqlite: legacy JSON-created run still loads after enabling the backend 
 		});
 	} finally {
 		__test__closeAllSqliteStores();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		bestEffortRm(cwd);
 	}
 });
 
@@ -316,7 +336,7 @@ test("U8 sqlite: loadRunManifestByIdAsync twin reads the authoritative db", asyn
 		});
 	} finally {
 		__test__closeAllSqliteStores();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		bestEffortRm(cwd);
 	}
 });
 
@@ -353,6 +373,6 @@ test("U8 FIX: saveRunTasksCoalesced mirrors into sqlite (live-caught P2 probe 20
 		});
 	} finally {
 		__test__closeAllSqliteStores();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		bestEffortRm(cwd);
 	}
 });

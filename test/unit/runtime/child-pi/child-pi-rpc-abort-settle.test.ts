@@ -88,7 +88,16 @@ async function makeHarness(): Promise<Harness> {
 				if (saved[key] === undefined) delete process.env[key];
 				else process.env[key] = saved[key];
 			}
-			fs.rmSync(workRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); // maxRetries: Windows EBUSY while a killed child's handle drains
+			// Best-effort: Windows can hold a killed child's handle past any retry
+			// window (EBUSY, live-caught CI 2026-10-12) — the test body passed; a
+			// locked temp dir must not fail the run. %TEMP% is ephemeral on CI.
+			try {
+				fs.rmSync(workRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+			} catch (err) {
+				const code = (err as NodeJS.ErrnoException).code;
+				if (code !== "EBUSY" && code !== "EPERM" && code !== "ENOTEMPTY" && code !== "EACCES") throw err;
+				console.warn(`[test] tmpdir locked (${code}): ${workRoot} — left for temp sweeper`);
+			}
 		},
 	};
 	return harness;
