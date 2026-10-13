@@ -96,13 +96,18 @@ describe("R-03 readEventsCursor generation-aware reset", () => {
 			appendEvents(filePath, 11, 3);
 
 			// WITHOUT generation tracking: the stale byte offset (end of the
-			// pre-rotation file) points past EOF of the new small file, so the
-			// reader sees ZERO events — it MISSES seq 11..13.
+			// pre-rotation file) points past EOF of the new small file. U22 Phase 1
+			// (rotation tail-drain): the shrank signal drains the archive tail and
+			// re-reads the live file from 0 — the reader no longer silently misses
+			// seq 11..13 (this used to return 0 events before the fix).
 			const stale = readEventsCursor(filePath, {
 				fromByteOffset: first.nextByteOffset,
 				sinceSeq: 10,
 			});
-			assert.equal(stale.events.length, 0, "stale cursor misses post-rotation events (the bug)");
+			assert.equal(stale.events.length, 3, "stale cursor recovers via the U22 Phase 1 shrank-drain");
+			assert.equal(stale.events[0]?.metadata?.seq, 11);
+			assert.equal(stale.events.at(-1)?.metadata?.seq, 13);
+			assert.equal(stale.nextByteOffset, fs.statSync(filePath).size, "cursor advanced to end of new file");
 
 			// WITH generation tracking: gen mismatch triggers a reset to
 			// offset 0, so the reader picks up the post-rotation events.

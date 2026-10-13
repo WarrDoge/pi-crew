@@ -9,9 +9,119 @@ export interface IncrementalReadResult {
 	lines: string[];
 	state: IncrementalReadState;
 	eof: boolean;
+	/** U22 Phase 1 rotation signal: the file is now SHORTER than
+	 *  `state.byteOffset` (rotate/truncate). The returned state keeps the legacy
+	 *  "clamp to fileSize" behavior; consumers that can drain archives should
+	 *  re-read from offset 0 instead of trusting the clamp (see
+	 *  readEventsCursor's fromByteOffset path). */
+	shrank?: boolean;
+}
+
+interface TrackedLine {
+	text: string;
+	/** Absolute byte offset of the line's first byte. */
+	byteOffset: number;
+	/** 0-based index among ALL complete lines in the file (blank included). */
+	lineIndex: number;
+}
+
+interface ReadLinesDetailedResult {
+	lines: TrackedLine[];
+	state: IncrementalReadState;
+	eof: boolean;
+	shrank: boolean;
+	/** Trailing non-blank bytes without "\n" were held back (torn tail). */
+	tornTail: boolean;
 }
 
 const CHUNK_SIZE = 64 * 1024;
+
+// --- U22 Phase 1: unified torn/poison classification for JSONL read paths ---
+//
+// One low-level scanner shared by every reader (full parse, tail window,
+// byte-offset delta) so all paths classify corrupt content IDENTICALLY:
+// - TORN tail = trailing bytes with no terminating "\n" (mid-append crash
+//   cut). Recoverable: excluded from items, reported as tornTail=true, never
+//   marked — the next append completes the line and it parses normally.
+// - POISON line = a COMPLETE (newline-terminated) line whose JSON.parse
+//   fails. Sticky: reported in `failures` so the caller records a
+//   poison-marker sidecar entry and later reads skip the line by byte offset
+//   without re-parsing it.
+
+export interface JsonlParsedItem<T> {
+	value: T;
+	/** Absolute byte offset of the line's first byte. */
+	byteOffset: number;
+}
+
+export interface JsonlParseFailure {
+	/** Absolute byte offset of the failing line's first byte (stable match key). */
+	byteOffset: number;
+	/** 0-based index among the window's complete lines; -1 = unknown globally. */
+	lineIndex: number;
+	/** JSON.parse error message. */
+	reason: string;
+}
+
+export interface JsonlWindowParseOptions {
+	/** Line-start byte offsets already known poison (sticky markers) — skipped
+	 *  WITHOUT a parse attempt so marked lines never re-parse. */
+	poisonOffsets?: ReadonlySet<number>;
+}
+
+export interface JsonlWindowParseResult<T> {
+	items: JsonlParsedItem<T>[];
+	/** Complete lines whose JSON.parse failed in THIS pass (new poison). */
+	failures: JsonlParseFailure[];
+	/** Trailing non-blank bytes without a terminating "\n" (torn tail). */
+	tornTail: boolean;
+	/** Complete lines skipped via poisonOffsets (marker hits — not re-parsed). */
+	poisonSkipped: number;
+	/** Number of complete (newline-terminated) lines in the window. */
+	lineCount: number;
+	/** Bytes up to and including the last complete line's "\n". */
+	completeBytes: number;
+}
+
+function parseFailureReason(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/** Scan `buf` (starting at absolute `baseOffset`, itself a line boundary) into
+ *  complete lines and classify each. Blank lines yield no item and no failure
+ *  (matching the legacy readers). A trailing fragment without "\n" is held
+ *  back as tornTail — never parsed as a line. */
+export function parseJsonlWindow<T>(buf: Buffer, baseOffset: number, options?: JsonlWindowParseOptions): JsonlWindowParseResult<T> {
+	const poisonOffsets = options?.poisonOffsets;
+	const items: JsonlParsedItem<T>[] = [];
+	const failures: JsonlParseFailure[] = [];
+	let poisonSkipped = 0;
+	let lineCount = 0;
+	let completeBytes = 0;
+	let pos = 0;
+	for (;;) {
+		const newline = buf.indexOf(0x0a, pos);
+		if (newline < 0) break;
+		const lineStartOffset = baseOffset + pos;
+		if (poisonOffsets?.has(lineStartOffset)) {
+			poisonSkipped++;
+		} else {
+			const trimmed = buf.toString("utf-8", pos, newline).trim();
+			if (trimmed) {
+				try {
+					items.push({ value: JSON.parse(trimmed) as T, byteOffset: lineStartOffset });
+				} catch (error) {
+					failures.push({ byteOffset: lineStartOffset, lineIndex: lineCount, reason: parseFailureReason(error) });
+				}
+			}
+		}
+		lineCount++;
+		pos = newline + 1;
+		completeBytes = pos;
+	}
+	const tornTail = pos < buf.length && buf.toString("utf-8", pos).trim().length > 0;
+	return { items, failures, tornTail, poisonSkipped, lineCount, completeBytes };
+}
 
 /**
  * Read the last `tailBytes` bytes of a file and parse it as JSONL,
@@ -28,26 +138,45 @@ const CHUNK_SIZE = 64 * 1024;
  * regardless of how large the file grows. Used by the event-log tail
  * read path (FIND-05) to avoid the O(total events) cost of the legacy
  * `readFileSync`+`split("\n")`+`JSON.parse` approach.
+ *
+ * U22 Phase 1: the parse phase is the shared torn/poison classifier
+ * (`parseJsonlWindow`) — a trailing fragment without "\n" is held back and
+ * reported as `tornTail` (never parsed as a line), complete-but-unparseable
+ * lines are reported in `failures` for sticky poison marking, and lines whose
+ * start offset is in `options.poisonOffsets` are skipped WITHOUT a parse.
  */
+export interface ReadJsonlTailOptions {
+	/** Line-start byte offsets already known poison (sticky markers) — skipped
+	 *  without a parse attempt. */
+	poisonOffsets?: ReadonlySet<number>;
+}
+
 export function readJsonlTail<T>(
 	filePath: string,
 	tailBytes: number,
+	options?: ReadJsonlTailOptions,
 ): {
 	items: T[];
 	fileSize: number;
 	bytesRead: number;
 	truncated: boolean;
+	/** Trailing torn fragment held back (mid-append crash cut). */
+	tornTail: boolean;
+	/** Lines skipped via poisonOffsets (marker hits — not re-parsed). */
+	poisonSkipped: number;
+	/** Complete lines whose JSON.parse failed in THIS pass (new poison). */
+	failures: JsonlParseFailure[];
 } {
 	const limit = Math.max(0, Math.floor(tailBytes));
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(filePath);
 	} catch {
-		return { items: [], fileSize: 0, bytesRead: 0, truncated: false };
+		return { items: [], fileSize: 0, bytesRead: 0, truncated: false, tornTail: false, poisonSkipped: 0, failures: [] };
 	}
 	const fileSize = stat.size;
 	if (fileSize === 0 || limit === 0) {
-		return { items: [], fileSize, bytesRead: 0, truncated: false };
+		return { items: [], fileSize, bytesRead: 0, truncated: false, tornTail: false, poisonSkipped: 0, failures: [] };
 	}
 
 	const startOffset = Math.max(0, fileSize - limit);
@@ -63,7 +192,7 @@ export function readJsonlTail<T>(
 		// yields ELOOP, which the catch below treats like ENOENT (return empty).
 		fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
 	} catch {
-		return { items: [], fileSize, bytesRead: 0, truncated: false };
+		return { items: [], fileSize, bytesRead: 0, truncated: false, tornTail: false, poisonSkipped: 0, failures: [] };
 	}
 	try {
 		const buf = Buffer.alloc(bytesToRead);
@@ -75,38 +204,42 @@ export function readJsonlTail<T>(
 			totalRead += bytesRead;
 		}
 
-		// Decode the slice we actually read; the buffer may be partially
-		// filled on short reads. We use totalRead (not bytesToRead) so the
-		// JSONL split lands on actual data, not a zero-padded tail.
-		const content = buf.toString("utf-8", 0, totalRead);
-
 		// If we truncated the file, the first decoded line may be a
 		// half-line from the cut. Drop it — we can't trust the JSON.
-		// Use a single indexOf("\n") to find the first newline; if there
-		// is none, the whole tail is one partial line and we drop it.
-		let body = content;
+		// Use a byte-level indexOf so the drop offset is a real byte offset
+		// (a string index would mis-slice multi-byte UTF-8 content).
 		if (truncated) {
-			const firstNewline = body.indexOf("\n");
+			const firstNewline = buf.subarray(0, totalRead).indexOf(0x0a);
 			if (firstNewline < 0) {
 				// No newline at all in the tail → the entire tail is one
 				// partial line. Return no items; the caller should fall
 				// back to a wider tail or full read.
-				return { items: [], fileSize, bytesRead: totalRead, truncated: true };
+				return { items: [], fileSize, bytesRead: totalRead, truncated: true, tornTail: false, poisonSkipped: 0, failures: [] };
 			}
-			body = body.slice(firstNewline + 1);
+			const parsed = parseJsonlWindow<T>(buf.subarray(firstNewline + 1, totalRead), startOffset + firstNewline + 1, options);
+			// Window-relative line indexes are only file-global when the window
+			// starts at byte 0 (no truncation drop) — otherwise mark unknown.
+			return {
+				items: parsed.items.map((item) => item.value),
+				fileSize,
+				bytesRead: totalRead,
+				truncated,
+				tornTail: parsed.tornTail,
+				poisonSkipped: parsed.poisonSkipped,
+				failures: parsed.failures.map((failure) => ({ ...failure, lineIndex: -1 })),
+			};
 		}
 
-		const items: T[] = [];
-		for (const line of body.split("\n")) {
-			const trimmed = line.trim();
-			if (!trimmed) continue;
-			try {
-				items.push(JSON.parse(trimmed) as T);
-			} catch {
-				// Skip malformed lines (mirrors readJsonlSince's behavior).
-			}
-		}
-		return { items, fileSize, bytesRead: totalRead, truncated };
+		const parsed = parseJsonlWindow<T>(buf.subarray(0, totalRead), 0, options);
+		return {
+			items: parsed.items.map((item) => item.value),
+			fileSize,
+			bytesRead: totalRead,
+			truncated,
+			tornTail: parsed.tornTail,
+			poisonSkipped: parsed.poisonSkipped,
+			failures: parsed.failures,
+		};
 	} finally {
 		if (fd !== undefined) {
 			try {
@@ -123,6 +256,16 @@ export function readJsonlTail<T>(
  * Uses fs.openSync + fs.readSync for efficient incremental reading.
  */
 export function readLinesSince(filePath: string, state: IncrementalReadState): IncrementalReadResult {
+	const detailed = readLinesSinceDetailed(filePath, state);
+	return {
+		lines: detailed.lines.map((line) => line.text),
+		state: detailed.state,
+		eof: detailed.eof,
+		...(detailed.shrank ? { shrank: true } : {}),
+	};
+}
+
+function readLinesSinceDetailed(filePath: string, state: IncrementalReadState): ReadLinesDetailedResult {
 	let fd: number | undefined;
 	try {
 		fd = fs.openSync(filePath, "r");
@@ -131,6 +274,8 @@ export function readLinesSince(filePath: string, state: IncrementalReadState): I
 			lines: [],
 			state: { byteOffset: state.byteOffset, lineCount: state.lineCount },
 			eof: true,
+			shrank: false,
+			tornTail: false,
 		};
 	}
 
@@ -143,6 +288,10 @@ export function readLinesSince(filePath: string, state: IncrementalReadState): I
 				lines: [],
 				state: { byteOffset: fileSize, lineCount: state.lineCount },
 				eof: true,
+				// U22 Phase 1: file shorter than the caller's offset = the offset
+				// is stale (rotate/truncate) — signal instead of silently clamping.
+				shrank: fileSize < state.byteOffset,
+				tornTail: false,
 			};
 		}
 
@@ -158,9 +307,10 @@ export function readLinesSince(filePath: string, state: IncrementalReadState): I
 		}
 
 		const content = buf.subarray(0, totalRead);
-		const lines: string[] = [];
+		const lines: TrackedLine[] = [];
 		let lineCount = state.lineCount;
 		let committedOffset = state.byteOffset;
+		let allLineIndex = 0;
 
 		let searchFrom = 0;
 		let newlineIdx: number;
@@ -175,20 +325,24 @@ export function readLinesSince(filePath: string, state: IncrementalReadState): I
 		// per complete line.
 		while ((newlineIdx = content.indexOf(0x0a, searchFrom)) !== -1) {
 			const lineText = content.toString("utf-8", searchFrom, newlineIdx);
+			lines.push({ text: lineText, byteOffset: state.byteOffset + searchFrom, lineIndex: allLineIndex });
+			allLineIndex++;
 			committedOffset = state.byteOffset + newlineIdx + 1;
 			searchFrom = newlineIdx + 1;
 			if (lineText.length > 0) {
-				lines.push(lineText);
 				lineCount++;
 			}
 		}
 
 		const eof = committedOffset >= fileSize;
+		const tornTail = !eof && content.toString("utf-8", searchFrom).trim().length > 0;
 
 		return {
 			lines,
 			state: { byteOffset: committedOffset, lineCount },
 			eof,
+			shrank: false,
+			tornTail,
 		};
 	} finally {
 		if (fd !== undefined) {
@@ -203,26 +357,61 @@ export function readLinesSince(filePath: string, state: IncrementalReadState): I
 
 /**
  * Read parsed JSON objects from a JSONL file since last known byte offset.
- * Skips malformed lines.
+ * U22 Phase 1: uses the shared torn/poison classifier — a trailing fragment
+ * without "\n" is held back (tornTail, never parsed as a line), complete lines
+ * in `options.poisonOffsets` are skipped WITHOUT a parse (sticky markers), and
+ * new parse failures are returned in `failures` for sticky marking.
  */
+export interface ReadJsonlSinceOptions {
+	poisonOffsets?: ReadonlySet<number>;
+}
+
 export function readJsonlSince<T>(
 	filePath: string,
 	state: IncrementalReadState,
-): { items: T[]; state: IncrementalReadState; eof: boolean } {
-	const result = readLinesSince(filePath, state);
+	options?: ReadJsonlSinceOptions,
+): {
+	items: T[];
+	state: IncrementalReadState;
+	eof: boolean;
+	tornTail: boolean;
+	poisonSkipped: number;
+	failures: JsonlParseFailure[];
+	shrank: boolean;
+} {
+	const detailed = readLinesSinceDetailed(filePath, state);
+	// Window-relative line indexes are file-global only when this read started
+	// at byte 0; otherwise the caller's lineCount is not the file's line count.
+	const globalIndexes = state.byteOffset === 0;
 	const items: T[] = [];
+	const failures: JsonlParseFailure[] = [];
+	let poisonSkipped = 0;
 
-	for (const line of result.lines) {
+	for (const line of detailed.lines) {
+		if (options?.poisonOffsets?.has(line.byteOffset)) {
+			poisonSkipped++;
+			continue;
+		}
+		const trimmed = line.text.trim();
+		if (!trimmed) continue;
 		try {
-			items.push(JSON.parse(line) as T);
-		} catch {
-			// Skip malformed lines
+			items.push(JSON.parse(trimmed) as T);
+		} catch (error) {
+			failures.push({
+				byteOffset: line.byteOffset,
+				lineIndex: globalIndexes ? line.lineIndex : -1,
+				reason: parseFailureReason(error),
+			});
 		}
 	}
 
 	return {
 		items,
-		state: result.state,
-		eof: result.eof,
+		state: detailed.state,
+		eof: detailed.eof,
+		tornTail: detailed.tornTail,
+		poisonSkipped,
+		failures,
+		shrank: detailed.shrank,
 	};
 }

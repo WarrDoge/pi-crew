@@ -1,9 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type IncrementalReadState, readJsonlSince, readJsonlTail } from "../../utils/incremental-reader.ts";
+import { type JsonlParseFailure, parseJsonlWindow, readJsonlSince, readJsonlTail } from "../../utils/incremental-reader.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
 import type { TeamEvent } from "./event-log.ts";
 import { currentGeneration } from "./event-log-rotation.ts";
+import { commitPoisonFindings, planPoisonSkip } from "./poison-marker.ts";
 
 // --- R18 / R16-B1 effect 2 (Phase 3.6): archive-tail readers ----------------
 // Rotation stranding: a sync append that was mid-appendFileSync holding an fd
@@ -32,26 +33,85 @@ function listEventArchivePaths(eventsPath: string): string[] {
 	}
 }
 
-/** Parse a JSONL file into TeamEvents, skipping corrupt/blank lines (mirrors
- *  the legacy readEvents parser). Returns [] when the file is unreadable. */
-function parseJsonlEvents(filePath: string): TeamEvent[] {
-	let raw: string;
+/** Parse a JSONL file into TeamEvents with the unified U22 Phase 1 torn/poison
+ *  classification: torn (unterminated) tail line held back + reported, complete
+ *  poison lines skipped + sticky-marked, marker-hit lines skipped WITHOUT a
+ *  re-parse. Returns empty events when the file is unreadable. */
+interface EventsFileReadOutcome {
+	events: TeamEvent[];
+	tornTail: boolean;
+	poisonSkipped: number;
+	parseFailures: number;
+	quarantined: boolean;
+}
+
+function emptyEventsFileReadOutcome(): EventsFileReadOutcome {
+	return { events: [], tornTail: false, poisonSkipped: 0, parseFailures: 0, quarantined: false };
+}
+
+/** Number of complete (newline-terminated) lines — the marker reset-policy
+ *  index basis. Byte-level scan, no decode. */
+function countCompleteLines(buf: Buffer): number {
+	let count = 0;
+	let idx = 0;
+	for (;;) {
+		const newline = buf.indexOf(0x0a, idx);
+		if (newline < 0) break;
+		count++;
+		idx = newline + 1;
+	}
+	return count;
+}
+
+function parseJsonlEventsWithIntegrity(filePath: string): EventsFileReadOutcome {
+	let buf: Buffer;
 	try {
-		raw = fs.readFileSync(filePath, "utf-8");
+		buf = fs.readFileSync(filePath);
 	} catch {
-		return [];
+		return emptyEventsFileReadOutcome();
 	}
-	const events: TeamEvent[] = [];
-	for (const line of raw.split("\n")) {
-		const trimmed = line.trim();
-		if (!trimmed) continue;
-		try {
-			events.push(JSON.parse(trimmed) as TeamEvent);
-		} catch {
-			/* skip corrupt lines */
-		}
+	const lineCount = countCompleteLines(buf);
+	const plan = planPoisonSkip(filePath, buf.length, lineCount);
+	const parsed = parseJsonlWindow<TeamEvent>(buf, 0, { poisonOffsets: plan.offsets });
+	const quarantined = commitPoisonFindings(filePath, buf.length, lineCount, parsed.failures);
+	if (quarantined) {
+		// Cap exceeded — the file was renamed to `<name>.corrupt-<ts>`; return
+		// the safe empty value (never throw).
+		return { ...emptyEventsFileReadOutcome(), parseFailures: parsed.failures.length, quarantined: true };
 	}
-	return events;
+	return {
+		events: parsed.items.map((item) => item.value),
+		tornTail: parsed.tornTail,
+		poisonSkipped: parsed.poisonSkipped,
+		parseFailures: parsed.failures.length,
+		quarantined: false,
+	};
+}
+
+/** Tail-window read of one events/archive JSONL file with the SAME torn/poison
+ *  classification as the full parse above (marker lineIndex is unknown for a
+ *  truncated window — byte offsets remain the stable match key). */
+function readEventsFileTailWithIntegrity(filePath: string, tailBytes: number): EventsFileReadOutcome & { truncated: boolean } {
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(filePath);
+	} catch {
+		return { ...emptyEventsFileReadOutcome(), truncated: false };
+	}
+	const plan = planPoisonSkip(filePath, stat.size, undefined);
+	const tail = readJsonlTail<TeamEvent>(filePath, tailBytes, { poisonOffsets: plan.offsets });
+	const quarantined = commitPoisonFindings(filePath, stat.size, undefined, tail.failures);
+	if (quarantined) {
+		return { ...emptyEventsFileReadOutcome(), parseFailures: tail.failures.length, truncated: tail.truncated, quarantined: true };
+	}
+	return {
+		events: tail.items,
+		tornTail: tail.tornTail,
+		poisonSkipped: tail.poisonSkipped,
+		parseFailures: tail.failures.length,
+		quarantined: false,
+		truncated: tail.truncated,
+	};
 }
 
 const ARCHIVE_TAIL_BYTES = 4 * 1024 * 1024; // 4 MB — mirrors readEventsCursor's TAIL_BYTES
@@ -65,8 +125,10 @@ function readArchiveTailEvents(eventsPath: string, sinceSeq: number): TeamEvent[
 	if (archives.length === 0) return [];
 	const bySeq = new Map<number, TeamEvent>();
 	for (const archivePath of archives) {
-		const tail = readJsonlTail<TeamEvent>(archivePath, ARCHIVE_TAIL_BYTES);
-		for (const event of tail.items) {
+		// U22 Phase 1: archives get the same torn/poison classification (each
+		// archive carries its own `<archive>.poison.jsonl` sidecar).
+		const tail = readEventsFileTailWithIntegrity(archivePath, ARCHIVE_TAIL_BYTES);
+		for (const event of tail.events) {
 			const seq = event.metadata?.seq;
 			if (typeof seq !== "number" || seq <= sinceSeq) continue;
 			if (!bySeq.has(seq)) bySeq.set(seq, event);
@@ -85,7 +147,20 @@ function mergeArchiveTailEvents(archiveEvents: TeamEvent[], liveEvents: TeamEven
 	return [...bySeq.values()].sort((a, b) => (a.metadata?.seq ?? 0) - (b.metadata?.seq ?? 0));
 }
 
-export function readEvents(eventsPath: string): TeamEvent[] {
+export interface EventLogReadIntegrity {
+	/** Any read file (archive or live) ended mid-line (crash-truncated tail). */
+	tornTail: boolean;
+	/** Lines skipped via sticky poison markers (not re-parsed this read). */
+	poisonSkipped: number;
+	/** Lines whose JSON.parse failed in this read (poison discovered now). */
+	parseFailures: number;
+	/** A file exceeded the poison-marker cap and was quarantined (last resort). */
+	quarantined: boolean;
+}
+
+/** U22 Phase 1: readEvents plus the unified torn/poison metadata. `readEvents`
+ *  (below) is the exact-event-behavior wrapper for existing callers. */
+export function readEventsWithIntegrity(eventsPath: string): { events: TeamEvent[]; integrity: EventLogReadIntegrity } {
 	// R18 / R16-B1 effect 2 (Phase 3.6): FULL-HISTORY semantics — merge every
 	// archive (pre-rotation generations, including stranded in-flight appends)
 	// with the live file, dedup by seq, ordered by seq. Callers needing the
@@ -103,13 +178,26 @@ export function readEvents(eventsPath: string): TeamEvent[] {
 		}
 		events.push(event);
 	};
+	const integrity: EventLogReadIntegrity = { tornTail: false, poisonSkipped: 0, parseFailures: 0, quarantined: false };
+	const absorb = (outcome: EventsFileReadOutcome): void => {
+		integrity.tornTail = integrity.tornTail || outcome.tornTail;
+		integrity.poisonSkipped += outcome.poisonSkipped;
+		integrity.parseFailures += outcome.parseFailures;
+		integrity.quarantined = integrity.quarantined || outcome.quarantined;
+		for (const event of outcome.events) push(event);
+	};
 	for (const archivePath of archives) {
-		for (const event of parseJsonlEvents(archivePath)) push(event);
+		absorb(parseJsonlEventsWithIntegrity(archivePath));
 	}
 	if (fs.existsSync(eventsPath)) {
-		for (const event of parseJsonlEvents(eventsPath)) push(event);
+		absorb(parseJsonlEventsWithIntegrity(eventsPath));
 	}
-	return events.sort((a, b) => (a.metadata?.seq ?? 0) - (b.metadata?.seq ?? 0));
+	events.sort((a, b) => (a.metadata?.seq ?? 0) - (b.metadata?.seq ?? 0));
+	return { events, integrity };
+}
+
+export function readEvents(eventsPath: string): TeamEvent[] {
+	return readEventsWithIntegrity(eventsPath).events;
 }
 
 export interface EventCursorOptions {
@@ -136,6 +224,22 @@ export interface EventCursorResult {
 	 * streaming byte-offset reads should echo this back as `generation` on the
 	 * next call so rotation is detected and the cursor resets. */
 	generation?: number;
+	/** U22 Phase 1 (optional, additive): the live file's read ended on a torn
+	 *  (unterminated) tail line — recoverable, the next append completes it. */
+	tornTail?: boolean;
+	/** U22 Phase 1 (optional, additive): lines skipped via sticky poison markers
+	 *  (complete lines whose JSON.parse failed earlier — skipped without a
+	 *  re-parse this read). */
+	poisonSkipped?: number;
+	/** U22 Phase 1 (optional, additive): lines whose JSON.parse failed in THIS
+	 *  read (newly discovered poison). */
+	parseFailures?: number;
+}
+
+export interface EventReadIntegrity {
+	tornTail: boolean;
+	poisonSkipped: number;
+	parseFailures: number;
 }
 
 function positiveInteger(value: number | undefined): number | undefined {
@@ -243,6 +347,13 @@ interface CursorTailCacheEntry {
 	 *  non-decreasing seq. False => the ring may answer only from offset 0. */
 	verified: boolean;
 	ring: CursorLineEvent[];
+	/** U22 Phase 1 metadata from the scan that built/extended this entry —
+	 *  served on unchanged-stamp reads without re-reading event bytes. Marker
+	 *  sidecar changes do not touch the events file's stamps, so a marker
+	 *  written by another read path can make these counts lag by one read
+	 *  (items are unaffected: a poison line yields no event either way). */
+	tornTail: boolean;
+	poisonSkipped: number;
 }
 
 const cursorTailCache = new Map<string, CursorTailCacheEntry>();
@@ -276,32 +387,43 @@ function scanEventLines(
 	buf: Buffer,
 	baseOffset: number,
 	minSeq: number | undefined,
-): { lines: CursorLineEvent[]; verifiedBytes: number; ok: boolean } {
-	const lines: CursorLineEvent[] = [];
+	poisonOffsets?: ReadonlySet<number>,
+): {
+	lines: CursorLineEvent[];
+	verifiedBytes: number;
+	ok: boolean;
+	/** U22 Phase 1: new parse failures (poison) for sticky marking. */
+	failures: JsonlParseFailure[];
+	/** U22 Phase 1: held-back trailing fragment without "\n" (torn tail). */
+	tornTail: boolean;
+	/** U22 Phase 1: marker-hit lines skipped WITHOUT a parse. */
+	poisonSkipped: number;
+	/** U22 Phase 1: complete lines in the window (marker reset-policy index). */
+	lineCount: number;
+} {
+	// U22 Phase 1: delegate the line scan to the shared torn/poison classifier
+	// so the cached path classifies corrupt content IDENTICALLY to the wide
+	// path and the full parser (marker hits skip the parse entirely).
+	const parsed = parseJsonlWindow<TeamEvent>(buf, baseOffset, { poisonOffsets });
 	let ok = true;
 	let lastSeq = minSeq;
-	let pos = 0;
-	for (;;) {
-		const newline = buf.indexOf(0x0a, pos);
-		if (newline < 0) break;
-		const text = buf.toString("utf-8", pos, newline).trim();
-		if (text) {
-			try {
-				const event = JSON.parse(text) as TeamEvent;
-				const seq = event.metadata?.seq;
-				if (typeof seq !== "number" || !Number.isFinite(seq) || (lastSeq !== undefined && seq < lastSeq)) {
-					ok = false;
-				} else {
-					lastSeq = seq;
-				}
-				lines.push({ event, startOffset: baseOffset + pos });
-			} catch {
-				/* corrupt line — skipped, but its bytes still advance */
-			}
+	for (const item of parsed.items) {
+		const seq = item.value.metadata?.seq;
+		if (typeof seq !== "number" || !Number.isFinite(seq) || (lastSeq !== undefined && seq < lastSeq)) {
+			ok = false;
+		} else {
+			lastSeq = seq;
 		}
-		pos = newline + 1;
 	}
-	return { lines, verifiedBytes: pos, ok };
+	return {
+		lines: parsed.items.map((item) => ({ event: item.value, startOffset: item.byteOffset })),
+		verifiedBytes: parsed.completeBytes,
+		ok,
+		failures: parsed.failures,
+		tornTail: parsed.tornTail,
+		poisonSkipped: parsed.poisonSkipped,
+		lineCount: parsed.lineCount,
+	};
 }
 
 /** Read exactly [start, end) from an already-open fd, or return null on any
@@ -327,7 +449,10 @@ function readCursorByteRange(fd: number, start: number, end: number): Buffer | n
  *  construction). Returns undefined when the file cannot be read (the caller
  *  falls back to the wide window). O_NOFOLLOW matches readJsonlTail's
  *  symlink refusal. */
-function rebuildCursorTailCache(eventsPath: string, bound: number): { entry: CursorTailCacheEntry; lines: CursorLineEvent[] } | undefined {
+function rebuildCursorTailCache(
+	eventsPath: string,
+	bound: number,
+): { entry: CursorTailCacheEntry; lines: CursorLineEvent[]; quarantined: boolean; parseFailures: number } | undefined {
 	let fd: number | undefined;
 	try {
 		fd = fs.openSync(eventsPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
@@ -338,7 +463,12 @@ function rebuildCursorTailCache(eventsPath: string, bound: number): { entry: Cur
 		const stat = fs.fstatSync(fd);
 		const buf = readCursorByteRange(fd, 0, stat.size);
 		if (buf === null) return undefined;
-		const scan = scanEventLines(buf, 0, undefined);
+		// U22 Phase 1: exact lineCount (full file) makes the marker reset policy
+		// precise here — stale markers (rotate/truncate) can never skip a line.
+		const lineCount = countCompleteLines(buf);
+		const plan = planPoisonSkip(eventsPath, buf.length, lineCount);
+		const scan = scanEventLines(buf, 0, undefined, plan.offsets);
+		const quarantined = commitPoisonFindings(eventsPath, buf.length, lineCount, scan.failures);
 		const lastLine = scan.lines.at(-1)?.event.metadata?.seq;
 		const entry: CursorTailCacheEntry = {
 			size: stat.size,
@@ -349,8 +479,10 @@ function rebuildCursorTailCache(eventsPath: string, bound: number): { entry: Cur
 			lastSeq: typeof lastLine === "number" ? lastLine : 0,
 			verified: scan.ok,
 			ring: evictCursorRing(scan.lines, bound),
+			tornTail: scan.tornTail,
+			poisonSkipped: scan.poisonSkipped,
 		};
-		return { entry, lines: scan.lines };
+		return { entry, lines: scan.lines, quarantined, parseFailures: scan.failures.length };
 	} finally {
 		try {
 			fs.closeSync(fd);
@@ -363,7 +495,13 @@ function rebuildCursorTailCache(eventsPath: string, bound: number): { entry: Cur
 /** Shared answer pipeline (identical to the wide path's): TAIL_EVENT_CAP
  *  slice (+ its warning) BEFORE the sinceSeq filter, then the R18/R16-B1
  *  archive-tail merge, then the head-cap limit, then total/nextSeq. */
-function cursorResultFromEvents(all: TeamEvent[], eventsPath: string, sinceSeq: number, limit: number | undefined): EventCursorResult {
+function cursorResultFromEvents(
+	all: TeamEvent[],
+	eventsPath: string,
+	sinceSeq: number,
+	limit: number | undefined,
+	integrity?: EventReadIntegrity,
+): EventCursorResult {
 	let capped = all;
 	if (capped.length > TAIL_EVENT_CAP) {
 		logInternalError(
@@ -382,7 +520,14 @@ function cursorResultFromEvents(all: TeamEvent[], eventsPath: string, sinceSeq: 
 	const merged = mergeArchiveTailEvents(readArchiveTailEvents(eventsPath, sinceSeq), filtered);
 	const events = limit !== undefined ? merged.slice(0, limit) : merged;
 	const returnedMaxSeq = events.reduce((max, event) => Math.max(max, event.metadata?.seq ?? 0), sinceSeq);
-	return { events, nextSeq: returnedMaxSeq, total: merged.length };
+	return {
+		events,
+		nextSeq: returnedMaxSeq,
+		total: merged.length,
+		...(integrity
+			? { tornTail: integrity.tornTail, poisonSkipped: integrity.poisonSkipped, parseFailures: integrity.parseFailures }
+			: {}),
+	};
 }
 
 /** Can `ring` (under `entry`'s lineage) answer a read anchored at sinceSeq?
@@ -412,6 +557,11 @@ function readEventsCursorTailCached(eventsPath: string, sinceSeq: number, limit:
 	}
 	const previous = cursorTailCache.get(eventsPath);
 	const bound = Math.max(TAIL_EVENT_CAP, limit) * 2;
+	// U22 Phase 1: consult the sticky-poison sidecar up front (one existsSync
+	// on the clean-file fast path — no event bytes touched). Marker-hit lines
+	// are skipped without a parse in every branch below, keeping the cached
+	// path's torn/poison classification identical to the wide path's.
+	const plan = planPoisonSkip(eventsPath, stat.size, undefined);
 
 	if (previous && stat.size === previous.size && stat.mtimeMs === previous.mtimeMs && sameInode(stat, previous)) {
 		// Unchanged stamps + same inode: serve purely from the ring (no event
@@ -426,6 +576,7 @@ function readEventsCursorTailCached(eventsPath: string, sinceSeq: number, limit:
 				eventsPath,
 				sinceSeq,
 				limit,
+				{ tornTail: previous.tornTail, poisonSkipped: previous.poisonSkipped, parseFailures: 0 },
 			);
 		}
 	} else if (
@@ -468,32 +619,41 @@ function readEventsCursorTailCached(eventsPath: string, sinceSeq: number, limit:
 				}
 			}
 			if (delta !== null) {
-				const scan = scanEventLines(delta, previous.verifiedOffset, previous.lastSeq);
+				const scan = scanEventLines(delta, previous.verifiedOffset, previous.lastSeq, plan.offsets);
 				if (scan.ok) {
-					const ring = evictCursorRing([...preRing, ...scan.lines], bound);
-					const lastLineSeq = scan.lines.at(-1)?.event.metadata?.seq;
-					const entry: CursorTailCacheEntry = {
-						size: stat.size,
-						mtimeMs: stat.mtimeMs,
-						ino: stat.ino,
-						dev: stat.dev,
-						verifiedOffset: previous.verifiedOffset + scan.verifiedBytes,
-						lastSeq: typeof lastLineSeq === "number" ? lastLineSeq : previous.lastSeq,
-						// The delta verified against the watermark, but a
-						// violation earlier in the file keeps the lineage
-						// unverified (it can only answer from offset 0).
-						verified: previous.verified,
-						ring,
-					};
-					cursorTailCache.set(eventsPath, entry);
-					if (cursorRingProvable(entry, ring, sinceSeq)) {
-						return cursorResultFromEvents(
-							ring.map((line) => line.event),
-							eventsPath,
-							sinceSeq,
-							limit,
-						);
+					const quarantined = commitPoisonFindings(eventsPath, stat.size, undefined, scan.failures);
+					if (!quarantined) {
+						const ring = evictCursorRing([...preRing, ...scan.lines], bound);
+						const lastLineSeq = scan.lines.at(-1)?.event.metadata?.seq;
+						const entry: CursorTailCacheEntry = {
+							size: stat.size,
+							mtimeMs: stat.mtimeMs,
+							ino: stat.ino,
+							dev: stat.dev,
+							verifiedOffset: previous.verifiedOffset + scan.verifiedBytes,
+							lastSeq: typeof lastLineSeq === "number" ? lastLineSeq : previous.lastSeq,
+							// The delta verified against the watermark, but a
+							// violation earlier in the file keeps the lineage
+							// unverified (it can only answer from offset 0).
+							verified: previous.verified,
+							ring,
+							tornTail: scan.tornTail,
+							poisonSkipped: previous.poisonSkipped + scan.poisonSkipped,
+						};
+						cursorTailCache.set(eventsPath, entry);
+						if (cursorRingProvable(entry, ring, sinceSeq)) {
+							return cursorResultFromEvents(
+								ring.map((line) => line.event),
+								eventsPath,
+								sinceSeq,
+								limit,
+								{ tornTail: entry.tornTail, poisonSkipped: entry.poisonSkipped, parseFailures: scan.failures.length },
+							);
+						}
 					}
+					// Quarantined (poison cap exceeded — file renamed): fall through
+					// to the full-parse rebuild, which misses the renamed path and
+					// hands the caller the wide path's safe-empty result.
 				}
 			}
 		}
@@ -514,11 +674,21 @@ function readEventsCursorTailCached(eventsPath: string, sinceSeq: number, limit:
 		const oldestKey = cursorTailCache.keys().next().value;
 		if (oldestKey !== undefined) cursorTailCache.delete(oldestKey);
 	}
+	if (rebuilt.quarantined) {
+		// U22 Phase 1 cap exceeded — the file was renamed to
+		// `<name>.corrupt-<ts>`; return the safe empty answer (never throw).
+		return cursorResultFromEvents([], eventsPath, sinceSeq, limit, {
+			tornTail: false,
+			poisonSkipped: 0,
+			parseFailures: rebuilt.parseFailures,
+		});
+	}
 	return cursorResultFromEvents(
 		rebuilt.lines.map((line) => line.event),
 		eventsPath,
 		sinceSeq,
 		limit,
+		{ tornTail: rebuilt.entry.tornTail, poisonSkipped: rebuilt.entry.poisonSkipped, parseFailures: rebuilt.parseFailures },
 	);
 }
 
@@ -578,15 +748,39 @@ export function readEventsCursor(eventsPath: string, options: EventCursorOptions
 		const staleCursor = options.generation !== undefined && options.generation !== liveGen;
 		const sinceSeq = positiveInteger(options.sinceSeq) ?? 0;
 		const archiveEvents = staleCursor ? readArchiveTailEvents(eventsPath, sinceSeq) : [];
-		const byteOffset = staleCursor ? 0 : (positiveInteger(options.fromByteOffset) ?? 0);
-		const initialState: IncrementalReadState = { byteOffset, lineCount: 0 };
-		const { items, state: newState, eof } = readJsonlSince<TeamEvent>(eventsPath, initialState);
-		const filtered = items.filter((event) => (event.metadata?.seq ?? 0) > sinceSeq);
-		const merged = mergeArchiveTailEvents(archiveEvents, filtered);
+		const requestedOffset = staleCursor ? 0 : (positiveInteger(options.fromByteOffset) ?? 0);
+		// U22 Phase 1: consult the sticky-poison sidecar (marker-hit lines are
+		// skipped without a re-parse — same classification as the other paths).
+		let fileSize = 0;
+		try {
+			fileSize = fs.statSync(eventsPath).size;
+		} catch {
+			/* missing file — markers are vacuous; readJsonlSince returns empty */
+		}
+		const plan = planPoisonSkip(eventsPath, fileSize, undefined);
+		let read = readJsonlSince<TeamEvent>(eventsPath, { byteOffset: requestedOffset, lineCount: 0 }, { poisonOffsets: plan.offsets });
+		let drainedArchiveEvents = archiveEvents;
+		if (!staleCursor && read.shrank) {
+			// U22 Phase 1 rotation tail-drain: the live file is now SHORTER than
+			// the caller's offset (rotate/truncate WITHOUT a generation echo —
+			// e.g. a reader that never tracked generation). Reading forward from
+			// the clamped offset would silently skip the new file's head, and the
+			// pre-rotation tail (stranded into the archive) would never drain.
+			// Same contract as the staleCursor branch: drain the archive TAILS
+			// first (seq > sinceSeq, deduped), THEN re-read the live file from 0 —
+			// the reader never advances past a rotation without draining the old
+			// window, and the seq-dedupe merge kills the archive/live overlap.
+			drainedArchiveEvents = readArchiveTailEvents(eventsPath, sinceSeq);
+			read = readJsonlSince<TeamEvent>(eventsPath, { byteOffset: 0, lineCount: 0 }, { poisonOffsets: plan.offsets });
+		}
+		const quarantined = commitPoisonFindings(eventsPath, fileSize, undefined, read.failures);
+		const safeItems = quarantined ? [] : read.items;
+		const filtered = safeItems.filter((event) => (event.metadata?.seq ?? 0) > sinceSeq);
+		const merged = mergeArchiveTailEvents(drainedArchiveEvents, filtered);
 		const limit = positiveInteger(options.limit);
 		const events = limit !== undefined ? merged.slice(0, limit) : merged;
 		const returnedMaxSeq = events.reduce((max, event) => Math.max(max, event.metadata?.seq ?? 0), sinceSeq);
-		// BR-08: `newState.byteOffset` sits past the ENTIRE delta read above —
+		// BR-08: `read.state.byteOffset` sits past the ENTIRE delta read above —
 		// including the events the `limit` slice just dropped. Handing that back
 		// as `nextByteOffset` let a caller resume PAST events it never saw (silent
 		// loss: the delta read then returns an empty tail). Only expose the
@@ -598,8 +792,11 @@ export function readEventsCursor(eventsPath: string, options: EventCursorOptions
 			events,
 			nextSeq: returnedMaxSeq,
 			total: merged.length,
-			...(deliveredWholeDelta ? { nextByteOffset: newState.byteOffset } : {}),
+			...(deliveredWholeDelta ? { nextByteOffset: read.state.byteOffset } : {}),
 			generation: liveGen,
+			tornTail: quarantined ? false : read.tornTail,
+			poisonSkipped: quarantined ? 0 : read.poisonSkipped,
+			parseFailures: read.failures.length,
 		};
 	}
 
@@ -637,13 +834,20 @@ export function readEventsCursor(eventsPath: string, options: EventCursorOptions
 	// inode-number reuse. The next sinceSeq+limit call re-establishes the
 	// watermark with one full parse.
 	cursorTailCache.delete(eventsPath);
-	const tail = readJsonlTail<TeamEvent>(eventsPath, TAIL_BYTES);
+	// U22 Phase 1: the wide tail read goes through the same torn/poison
+	// classification (marker sidecar consulted; poison lines sticky-marked;
+	// torn tail held back and reported) as the full parse and the cached path.
+	const tail = readEventsFileTailWithIntegrity(eventsPath, TAIL_BYTES);
 	if (tail.truncated) {
 		logInternalError("event-log.cursor-tail-truncated", {
 			eventsPath,
-			returned: tail.items.length,
+			returned: tail.events.length,
 			tailBytes: TAIL_BYTES,
 		});
 	}
-	return cursorResultFromEvents(tail.items, eventsPath, sinceSeq, limit);
+	return cursorResultFromEvents(tail.events, eventsPath, sinceSeq, limit, {
+		tornTail: tail.tornTail,
+		poisonSkipped: tail.poisonSkipped,
+		parseFailures: tail.parseFailures,
+	});
 }
