@@ -111,7 +111,13 @@ const BUDGETS = {
 		// U11 (2026-10-11): 521 → 523 — task-runner/hybrid-tier.ts (policy-gated
 		// lazy import) + live-session/embedded-tier.ts (static import from
 		// live-session-runtime.ts) both ship in the single-file bundle.
-		maxFiles: 523,
+		// PI-DURABLE (2026-10-13): 523 → 525 — state/event-log/poison-marker.ts
+		// (static import from cursor.ts; sidecar torn/poison integrity) and
+		// state/coordination/process-lock.ts (static import from locks.ts; U21
+		// kernel socket run-lock supplement) are core sync read/lock paths —
+		// not deferrable — and ship in the single-file bundle. Baseline verified
+		// at main d29df7dd = 523/523.
+		maxFiles: 525,
 		forbid: ["test/", "scripts/", "docs/", "dist/"],
 	},
 };
