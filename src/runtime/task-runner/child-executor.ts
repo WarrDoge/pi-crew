@@ -70,7 +70,7 @@ import { buildSyntheticTerminalEvidence, cancellationReasonFromSignal } from "..
 import { checkProcessLiveness } from "../process-status.ts";
 import { DEFAULT_RETRY_POLICY } from "../recovery/retry-executor.ts";
 import { runWorker } from "../run-worker.ts";
-import { parseSessionUsage } from "../session-usage.ts";
+import { parseSessionUsage, usageFromValue } from "../session-usage.ts";
 import { recordSupervisorContact, supervisorContactFromEvent } from "../supervisor-contact.ts";
 import type { ResultSource, TaskExecutionResult } from "./post-execution.ts";
 import type { StreamBridgeHandle, TaskExecutionContext } from "./pre-execution.ts";
@@ -937,7 +937,10 @@ export async function runChildProcessTask(ctx: TaskExecutionContext): Promise<Ta
 						if (event && typeof event === "object" && (event as Record<string, unknown>).type === "message_end") {
 							const msg = (event as Record<string, unknown>).message as Record<string, unknown> | undefined;
 							if (msg?.role === "assistant") {
-								const usage = msg.usage as Record<string, number> | undefined;
+								// U16 (Fix D): parse via the shared parser so message-level usage
+								// (cost is an OBJECT {…, total} per @earendil-works/pi-ai Usage)
+								// contributes cost + cacheRead to the ledger too.
+								const usage = usageFromValue(msg.usage);
 								if (usage) {
 									// RT-8: spread before accumulating lifetimeUsage instead of
 									// mutating in place — preserves the immutable-snapshot invariant.
@@ -946,7 +949,9 @@ export async function runChildProcessTask(ctx: TaskExecutionContext): Promise<Ta
 										lifetimeUsage: {
 											input: (task.lifetimeUsage?.input ?? 0) + (usage.input ?? 0),
 											output: (task.lifetimeUsage?.output ?? 0) + (usage.output ?? 0),
+											cacheRead: (task.lifetimeUsage?.cacheRead ?? 0) + (usage.cacheRead ?? 0),
 											cacheWrite: (task.lifetimeUsage?.cacheWrite ?? 0) + (usage.cacheWrite ?? 0),
+											cost: (task.lifetimeUsage?.cost ?? 0) + (usage.cost ?? 0),
 										},
 									};
 								}

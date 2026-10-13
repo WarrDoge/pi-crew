@@ -43,6 +43,7 @@ import {
 // in a single place: the shared user prompt. See G3 fix.
 import { createStreamingOutput, type StreamingOutputHandle } from "../output/streaming-output.ts";
 import { buildSensitivePathConstraint } from "../sensitive-paths.ts";
+import { usageFromValue } from "../session-usage.ts";
 import { trackTaskUsage } from "../usage-tracker.ts";
 import {
 	buildYieldReminder,
@@ -234,8 +235,13 @@ type LiveSessionLike = {
 	steer?: (text: string) => Promise<void>;
 	abort?: () => Promise<void> | void;
 	dispose?: () => void;
-	getStats?: () => unknown;
-	stats?: unknown;
+	/** U16: SDK AgentSession session-level stats surface (aggregate tokens + cost);
+	 *  shaped like live-agent-manager's LiveSessionHandle so the session can be
+	 *  registered there without a cast (extra SDK fields like cost pass structurally). */
+	getSessionStats?: () => {
+		tokens?: { input?: number; output?: number; cacheWrite?: number; cacheRead?: number };
+		contextUsage?: { percent?: number | null; window?: number };
+	};
 	bindExtensions?: (bindings?: Record<string, unknown>) => Promise<void>;
 	getActiveToolNames?: () => string[];
 	setActiveToolsByName?: (names: string[]) => void;
@@ -525,15 +531,6 @@ function finalAssistantText(event: unknown): string[] {
 	return textFromContent(message.content);
 }
 
-function numberField(obj: Record<string, unknown> | undefined, keys: string[]): number | undefined {
-	if (!obj) return undefined;
-	for (const key of keys) {
-		const value = obj[key];
-		if (typeof value === "number" && Number.isFinite(value)) return value;
-	}
-	return undefined;
-}
-
 /**
  * F7: resolve the enabledModels allowlist for the current project, but only
  * if the `reliability.scopeModels` toggle is ON. Returns an empty
@@ -794,18 +791,12 @@ function filterActiveTools(session: LiveSessionLike, agent: AgentConfig, role?: 
 	session.setActiveToolsByName(active);
 }
 
-function usageFromStats(stats: unknown): UsageState | undefined {
-	const obj = asRecord(stats);
-	if (!obj) return undefined;
-	const input = numberField(obj, ["input", "inputTokens", "input_tokens"]);
-	const output = numberField(obj, ["output", "outputTokens", "output_tokens"]);
-	const cacheRead = numberField(obj, ["cacheRead", "cache_read"]);
-	const cacheWrite = numberField(obj, ["cacheWrite", "cache_write"]);
-	const cost = numberField(obj, ["cost"]);
-	const turns = numberField(obj, ["turns", "turnCount", "turn_count"]);
-	return [input, output, cacheRead, cacheWrite, cost, turns].some((value) => value !== undefined)
-		? { input, output, cacheRead, cacheWrite, cost, turns }
-		: undefined;
+/** U16 (Fix B): thin adapter — session-stats parsing is delegated to the single
+ *  shared parser (`usageFromValue`), which accepts BOTH the nested SDK
+ *  `SessionStats` shape (`tokens.{input,output,cacheRead,cacheWrite}` + `cost`)
+ *  and flat legacy shapes. Exported for unit tests. */
+export function usageFromStats(stats: unknown): UsageState | undefined {
+	return usageFromValue(stats);
 }
 
 /**
@@ -1798,7 +1789,9 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 						emit: emitEmbedded,
 					})
 				: undefined;
-		const usage = usageFromStats(typeof session.getStats === "function" ? session.getStats() : session.stats);
+		// U16 (Fix A): the SDK surface is getSessionStats() — the old getStats()
+		// name and session.stats fallback were both dead against the real SDK.
+		const usage = usageFromStats(session.getSessionStats?.());
 		updateLiveAgentStatus(agentId, "completed");
 		markLiveAgentCompleted(agentId);
 		return {

@@ -13,7 +13,43 @@ function numberField(obj: Record<string, unknown>, keys: string[]): number | und
 	return undefined;
 }
 
-function usageFromValue(value: unknown): UsageState | undefined {
+/**
+ * U16 (D2 — two-tier cost): cost arrives EITHER as a session-level aggregate
+ * NUMBER (SDK `SessionStats.cost`) OR as a message-level OBJECT with a `total`
+ * field (`@earendil-works/pi-ai` `Usage.cost = {input, output, cacheRead,
+ * cacheWrite, total}`). Accept both; an object without a finite `total` yields
+ * undefined — never NaN.
+ */
+function costField(obj: Record<string, unknown>): number | undefined {
+	for (const key of ["cost", "costUsd", "cost_usd"]) {
+		const raw = obj[key];
+		if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+		const record = asRecord(raw);
+		const total = record ? record.total : undefined;
+		if (typeof total === "number" && Number.isFinite(total)) return total;
+	}
+	return undefined;
+}
+
+function mergeUsageFields(primary: UsageState, fallback: UsageState): UsageState {
+	return {
+		input: primary.input ?? fallback.input,
+		output: primary.output ?? fallback.output,
+		cacheRead: primary.cacheRead ?? fallback.cacheRead,
+		cacheWrite: primary.cacheWrite ?? fallback.cacheWrite,
+		cost: primary.cost ?? fallback.cost,
+		turns: primary.turns ?? fallback.turns,
+	};
+}
+
+/**
+ * U16: the single usage-shape parser (session-level `SessionStats` AND
+ * message-level `Usage`). Flat/direct fields win; nested payloads
+ * (`usage`/`tokenUsage`/`tokens`/`stats`) fill only the MISSING fields, so the
+ * SDK session shape `{tokens: {…}, cost}` maps completely while flat legacy
+ * shapes parse unchanged.
+ */
+export function usageFromValue(value: unknown): UsageState | undefined {
 	const obj = asRecord(value);
 	if (!obj) return undefined;
 	const direct: UsageState = {
@@ -21,14 +57,15 @@ function usageFromValue(value: unknown): UsageState | undefined {
 		output: numberField(obj, ["output", "outputTokens", "output_tokens"]),
 		cacheRead: numberField(obj, ["cacheRead", "cache_read", "cacheReadTokens", "cache_read_tokens"]),
 		cacheWrite: numberField(obj, ["cacheWrite", "cache_write", "cacheWriteTokens", "cache_write_tokens"]),
-		cost: numberField(obj, ["cost", "costUsd", "cost_usd"]),
+		cost: costField(obj),
 		turns: numberField(obj, ["turns", "turnCount", "turn_count"]),
 	};
-	if (Object.values(direct).some((entry) => entry !== undefined)) return direct;
+	let merged: UsageState | undefined = Object.values(direct).some((entry) => entry !== undefined) ? direct : undefined;
 	for (const key of ["usage", "tokenUsage", "tokens", "stats"]) {
 		const nested = usageFromValue(obj[key]);
-		if (nested) return nested;
+		if (nested) merged = merged ? mergeUsageFields(merged, nested) : nested;
 	}
+	if (merged) return merged;
 	const message = asRecord(obj.message);
 	return message ? usageFromValue(message.usage) : undefined;
 }
@@ -48,6 +85,10 @@ function compactUsage(total: UsageState, foundKeys: Set<keyof UsageState>): Usag
 	if (foundKeys.size === 0) return undefined;
 	const compact: UsageState = {};
 	for (const key of foundKeys) compact[key] = total[key];
+	// U16 (Fix D): stable ledger schema — once ANY usage was seen, `cost` is
+	// always present (0 when no source ever reported it) so downstream
+	// consumers can rely on `usage.cost` being a number.
+	compact.cost = compact.cost ?? 0;
 	return compact;
 }
 

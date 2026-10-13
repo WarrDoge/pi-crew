@@ -1,3 +1,5 @@
+import { usageFromValue } from "../session-usage.ts";
+
 export interface ParsedPiUsage {
 	input?: number;
 	output?: number;
@@ -24,14 +26,6 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
-function numberField(obj: Record<string, unknown>, keys: string[]): number | undefined {
-	for (const key of keys) {
-		const value = obj[key];
-		if (typeof value === "number" && Number.isFinite(value)) return value;
-	}
-	return undefined;
-}
-
 function mergeUsage(target: ParsedPiUsage, source: ParsedPiUsage): ParsedPiUsage {
 	return {
 		input: source.input ?? target.input,
@@ -43,24 +37,17 @@ function mergeUsage(target: ParsedPiUsage, source: ParsedPiUsage): ParsedPiUsage
 	};
 }
 
+/**
+ * U16: usage extraction is delegated to the single shared parser
+ * (`usageFromValue` in session-usage.ts) so the subprocess tier accepts BOTH
+ * cost shapes — the session-level aggregate NUMBER and the message-level
+ * OBJECT with `total` (@earendil-works/pi-ai `Usage.cost`) — instead of
+ * silently dropping the object form. Same field aliases as before
+ * (inputTokens/input_tokens/cost_usd/…) and same nested fallbacks
+ * (usage/message/tokenUsage/tokens/stats).
+ */
 function extractUsage(value: unknown): ParsedPiUsage | undefined {
-	const obj = asRecord(value);
-	if (!obj) return undefined;
-	const direct: ParsedPiUsage = {
-		input: numberField(obj, ["input", "inputTokens", "input_tokens"]),
-		output: numberField(obj, ["output", "outputTokens", "output_tokens"]),
-		cacheRead: numberField(obj, ["cacheRead", "cache_read", "cacheReadTokens", "cache_read_tokens"]),
-		cacheWrite: numberField(obj, ["cacheWrite", "cache_write", "cacheWriteTokens", "cache_write_tokens"]),
-		cost: numberField(obj, ["cost", "costUsd", "cost_usd"]),
-		turns: numberField(obj, ["turns", "turnCount", "turn_count"]),
-	};
-	if (Object.values(direct).some((entry) => entry !== undefined)) return direct;
-	// Pi --mode json nests usage under message for message_end / turn_end events.
-	for (const key of ["usage", "message", "tokenUsage", "tokens", "stats"]) {
-		const nested = extractUsage(obj[key]);
-		if (nested) return nested;
-	}
-	return undefined;
+	return usageFromValue(value);
 }
 
 function textFromContent(content: unknown): string[] {

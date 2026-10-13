@@ -131,6 +131,42 @@ export async function runMockChildPi(
 			stderr: "[MOCK] rate limit: mock failure",
 		};
 
+	// U16 (usage ledger): same happy-path shape as json-success, but the
+	// message_end events carry the REAL message-level usage shape — usage
+	// nested under message.role="assistant" with cost as an OBJECT
+	// ({input, output, cacheRead, cacheWrite, total} per @earendil-works/pi-ai
+	// Usage) — so the lifetimeUsage accumulator and the subprocess usage
+	// parsers see exactly what a real child pi emits. Two events so the
+	// accumulation (sum) across messages is asserted, not a single snapshot.
+	if (mock === "json-usage-ledger") {
+		const text = `[MOCK] JSON usage ledger for ${input.agent.name}`;
+		const usageEvent = (tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }, cost: number) =>
+			JSON.stringify({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					usage: {
+						...tokens,
+						totalTokens: tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite,
+						cost: {
+							input: 0.01,
+							output: 0.01,
+							cacheRead: 0.005,
+							cacheWrite: 0.005,
+							total: cost,
+						},
+					},
+				},
+			});
+		const stdout = [
+			JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } }),
+			usageEvent({ input: 10, output: 5, cacheRead: 40, cacheWrite: 3 }, 0.035),
+			usageEvent({ input: 7, output: 2, cacheRead: 20, cacheWrite: 1 }, 0.0203),
+		].join("\n");
+		await observe(input, `${stdout}\n`);
+		return { exitCode: 0, stdout, stderr: "" };
+	}
+
 	// RR-013 (F04) test seam: reproduce the MuxSurface A1 degrade result WITHOUT a
 	// real multiplexer. child-executor's `childResult.surface?.degraded` branch is
 	// the ONLY producer of TaskExecutionResult.surfaceLost, and runTeamTask offers

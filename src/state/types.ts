@@ -684,9 +684,10 @@ export interface TeamTaskState {
 	/** Parsed metric key-values from worker output (CREW_METRIC lines). */
 	metrics?: Record<string, number>;
 
-	/** Lifetime token usage accumulated via message_end events. Survives compaction
-	 *  (session.stats reset on compaction, but this is an independent accumulator). */
-	lifetimeUsage?: { input: number; output: number; cacheWrite: number };
+	/** Lifetime token/cost usage accumulated via message_end events. Survives compaction
+	 *  (session stats reset on compaction, but this is an independent accumulator).
+	 *  U16: cacheRead/cost are additive-optional so pre-U16 persisted states stay valid. */
+	lifetimeUsage?: { input: number; output: number; cacheWrite: number; cacheRead?: number; cost?: number };
 
 	/** Steering messages queued before the task's session was ready.
 	 *  Delivered when the session initializes (mirrors pi-subagents3 pendingSteers pattern). */

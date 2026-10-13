@@ -178,7 +178,7 @@ export async function prepareTaskExecutionContext(
 		// it outlives the worker, which would blind the stale-reconciler's
 		// PID-liveness gate forever.
 		agentProgress: input.task.agentProgress ?? emptyCrewAgentProgress(),
-		// Lifetime usage accumulator — survives compaction unlike session.stats
+		// Lifetime usage accumulator — survives compaction unlike session stats snapshots
 		lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
 		...(dependencyContextText ? { dependencyContextText } : {}),
 	} as TeamTaskState;
