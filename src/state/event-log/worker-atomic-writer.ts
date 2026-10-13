@@ -226,8 +226,14 @@ interface PendingEntry {
 export class WorkerRequestBookkeeper {
 	private readonly pending = new Map<number, PendingEntry>();
 	private nextId = 1;
+	private readonly timeoutMs: number;
 
-	constructor(private readonly timeoutMs: number) {}
+	// NOTE: no parameter property — child processes import this module with
+	// --experimental-strip-types, which rejects TS transform-only syntax
+	// (US-011 regression, caught in Phase 1 gate).
+	constructor(timeoutMs: number) {
+		this.timeoutMs = timeoutMs;
+	}
 
 	/** Wire a worker's (or fake's) message/error/exit events into the map. */
 	attach(source: WorkerEventSource, isActive?: () => boolean): void {
