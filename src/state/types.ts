@@ -600,6 +600,16 @@ export interface TaskAttemptState {
 	startedAt: string;
 	endedAt?: string;
 	error?: string;
+	/** U9-ADJ (2026-10-13): optional attribution — who/what initiated this
+	 * attempt (e.g. owner session id, scheduler component). Purely additive:
+	 * old state without it stays valid; both backends persist it opaquely
+	 * (tasks.json bare array + sqlite per-task JSON blob — no whitelist
+	 * validators reject unknown fields). Caller-populated; no write-site is
+	 * forced by this field existing. */
+	owner?: string;
+	/** U9-ADJ (2026-10-13): why this attempt was spawned (e.g. "auto-retry",
+	 * "crash-resume", "manual-rerun"). Optional/additive, caller-populated. */
+	intent?: string;
 }
 
 export interface TeamTaskState {
