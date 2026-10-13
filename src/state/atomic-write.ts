@@ -828,16 +828,23 @@ export function atomicWriteFile(filePath: string, content: string, options?: Ato
 export async function atomicWriteFileAsync(filePath: string, content: string, options?: AtomicWriteOptions): Promise<void> {
 	cancelPendingCoalescedWrite(filePath);
 	const { durability, mode } = normalizeOptions(options);
+	// PHASE 0 P3 (U22 bước-0): run the symlink guard BEFORE dispatching to the
+	// worker. Previously the worker branch sat ABOVE this guard, so an unsafe
+	// target was written by the worker without the main-side check, and the
+	// normalized options were dropped entirely (worker hardcoded 0o600).
+	if (!isSymlinkSafeDirCached(filePath))
+		throw new Error(`Refusing to write: target is a symlink or inside untrusted directory: ${filePath}`);
 	// Phase 1.5 (RFC 15): when the worker-thread atomic writer is enabled
 	// (PI_CREW_WORKER_ATOMIC_WRITER=1), dispatch to a dedicated worker thread
 	// that performs SYNC fs ops with no internal yields. Mitigates the
 	// non-deterministic V8/libuv crash during event-loop yields in multi-step
 	// goal-wrapped workflows.
 	if (isWorkerAtomicWriterEnabled()) {
-		return atomicWriteFileViaWorker(filePath, content);
+		// PHASE 0 P3: forward `mode` through the message protocol. Durability is
+		// not forwarded — the worker now ALWAYS fsyncs data + parent dir (defect
+		// (b) in worker-atomic-writer.ts), i.e. durability:"full" semantics.
+		return atomicWriteFileViaWorker(filePath, content, mode);
 	}
-	if (!isSymlinkSafeDirCached(filePath))
-		throw new Error(`Refusing to write: target is a symlink or inside untrusted directory: ${filePath}`);
 	// PERF (2026-08-24): shared dir memo — a sync mkdir on an existing dir is one
 	// cheap syscall; replacing `await fs.promises.mkdir` is fine because the
 	// memoized hit does not throw and does not yield the event loop.
