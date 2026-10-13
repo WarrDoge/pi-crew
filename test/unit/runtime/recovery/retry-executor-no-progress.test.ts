@@ -216,10 +216,7 @@ test("previousResult/lastResult are fed correctly across attempts", async () => 
 	assert.equal(contexts[1].attempt, 2);
 	assert.ok(contexts[1].lastResult instanceof Error);
 	assert.equal(errorMessage(contexts[1].lastResult), "boom-2");
-	assert.ok(
-		contexts[1].previousResult instanceof Error,
-		"previousResult is the attempt-1 error, not the same object as lastResult",
-	);
+	assert.ok(contexts[1].previousResult instanceof Error, "previousResult is the attempt-1 error, not the same object as lastResult");
 	assert.equal(errorMessage(contexts[1].previousResult), "boom-1");
 	assert.notEqual(contexts[1].lastResult, contexts[1].previousResult);
 	assert.equal(typeof contexts[1].durationMsLast, "number");
@@ -300,9 +297,7 @@ test("TaskAttemptState back-compat: a pre-U9-ADJ tasks.json payload (no owner/in
 		);
 		fs.writeFileSync(manifest.tasksPath, JSON.stringify(legacyTasks), "utf-8");
 		const loaded = loadTasksWithRecovery(manifest.tasksPath, manifest.eventsPath, manifest.runId);
-		assert.deepEqual(loaded[0]?.attempts, [
-			{ attemptId: "retry_attempt_1", startedAt: "2026-10-12T00:00:00.000Z", error: "boom" },
-		]);
+		assert.deepEqual(loaded[0]?.attempts, [{ attemptId: "retry_attempt_1", startedAt: "2026-10-12T00:00:00.000Z", error: "boom" }]);
 	} finally {
 		cleanup();
 	}
