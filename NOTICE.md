@@ -45,6 +45,19 @@ imports); the vendoring rationale (no peer version floor + the symbol is not
 re-exported from the package root before 1.1.0) is documented in the file
 header and `src/ui/pi-ui-compat.ts`.
 
+### Process-lock socket guard (2026-10-13)
+
+`src/state/coordination/process-lock.ts` is adapted from
+`@earendil-works/chord` (MIT), `packages/chord/src/manager.ts:82-170 @
+a4d040d30` — processLock adapted from @earendil-works/chord (MIT),
+packages/chord/src/manager.ts:82-170 @ a4d040d30. No code was copied verbatim;
+the adaptation renames the socket namespace (`pi-crew-`), drops the
+env-passing lock-inheritance mechanism (pi-crew derives lock names from run
+dir paths and never passes lock state through child env), unrefs the
+listening socket so a held lock cannot keep the extension host alive, and
+adds typed contention errors. See the file header for the full adaptation
+list.
+
 ## crew-vibes font assets
 
 - `assets/runner-spritesheet.png` and the 16 runner glyphs (U+E700..U+E70F) traced

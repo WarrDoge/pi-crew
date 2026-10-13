@@ -257,6 +257,10 @@ const CREW_ENV_FORWARDING_DECL: Record<string, CrewEnvForwardDecision> = {
 	PI_CREW_CLASSIFIER_MODEL: { kind: "gap", reason: "child-executor retry classifier (runner)" },
 	PI_CREW_VERIFY_GATE: { kind: "gap", reason: "verify-gate pre-gate before verifier spawns (runner)" },
 	PI_CREW_VERIFY_GATE_TIMEOUT_MS: { kind: "gap", reason: "verify-gate per-check timeout (runner)" },
+	PI_CREW_RUN_LOCK_SOCKET: {
+		kind: "gap",
+		reason: "U21 run-lock dual-guard toggle — withRunLock also runs in the runner; deliberately unforwarded this wave (socket dies with each process, so a host-vs-runner toggle mismatch is harmless: each process just picks its own admission tier)",
+	},
 	PI_CREW_RPC_DIALOG_ANSWER: { kind: "gap", reason: "rpc-worker dialog policy (runner)" },
 	PI_CREW_RPC_TURN_TIMEOUT_MS: { kind: "gap", reason: "rpc-worker turn timeout (runner)" },
 	PI_CREW_MAX_AUTO_FALLBACKS: { kind: "gap", reason: "model-fallback cap resolved in the runner" },

@@ -3,10 +3,12 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { DEFAULT_LOCKS } from "../../config/defaults.ts";
+import { getCrewEnvBool } from "../../config/env-vars.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
 import { sleepSync } from "../../utils/sleep.ts";
 import { ensureDirSync, isSymlinkSafeDirCached, isSymlinkSafePath } from "../atomic-write.ts";
 import type { TeamRunManifest } from "../types.ts";
+import { acquireProcessLock, isProcessLockHeldError, type ProcessLockHandle } from "./process-lock.ts";
 
 export interface RunLockOptions {
 	staleMs?: number;
@@ -305,6 +307,13 @@ function timingSafeTokenMatch(a: string, b: string): boolean {
  * never swept, no matter how old.
  *
  * Returns the lock files it removed. Idempotent: a second sweep finds nothing.
+ *
+ * @deprecated-after-window U21 (2026-10-13): async run-lock holders now also
+ * own a kernel process socket (locks.ts `withRunLock`) which needs NO sweep —
+ * it dies with its process. This file-lock sweep still covers the SYNC path
+ * (`withRunLockSync`, file-only by design) and legacy/foreign holders during
+ * the migration window; remove it after the file-lock migration window
+ * closes.
  */
 export function sweepStaleLocks(lockFiles: readonly string[], options: RunLockOptions = {}): { removed: string[] } {
 	const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
@@ -327,6 +336,10 @@ export function sweepStaleLocks(lockFiles: readonly string[], options: RunLockOp
 /**
  * US-002: discover every `run.lock` under a runs root
  * (`<runsRoot>/<runId>/run.lock`), bounded, for sweepStaleLocks. Missing → empty.
+ *
+ * @deprecated-after-window U21: alongside `sweepStaleLocks` — socket-guarded
+ * async holders need no sweep; remove after the file-lock migration window
+ * closes (sync path + legacy holders keep needing it until then).
  */
 export function discoverRunLockFiles(runsRoot: string, maxDirs = 500): string[] {
 	try {
@@ -551,6 +564,72 @@ async function acquireLockWithRetryAsync(filePath: string, staleMs: number, kind
 }
 
 /**
+ * U21 (2026-10-13): process-socket supplement toggle for the ASYNC run-lock
+ * path. Default ON; `'0'`/`'false'`/`'no'` restores the pre-U21 file-lock-only
+ * behaviour bit-for-bit (dual-holder migration window escape hatch). Read via
+ * the crew env registry — this is a HOST-process read, never passed to children
+ * (the lock name is derived from the run dir path; nothing is inherited).
+ */
+function runLockSocketSupplementEnabled(): boolean {
+	return getCrewEnvBool("PI_CREW_RUN_LOCK_SOCKET") ?? true;
+}
+
+/**
+ * U21: the kernel-socket lock name for a run-lock file path. Derived from the
+ * ABSOLUTE run dir path so every process agrees on the name for the same run
+ * regardless of cwd/relative-path spelling.
+ */
+export function runLockSocketName(filePath: string): string {
+	return `run:${path.resolve(filePath)}`;
+}
+
+/**
+ * U21 dual-guard acquire for the async run-lock: file lock FIRST (existing
+ * WAIT/backoff admission of D1 / RR-011 completely unchanged), THEN the kernel
+ * process socket (process-lock.ts, vendored from chord).
+ *
+ * If the socket is held (`reason: "locked"`) we treat it exactly like file
+ * contention: drop OUR file token (token-guarded releaseOwnLock) and keep
+ * WAITing — same `staleMs * 2` deadline budget the file-acquire loop uses —
+ * then retry the whole file+socket acquisition. When BOTH are held the caller
+ * owns the run. Non-contention socket failures propagate AFTER the file token
+ * is dropped (we never keep the file without the guard that promised it).
+ *
+ * The socket exists to harden async holders against dual-process entry where
+ * O_EXCL file locks are weak (NFS and similar); it intentionally does NOT
+ * touch the six file-lock semantics (re-entrance, token release, live WAIT,
+ * stale-steal + WARN, EPERM, ENOENT) — those all live in the file tier.
+ */
+async function acquireRunLockGuarded(filePath: string, staleMs: number): Promise<{ token: string; socket: ProcessLockHandle | undefined }> {
+	if (!runLockSocketSupplementEnabled()) {
+		// Supplement OFF (PI_CREW_RUN_LOCK_SOCKET=0): pre-U21 behaviour, bit-for-bit.
+		return { token: await acquireLockWithRetryAsync(filePath, staleMs, "run"), socket: undefined };
+	}
+	const deadline = Date.now() + staleMs * 2; // same budget as the file-acquire loop
+	let attempt = 0;
+	for (;;) {
+		const token = await acquireLockWithRetryAsync(filePath, staleMs, "run");
+		try {
+			const socket = await acquireProcessLock(runLockSocketName(filePath));
+			return { token, socket };
+		} catch (error) {
+			// Never keep the file token without the socket guard that follows it.
+			releaseOwnLock(filePath, token);
+			if (!isProcessLockHeldError(error)) throw error;
+			// Socket contention — WAIT (timer-based, never sleepSync: the live
+			// socket holder may be another async context of THIS process, and
+			// blocking the event loop would starve it — the v0.9.26 deadlock
+			// class) and retry within the same staleMs*2 deadline.
+			if (Date.now() > deadline) {
+				throw new Error(`Run '${path.basename(filePath)}' is locked by another operation.`);
+			}
+			await sleep(Math.min(250, 25 * 2 ** attempt));
+			attempt++;
+		}
+	}
+}
+
+/**
  * General-purpose file lock for arbitrary file paths.
  * Uses the same O_EXCL atomic create strategy as run locks.
  */
@@ -762,6 +841,13 @@ export async function withFileLockAsync<T>(filePath: string, fn: () => Promise<T
 	}
 }
 
+/**
+ * SYNC run-lock — FILE-LOCK-ONLY by design (U21): a socket listen cannot be
+ * awaited from a synchronous path, so the process-socket supplement of
+ * `withRunLock` does not apply here. Mutual exclusion between sync and async
+ * holders is still guaranteed by the SHARED file lock (an async holder always
+ * takes the file lock first, before its socket supplement).
+ */
 export function withRunLockSync<T>(manifest: TeamRunManifest, fn: () => T, options: RunLockOptions = {}): T {
 	const filePath = lockPath(manifest);
 	const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
@@ -798,6 +884,19 @@ export function withRunLockSync<T>(manifest: TeamRunManifest, fn: () => T, optio
 	});
 }
 
+/**
+ * ASYNC run-lock — U21 (2026-10-13) DUAL GUARD: the existing file lock
+ * (acquired FIRST — WAIT/backoff admission of D1 / RR-011 unchanged) is
+ * SUPPLEMENTED by a kernel process socket owned for the holder's process
+ * lifetime (see `acquireRunLockGuarded`). The supplement guards against
+ * dual-process entry where O_EXCL file locks are weak (NFS etc.); it is
+ * toggled by PI_CREW_RUN_LOCK_SOCKET (default ON, `'0'` = pre-U21 behaviour
+ * bit-for-bit). All six file-lock semantics (re-entrance, token release,
+ * live-in-process WAIT, stale-steal + WARN, EPERM, ENOENT) are unchanged and
+ * live in the file tier; the re-entrance bypass below returns BEFORE any
+ * socket acquisition, so nested same-context calls never self-deadlock on
+ * the kernel socket. Release order: socket FIRST, file token LAST.
+ */
 export async function withRunLock<T>(manifest: TeamRunManifest, fn: () => Promise<T>, options: RunLockOptions = {}): Promise<T> {
 	const filePath = lockPath(manifest);
 	const staleMs = options.staleMs ?? DEFAULT_STALE_MS;
@@ -806,7 +905,7 @@ export async function withRunLock<T>(manifest: TeamRunManifest, fn: () => Promis
 		return await fn();
 	}
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
-	const token = await acquireLockWithRetryAsync(filePath, staleMs, "run");
+	const { token, socket } = await acquireRunLockGuarded(filePath, staleMs);
 	// RR-011 (F02): register the hold IMMEDIATELY (no await between the acquire
 	// returning and this add — otherwise a concurrent contender could observe the
 	// fresh on-disk token as a stealable corpse). Deleted in the finally below.
@@ -824,6 +923,11 @@ export async function withRunLock<T>(manifest: TeamRunManifest, fn: () => Promis
 			// RR-011 (F02): see withRunLockSync above — unregister the live token
 			// BEFORE the token-guarded releaseOwnLock (runLockHeldTokens invariant).
 			runLockHeldTokens.delete(token);
+			// U21: release the socket BEFORE the file token — a contender whose
+			// file-acquire already succeeded on the weak-file tier then sees the
+			// socket free only after BOTH guards of the previous holder are gone;
+			// the file stays held (by us) until the socket is fully released.
+			if (socket) await socket.release();
 			releaseOwnLock(filePath, token);
 		}
 	});

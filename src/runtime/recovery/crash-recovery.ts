@@ -959,6 +959,10 @@ export async function reconcileAllStaleRuns(
 	// so locks whose holder died (kill -9 / crash) do not linger. The sweep is
 	// strictly safer than acquire-time steal (stale AND holder-dead only), so a
 	// live holder is never disturbed. Best-effort.
+	// U21 (2026-10-13): socket holders need no sweep — the kernel process socket
+	// of an async run-lock holder dies with its process. This sweep covers the
+	// SYNC path (withRunLockSync, file-only by design) + legacy file-only holders;
+	// remove after the file-lock migration window closes.
 	try {
 		const runsRoots = [
 			path.join(projectCrewRoot(cwd), DEFAULT_PATHS.state.runsSubdir),

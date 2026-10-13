@@ -20,6 +20,14 @@
  * section (deferred gate, same pattern as run-lock-async-async-mutual-exclusion
  * .test.ts), and the holder sleeps past staleMs so readLockSnapshot's isStale
  * wins over heldByLiveInProcess — exactly the MAJOR 2 condition.
+ *
+ * U21 (2026-10-13): this file pins the FILE-TIER steal semantics, so it runs
+ * with the process-socket supplement DISABLED (PI_CREW_RUN_LOCK_SOCKET=0).
+ * With the supplement ON the same scenario no longer dual-enters: the
+ * contender's kernel-socket acquire is refused, it drops the stolen file token
+ * and WAITS for the live holder (run-lock-socket.test.ts U21-4 pins exactly
+ * that admission — deferred entry + the same WARN). Scoping this test to the
+ * file tier keeps the ADR-documented steal contract observable on its own.
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -65,6 +73,9 @@ function sleep(ms: number): Promise<void> {
 test("staleMs steal of a live in-process holder logs locks.steal-live-holder (warn)", async () => {
 	const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "steal-live-warn-"));
 	const manifest = mkManifest(stateRoot);
+	// U21: file-tier pin — see the header note. Restore whatever the ambient had.
+	const savedSocketFlag = process.env.PI_CREW_RUN_LOCK_SOCKET;
+	process.env.PI_CREW_RUN_LOCK_SOCKET = "0";
 	// 150ms (was 60): the async retry deadline is staleMs*2 and the backoff
 	// series is 25/50/100 — with 60ms the steal attempt landed at t≈75-100ms
 	// against a 120ms deadline, and one or two ~40ms fs stalls on a loaded
@@ -112,6 +123,8 @@ test("staleMs steal of a live in-process holder logs locks.steal-live-holder (wa
 		);
 	} finally {
 		console.error = originalError;
+		if (savedSocketFlag === undefined) delete process.env.PI_CREW_RUN_LOCK_SOCKET;
+		else process.env.PI_CREW_RUN_LOCK_SOCKET = savedSocketFlag;
 		fs.rmSync(stateRoot, { recursive: true, force: true });
 	}
 });

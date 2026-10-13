@@ -472,6 +472,12 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		name: "PI_CREW_STATE_BACKEND",
 		doc: "U8 (upgrade-spec 2026-10-09) run-state store backend select: 'sqlite' stores manifest+tasks+worker-status in <runId>/state.sqlite via node:sqlite with ONE transaction per batch write (all-or-nothing; manifest.json/tasks.json stay written as read-side mirrors for legacy consumers — loads read the db); unset or any other value keeps the default JSON file backend. events.jsonl audit spine unchanged in both modes (state-store.ts / sqlite-run-state.ts isSqliteStateBackend)",
 	},
+	PI_CREW_RUN_LOCK_SOCKET: {
+		name: "PI_CREW_RUN_LOCK_SOCKET",
+		parser: "boolean",
+		default: true,
+		doc: "U21 (upgrade 2026-10-13) run-lock dual-guard toggle: '0'/'false'/'no' disables the kernel process-socket SUPPLEMENT on the ASYNC withRunLock path (pre-U21 file-lock-only behaviour, bit-for-bit); default ON. Host-process read only — never passed to children (the socket name is derived from the run dir path). The SYNC withRunLockSync path is always file-only by design (locks.ts acquireRunLockGuarded)",
+	},
 	PI_CREW_CHILD_PI_MODE: {
 		name: "PI_CREW_CHILD_PI_MODE",
 		doc: "U14 (upgrade-spec 2026-10-09) child-pi protocol v2 transport select: 'rpc' spawns task workers over pi --mode rpc (SDK RpcClient wire — steer receipts, clear_queue hygiene, multi-prompt reuse; child-pi-rpc.ts), 'json' / unset keeps the --mode json -p stdio path (phase-1 default; both modes fully regression-tested). Surface TUI panes are unaffected",
