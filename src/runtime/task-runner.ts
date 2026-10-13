@@ -164,6 +164,15 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 			// any unexpected error in the pre-gate block (engine bug, FS failure
 			// on an artifact write) degrades to the ungated verifier spawn
 			// (exactly the pre-U13 behavior) instead of throwing out of runTeamTask.
+			// FIX (review round): the SKIP-path finalizer call is deliberately NOT
+			// inside this try — it is hoisted below. When `return await
+			// finalizeTaskResult(...)` lived in the try, a finalizer throw was
+			// swallowed by the belt catch and execution FELL THROUGH to the
+			// verifier spawn AFTER the skip event was emitted and diagnostics
+			// mutated (double-finalize / divergent task state). A finalizer error
+			// must propagate out of runTeamTask, exactly like the normal path's
+			// finalizer (pre-belt semantics).
+			let skipFinalize: TaskExecutionResult | undefined;
 			try {
 				const preGate = await runVerifierGatePreGate({
 					cwd: ctx.task.cwd,
@@ -233,7 +242,10 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 							},
 						},
 					};
-					return await finalizeTaskResult(ctx, {
+					// FIX (review round): prepare the finalizer args here but DO NOT
+					// call finalizeTaskResult inside the belt try — see the hoisted
+					// call right after the catch below.
+					skipFinalize = {
 						resultArtifact,
 						logArtifact: undefined,
 						transcriptArtifact: undefined,
@@ -245,7 +257,7 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 						transcriptPath: undefined,
 						terminalEvidence: [],
 						startupEvidence: ctx.startupEvidence,
-					});
+					};
 				}
 				if (preGate.promptContext) {
 					// Spawn proceeds — attach the gate results to the verifier prompt
@@ -283,6 +295,12 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 						error instanceof Error ? error.message : String(error)
 					}`,
 				);
+			}
+			// FIX (review round): skip-path finalizer — OUTSIDE the belt try so a
+			// finalizer throw propagates out of runTeamTask (pre-belt semantics)
+			// instead of being swallowed and falling through to the verifier spawn.
+			if (skipFinalize !== undefined) {
+				return await finalizeTaskResult(ctx, skipFinalize);
 			}
 		}
 		// Destructure mutable fields for branch closures + sync-back

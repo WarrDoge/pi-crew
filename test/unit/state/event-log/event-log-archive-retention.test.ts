@@ -67,3 +67,28 @@ test("H2: sweep is best-effort (missing dir / no archives does not throw)", () =
 	// No archives present — rotation + sweep must not throw.
 	assert.doesNotThrow(() => rotateEventLogUnlocked(eventsPath));
 });
+
+test("U22 fix: rotation sweeps each archive's poison-marker sidecar with the same retention", () => {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-archive-sidecar-ret-"));
+	createdTmpDirs.push(dir);
+	const eventsPath = path.join(dir, "events.jsonl");
+	fs.writeFileSync(eventsPath, '{"type":"run.created"}\n');
+
+	// Old archive + its poison sidecar (8 days) → both swept.
+	const oldArchive = path.join(dir, "events.jsonl.2025-12-01T00-00-00-000Z.archive.jsonl");
+	const oldSidecar = `${oldArchive}.poison.jsonl`;
+	touchAge(oldArchive, 8);
+	touchAge(oldSidecar, 8);
+	// Recent archive + sidecar (1 day) → both kept.
+	const recentArchive = path.join(dir, "events.jsonl.2026-07-28T00-00-00-000Z.archive.jsonl");
+	const recentSidecar = `${recentArchive}.poison.jsonl`;
+	touchAge(recentArchive, 1);
+	touchAge(recentSidecar, 1);
+
+	assert.ok(rotateEventLogUnlocked(eventsPath));
+
+	assert.ok(!fs.existsSync(oldArchive), "old archive swept");
+	assert.ok(!fs.existsSync(oldSidecar), "old archive's poison sidecar swept with it");
+	assert.ok(fs.existsSync(recentArchive), "recent archive kept");
+	assert.ok(fs.existsSync(recentSidecar), "recent archive's poison sidecar kept");
+});

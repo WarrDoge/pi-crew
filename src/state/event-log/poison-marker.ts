@@ -23,6 +23,33 @@
  * Stale markers are ignored on read and pruned the next time new markers are
  * written (the sidecar itself is never rewritten except for that pruning).
  *
+ * U22 fix round (marker lifetime is bound to the file INSTANCE): the reset
+ * policy above only catches markers whose line/offset ran past the file's
+ * CURRENT shape. Two rewriters create a file with the SAME path but NEW
+ * content — rotation (rename → fresh file at the same path) and compaction
+ * (atomicWriteFile rewrite) — and a marker whose lineIndex/byteOffset stays
+ * below the new file's size would otherwise RESURRECT and silently skip a
+ * healthy line once the file regrew past the old offsets. Fixed at every
+ * layer, defense-in-depth:
+ *   1. rotateEventLogUnlocked renames the sidecar ALONGSIDE the archive
+ *      (`<eventsPath>.poison.jsonl` → `<archive>.poison.jsonl`) so markers
+ *      travel with the exact bytes they describe; the fresh live file starts
+ *      clean (event-log-rotation.ts).
+ *   2. applyCompactionUnlocked DELETES the sidecar — the compacted file is
+ *      new content; every old marker is meaningless (event-log-rotation.ts).
+ *   3. The read paths RE-PARSE a marker-hit line before honoring the skip
+ *      (parseJsonlWindow / readJsonlSince — the bytes are already in the
+ *      buffer, zero extra IO): a marker whose line now PARSES is stale, the
+ *      event is DELIVERED, and the offset is passed to commitPoisonFindings
+ *      (staleMarkerOffsets) for immediate pruning. This self-heals any marker
+ *      that still slips through (including a same-uid attacker planting a
+ *      bogus marker) — no generation bookkeeping needed, so no `generation`
+ *      field was added to the entry shape (design decision: the 1+2+4 layers
+ *      already pin the marker lifetime to the file instance; a `.gen` bind
+ *      would couple the sidecar to rotation internals for no extra coverage).
+ *   4. sweepOldArchives also removes `<archive>.poison.jsonl` with its archive
+ *      (same retention) so archived sidecars cannot accumulate forever.
+ *
  * Cap (last resort): more than POISON_MARKER_CAP active markers means the file
  * is effectively unparseable — the events file is quarantined with the
  * `quarantineCorruptFile` pattern (rename to `<name>.corrupt-<ts>`,
@@ -122,16 +149,21 @@ export function planPoisonSkip(eventsPath: string, fileSize: number, lineCount: 
 
 /**
  * Record newly discovered poison lines (and prune stale markers on write, per
- * the reset policy). Returns `true` when the active-marker count exceeded
- * POISON_MARKER_CAP — the caller MUST then treat the file as unparseable and
- * return an empty/safe result. The quarantine itself happens here (rename to
- * `<name>.corrupt-<ts>`; the file is preserved for diagnosis).
+ * the reset policy). `staleMarkerOffsets` (U22 fix round re-parse guard) are
+ * marker-hit offsets whose line RE-PARSED successfully during this read —
+ * those entries are pruned from the sidecar immediately (the marker no longer
+ * describes reality), which also rewrites the sidecar when nothing else did.
+ * Returns `true` when the active-marker count exceeded POISON_MARKER_CAP — the
+ * caller MUST then treat the file as unparseable and return an empty/safe
+ * result. The quarantine itself happens here (rename to `<name>.corrupt-<ts>`;
+ * the file is preserved for diagnosis).
  */
 export function commitPoisonFindings(
 	eventsPath: string,
 	fileSize: number,
 	lineCount: number | undefined,
 	failures: readonly PoisonFailure[],
+	staleMarkerOffsets?: readonly number[],
 ): boolean {
 	const sidecar = poisonMarkerPath(eventsPath);
 	const existing = fs.existsSync(sidecar) ? loadPoisonMarkers(eventsPath) : [];
@@ -153,7 +185,18 @@ export function commitPoisonFindings(
 		quarantinePoisonedEventsFile(eventsPath);
 		return true;
 	}
-	if (fresh.length === 0) return false;
+	// U22 fix round: drop re-parse-recovered markers (their line parsed OK —
+	// the byte offset no longer names poison) alongside the shape-stale ones.
+	// Write gate: fresh failures (legacy) OR healed markers (new) trigger the
+	// sidecar rewrite — a read with NEITHER keeps the sidecar untouched, so
+	// shape-stale entries still prune lazily on the next marker write exactly
+	// as before (pinned by the marker-reset regression test).
+	let kept = active;
+	if (staleMarkerOffsets !== undefined && staleMarkerOffsets.length > 0) {
+		const healed = new Set(staleMarkerOffsets);
+		kept = active.filter((entry) => !healed.has(entry.byteOffset));
+	}
+	if (fresh.length === 0 && (staleMarkerOffsets?.length ?? 0) === 0) return false;
 	const firstSeen = new Date().toISOString();
 	const newEntries: PoisonMarkerEntry[] = fresh.map((failure) => ({
 		lineIndex: failure.lineIndex,
@@ -161,7 +204,7 @@ export function commitPoisonFindings(
 		reason: failure.reason,
 		firstSeen,
 	}));
-	persistPoisonMarkers(sidecar, existing, active, newEntries);
+	persistPoisonMarkers(sidecar, existing, kept, newEntries);
 	return false;
 }
 

@@ -14,6 +14,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
+import { Worker } from "node:worker_threads";
 import { atomicWriteFileAsync } from "../../../../src/state/atomic-write.ts";
 import {
 	__getWorkerTempDirForTests,
@@ -357,4 +358,80 @@ test("(a) worker source no longer references logInternalError; console.error rep
 	assert.ok(workerSource.includes("fs.fsyncSync(fd);"), "worker must fsync file data");
 	assert.ok(workerSource.includes("fsyncParentDirBestEffort"), "worker must fsync the parent dir after rename");
 	assert.ok(/function syncAppend[\s\S]*fs\.fsyncSync\(fd\);/.test(workerSource), "syncAppend must fsync after append");
+});
+
+// ─── F3 (review fix): worker-side O_NOFOLLOW on the append open ──────────────
+
+test('F3 static: syncAppend opens with O_WRONLY|O_APPEND|O_CREAT|O_NOFOLLOW (no bare "a" mode)', () => {
+	const modulePath = new URL("../../../../src/state/event-log/worker-atomic-writer.ts", import.meta.url);
+	const source = fs.readFileSync(modulePath, "utf-8");
+	const start = source.indexOf("const WORKER_SOURCE = `");
+	assert.ok(start >= 0, "WORKER_SOURCE literal not found");
+	const end = source.indexOf("\n`;", start);
+	assert.ok(end > start, "WORKER_SOURCE literal terminator not found");
+	const workerSource = source.slice(start, end);
+	const syncAppendIdx = workerSource.indexOf("function syncAppend");
+	assert.ok(syncAppendIdx >= 0, "syncAppend not found in worker source");
+	const syncAppendBody = workerSource.slice(
+		syncAppendIdx,
+		workerSource.indexOf("function ", syncAppendIdx + 1) === -1 ? undefined : workerSource.indexOf("function ", syncAppendIdx + 1),
+	);
+	assert.ok(syncAppendBody.includes("O_WRONLY"), "syncAppend must compose numeric flags");
+	assert.ok(syncAppendBody.includes("O_APPEND"), "syncAppend must append explicitly");
+	assert.ok(syncAppendBody.includes("O_CREAT"), "syncAppend must keep create-on-missing semantics");
+	assert.ok(syncAppendBody.includes("O_NOFOLLOW"), "syncAppend must refuse final-path symlinks (O_NOFOLLOW, security F3)");
+	assert.ok(syncAppendBody.includes("lstatSync"), "platforms without O_NOFOLLOW fall back to a pre-open lstat refusal");
+	assert.ok(!syncAppendBody.includes('fs.openSync(filePath, "a")'), 'the bare "a" open (symlink-permeable) must be gone');
+});
+
+test("F3 worker-side: appending through a symlinked target is refused INSIDE the worker (ELOOP) and the target stays untouched", {
+	skip:
+		process.platform === "win32"
+			? "symlinks need admin + no O_NOFOLLOW fallback on Windows CI; lstat branch covered by the static test"
+			: false,
+}, async () => {
+	// The main-side guard (P3) rejects symlinked targets BEFORE dispatch, so
+	// this exercises the worker's OWN open directly: extract WORKER_SOURCE at
+	// runtime, spawn a private Worker (same temp-.cjs pattern getWorker uses),
+	// and dispatch an append for a symlinked path.
+	const modulePath = new URL("../../../../src/state/event-log/worker-atomic-writer.ts", import.meta.url);
+	const source = fs.readFileSync(modulePath, "utf-8");
+	const start = source.indexOf("const WORKER_SOURCE = `");
+	const end = source.indexOf("\n`;", start);
+	assert.ok(start >= 0 && end > start, "WORKER_SOURCE literal not found");
+	const workerSource = source.slice(start + "const WORKER_SOURCE = `".length, end);
+
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-waw-nofollow-"));
+	const workerFile = path.join(dir, "worker.cjs");
+	fs.writeFileSync(workerFile, workerSource, "utf-8");
+	const realTarget = path.join(dir, "real.jsonl");
+	fs.writeFileSync(realTarget, '{"before":1}\n', "utf-8");
+	const evilLink = path.join(dir, "evil.jsonl");
+	fs.symlinkSync(realTarget, evilLink);
+
+	const w = new Worker(workerFile);
+	try {
+		const reply = await new Promise<{ kind: string; id: number; message?: string }>((resolve, reject) => {
+			w.once("message", (msg: { kind: string; id: number; message?: string }) => resolve(msg));
+			w.once("error", reject);
+			w.postMessage({ kind: "append", id: 777, filePath: evilLink, content: '{"evil":1}\n' });
+		});
+		assert.equal(reply.kind, "error", "the worker must reject the symlinked append");
+		assert.match(reply.message ?? "", /ELOOP|symlink/i, `unexpected failure shape: ${reply.message ?? ""}`);
+		assert.equal(fs.readFileSync(realTarget, "utf-8"), '{"before":1}\n', "the symlink target must be untouched");
+
+		// Control: a NORMAL file still appends fine through the same worker
+		// (the numeric-flag composition must not break the common path).
+		const okReply = await new Promise<{ kind: string; id: number; message?: string }>((resolve, reject) => {
+			w.once("message", (msg: { kind: string; id: number; message?: string }) => resolve(msg));
+			w.once("error", reject);
+			const normalFile = path.join(dir, "normal.jsonl");
+			w.postMessage({ kind: "append", id: 778, filePath: normalFile, content: '{"ok":1}\n' });
+		});
+		assert.equal(okReply.kind, "done", `normal append must keep working: ${okReply.message ?? ""}`);
+		assert.equal(fs.readFileSync(path.join(dir, "normal.jsonl"), "utf-8"), '{"ok":1}\n');
+	} finally {
+		await w.terminate();
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
 });

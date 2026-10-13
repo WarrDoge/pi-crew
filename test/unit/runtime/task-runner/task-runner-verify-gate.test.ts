@@ -204,3 +204,61 @@ test("U13-ADJ gap 1: skip-path writeArtifact failure degrades — task completes
 		errMock.mock.restore();
 	}
 });
+
+// ─── Review fix: the skip-path finalizer must NOT live inside the belt try ───
+
+test("review fix: skip-path finalizer error propagates out of runTeamTask — no verifier spawn after the skip", async () => {
+	// Belt regression: when `return await finalizeTaskResult(...)` lived inside
+	// the pre-gate try, a finalizer throw was swallowed by the belt catch and
+	// execution FELL THROUGH to the verifier spawn — AFTER the skip event was
+	// emitted and task diagnostics mutated (double-finalize / divergent state).
+	// Injection (hermetic, no module mocks): the gate's typecheck script turns
+	// the events file into a DIRECTORY and exits 0, so the gate is GREEN (skip
+	// path taken) but the finalizer's awaited event append then fails (EISDIR).
+	// A finalizer failure must propagate (pre-belt semantics), never spawn.
+	const cwd = makeRepoDir("pi-crew-u13-finale-", { typecheck: "node sabotage.js" });
+	const created = createRunManifest({ cwd, team: team as never, workflow: workflow as never, goal: "u13-finale" });
+	const task = created.tasks[0]!;
+	fs.writeFileSync(
+		path.join(cwd, "sabotage.js"),
+		`const fs = require("node:fs");\n` +
+			`fs.rmSync(${JSON.stringify(created.manifest.eventsPath)}, { force: true });\n` +
+			`fs.mkdirSync(${JSON.stringify(created.manifest.eventsPath)});\n`,
+		"utf8",
+	);
+	const prevMock = process.env.PI_TEAMS_MOCK_CHILD_PI;
+	const prevAllowMock = process.env.PI_CREW_ALLOW_MOCK;
+	// Safety net only: a PRE-fix fall-through would spawn the MOCK child pi
+	// (never a real one); post-fix nothing spawns at all.
+	process.env.PI_CREW_ALLOW_MOCK = "1";
+	process.env.PI_TEAMS_MOCK_CHILD_PI = "json-success";
+	try {
+		await assert.rejects(
+			runTeamTask({
+				manifest: created.manifest,
+				tasks: created.tasks,
+				task,
+				step: workflow.steps[0] as never,
+				agent: agent as never,
+				executeWorkers: true,
+				workspaceId: "test-workspace",
+			}),
+			(error: unknown) => {
+				assert.ok(error instanceof Error, `unexpected rejection shape: ${String(error)}`);
+				return true;
+			},
+		);
+		// NO verifier spawn may follow the skip: the child-process branch would
+		// create artifactsRoot/transcripts/ for the worker transcript.
+		const transcripts = path.join(created.manifest.artifactsRoot, "transcripts");
+		assert.ok(!fs.existsSync(transcripts), "a skip-path finalizer failure must not fall through to the verifier spawn");
+		// The sabotage held for the whole run (the events path stayed a directory
+		// — nothing ever appended past it) and no task.completed could land.
+		assert.ok(fs.statSync(created.manifest.eventsPath).isDirectory(), "sabotage held: events path is still a directory");
+	} finally {
+		if (prevMock === undefined) delete process.env.PI_TEAMS_MOCK_CHILD_PI;
+		else process.env.PI_TEAMS_MOCK_CHILD_PI = prevMock;
+		if (prevAllowMock === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
+		else process.env.PI_CREW_ALLOW_MOCK = prevAllowMock;
+	}
+});

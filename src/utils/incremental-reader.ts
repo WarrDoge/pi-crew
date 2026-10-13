@@ -77,6 +77,12 @@ export interface JsonlWindowParseResult<T> {
 	tornTail: boolean;
 	/** Complete lines skipped via poisonOffsets (marker hits — not re-parsed). */
 	poisonSkipped: number;
+	/** Marker-hit line-start byte offsets whose line RE-PARSED successfully —
+	 *  the markers are STALE (the byte offset now names a healthy line, e.g.
+	 *  a marker that survived a rewrite of the file) and must be pruned from
+	 *  the sidecar by the caller (commitPoisonFindings). Empty unless the
+	 *  caller passed poisonOffsets. (U22 fix round: re-parse guard.) */
+	staleMarkerOffsets: number[];
 	/** Number of complete (newline-terminated) lines in the window. */
 	lineCount: number;
 	/** Bytes up to and including the last complete line's "\n". */
@@ -90,11 +96,20 @@ function parseFailureReason(error: unknown): string {
 /** Scan `buf` (starting at absolute `baseOffset`, itself a line boundary) into
  *  complete lines and classify each. Blank lines yield no item and no failure
  *  (matching the legacy readers). A trailing fragment without "\n" is held
- *  back as tornTail — never parsed as a line. */
+ *  back as tornTail — never parsed as a line.
+ *
+ *  U22 fix round (re-parse guard): a marker-hit line is PARSED ONCE before the
+ *  skip is honored — the line bytes are already in `buf` (no extra IO), so a
+ *  marker whose offset now names a line that PARSES is stale (the file was
+ *  rewritten/rotated+regrown past the old offset) and the event is DELIVERED
+ *  instead of silently skipped; its offset is reported in
+ *  `staleMarkerOffsets` for sidecar pruning. A line that still fails to parse
+ *  is genuinely poison and stays skipped (poisonSkipped). */
 export function parseJsonlWindow<T>(buf: Buffer, baseOffset: number, options?: JsonlWindowParseOptions): JsonlWindowParseResult<T> {
 	const poisonOffsets = options?.poisonOffsets;
 	const items: JsonlParsedItem<T>[] = [];
 	const failures: JsonlParseFailure[] = [];
+	const staleMarkerOffsets: number[] = [];
 	let poisonSkipped = 0;
 	let lineCount = 0;
 	let completeBytes = 0;
@@ -104,7 +119,22 @@ export function parseJsonlWindow<T>(buf: Buffer, baseOffset: number, options?: J
 		if (newline < 0) break;
 		const lineStartOffset = baseOffset + pos;
 		if (poisonOffsets?.has(lineStartOffset)) {
-			poisonSkipped++;
+			// Re-parse guard: validate the marker against the bytes it names (the
+			// line is already in the buffer — zero extra IO). Only a line that
+			// STILL fails to parse keeps the skip; a healthy line recovers the
+			// event and flags the marker for pruning.
+			const marked = buf.toString("utf-8", pos, newline).trim();
+			let recovered = false;
+			if (marked) {
+				try {
+					items.push({ value: JSON.parse(marked) as T, byteOffset: lineStartOffset });
+					recovered = true;
+				} catch {
+					recovered = false;
+				}
+			}
+			if (recovered) staleMarkerOffsets.push(lineStartOffset);
+			else poisonSkipped++;
 		} else {
 			const trimmed = buf.toString("utf-8", pos, newline).trim();
 			if (trimmed) {
@@ -120,7 +150,7 @@ export function parseJsonlWindow<T>(buf: Buffer, baseOffset: number, options?: J
 		completeBytes = pos;
 	}
 	const tornTail = pos < buf.length && buf.toString("utf-8", pos).trim().length > 0;
-	return { items, failures, tornTail, poisonSkipped, lineCount, completeBytes };
+	return { items, failures, tornTail, poisonSkipped, staleMarkerOffsets, lineCount, completeBytes };
 }
 
 /**
@@ -166,17 +196,38 @@ export function readJsonlTail<T>(
 	poisonSkipped: number;
 	/** Complete lines whose JSON.parse failed in THIS pass (new poison). */
 	failures: JsonlParseFailure[];
+	/** Marker-hit offsets whose line re-parsed OK (stale markers — U22 fix
+	 *  round re-parse guard; the caller prunes them via commitPoisonFindings). */
+	staleMarkerOffsets: number[];
 } {
 	const limit = Math.max(0, Math.floor(tailBytes));
 	let stat: fs.Stats;
 	try {
 		stat = fs.statSync(filePath);
 	} catch {
-		return { items: [], fileSize: 0, bytesRead: 0, truncated: false, tornTail: false, poisonSkipped: 0, failures: [] };
+		return {
+			items: [],
+			fileSize: 0,
+			bytesRead: 0,
+			truncated: false,
+			tornTail: false,
+			poisonSkipped: 0,
+			failures: [],
+			staleMarkerOffsets: [],
+		};
 	}
 	const fileSize = stat.size;
 	if (fileSize === 0 || limit === 0) {
-		return { items: [], fileSize, bytesRead: 0, truncated: false, tornTail: false, poisonSkipped: 0, failures: [] };
+		return {
+			items: [],
+			fileSize,
+			bytesRead: 0,
+			truncated: false,
+			tornTail: false,
+			poisonSkipped: 0,
+			failures: [],
+			staleMarkerOffsets: [],
+		};
 	}
 
 	const startOffset = Math.max(0, fileSize - limit);
@@ -192,7 +243,16 @@ export function readJsonlTail<T>(
 		// yields ELOOP, which the catch below treats like ENOENT (return empty).
 		fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
 	} catch {
-		return { items: [], fileSize, bytesRead: 0, truncated: false, tornTail: false, poisonSkipped: 0, failures: [] };
+		return {
+			items: [],
+			fileSize,
+			bytesRead: 0,
+			truncated: false,
+			tornTail: false,
+			poisonSkipped: 0,
+			failures: [],
+			staleMarkerOffsets: [],
+		};
 	}
 	try {
 		const buf = Buffer.alloc(bytesToRead);
@@ -214,7 +274,16 @@ export function readJsonlTail<T>(
 				// No newline at all in the tail → the entire tail is one
 				// partial line. Return no items; the caller should fall
 				// back to a wider tail or full read.
-				return { items: [], fileSize, bytesRead: totalRead, truncated: true, tornTail: false, poisonSkipped: 0, failures: [] };
+				return {
+					items: [],
+					fileSize,
+					bytesRead: totalRead,
+					truncated: true,
+					tornTail: false,
+					poisonSkipped: 0,
+					failures: [],
+					staleMarkerOffsets: [],
+				};
 			}
 			const parsed = parseJsonlWindow<T>(buf.subarray(firstNewline + 1, totalRead), startOffset + firstNewline + 1, options);
 			// Window-relative line indexes are only file-global when the window
@@ -227,6 +296,7 @@ export function readJsonlTail<T>(
 				tornTail: parsed.tornTail,
 				poisonSkipped: parsed.poisonSkipped,
 				failures: parsed.failures.map((failure) => ({ ...failure, lineIndex: -1 })),
+				staleMarkerOffsets: parsed.staleMarkerOffsets,
 			};
 		}
 
@@ -239,6 +309,7 @@ export function readJsonlTail<T>(
 			tornTail: parsed.tornTail,
 			poisonSkipped: parsed.poisonSkipped,
 			failures: parsed.failures,
+			staleMarkerOffsets: parsed.staleMarkerOffsets,
 		};
 	} finally {
 		if (fd !== undefined) {
@@ -377,6 +448,9 @@ export function readJsonlSince<T>(
 	tornTail: boolean;
 	poisonSkipped: number;
 	failures: JsonlParseFailure[];
+	/** Marker-hit offsets whose line re-parsed OK (stale markers — U22 fix
+	 *  round re-parse guard; the caller prunes them via commitPoisonFindings). */
+	staleMarkerOffsets: number[];
 	shrank: boolean;
 } {
 	const detailed = readLinesSinceDetailed(filePath, state);
@@ -385,11 +459,27 @@ export function readJsonlSince<T>(
 	const globalIndexes = state.byteOffset === 0;
 	const items: T[] = [];
 	const failures: JsonlParseFailure[] = [];
+	const staleMarkerOffsets: number[] = [];
 	let poisonSkipped = 0;
 
 	for (const line of detailed.lines) {
 		if (options?.poisonOffsets?.has(line.byteOffset)) {
-			poisonSkipped++;
+			// U22 fix round (re-parse guard): validate the marker against the
+			// line already read into memory (zero extra IO) — a marker whose
+			// line now PARSES is stale: deliver the event and flag the marker
+			// for pruning instead of silently skipping a healthy line.
+			const marked = line.text.trim();
+			let recovered = false;
+			if (marked) {
+				try {
+					items.push(JSON.parse(marked) as T);
+					recovered = true;
+				} catch {
+					recovered = false;
+				}
+			}
+			if (recovered) staleMarkerOffsets.push(line.byteOffset);
+			else poisonSkipped++;
 			continue;
 		}
 		const trimmed = line.text.trim();
@@ -412,6 +502,7 @@ export function readJsonlSince<T>(
 		tornTail: detailed.tornTail,
 		poisonSkipped,
 		failures,
+		staleMarkerOffsets,
 		shrank: detailed.shrank,
 	};
 }

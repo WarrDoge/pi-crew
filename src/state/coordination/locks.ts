@@ -934,8 +934,13 @@ export async function withRunLock<T>(manifest: TeamRunManifest, fn: () => Promis
 			// file-acquire already succeeded on the weak-file tier then sees the
 			// socket free only after BOTH guards of the previous holder are gone;
 			// the file stays held (by us) until the socket is fully released.
-			if (socket) await socket.release();
-			releaseOwnLock(filePath, token);
+			// FIX (review round): if socket.release() rejects, releaseOwnLock must
+			// still run — otherwise our own file token leaks on disk as a live lock.
+			try {
+				if (socket) await socket.release();
+			} finally {
+				releaseOwnLock(filePath, token);
+			}
 		}
 	});
 }

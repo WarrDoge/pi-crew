@@ -80,8 +80,9 @@ export interface RetryHooks {
 	 * `RetryNoProgressError` (`reason: "no_progress"`) instead of spawning the
 	 * next attempt — `onRetryGivenUp` still fires first (same terminal contract
 	 * as the cancellation exit). SOFT: a throwing/rejecting hook is logged via
-	 * console.error and treated as false — a broken detector must never change
-	 * retry behavior. Unregistered ⇒ behaviour is bit-for-bit pre-U9-ADJ.
+	 * logInternalError (the repo's console.error wrapper) and treated as false —
+	 * a broken detector must never change retry behavior. Unregistered ⇒
+	 * behaviour is bit-for-bit pre-U9-ADJ.
 	 */
 	noProgress?: (context: {
 		attempt: number;
@@ -183,7 +184,7 @@ export async function executeWithRetry<T>(
 			// Only the caller knows task semantics, so it compares the just-failed
 			// attempt against the previous one and decides. true ⇒ stop the loop
 			// with the distinct no_progress reason (not ordinary give-up exhaustion).
-			// SOFT: hook errors are logged (console.error) and treated as false.
+			// SOFT: hook errors are logged (logInternalError) and treated as false.
 			if (hooks.noProgress) {
 				let noProgressDecision = false;
 				try {

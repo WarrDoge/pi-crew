@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { logInternalError } from "../../utils/internal-error.ts";
 import { atomicWriteFile } from "../atomic-write.ts";
 import { type TeamEvent, withEventLogLockSync } from "./event-log.ts";
+import { poisonMarkerPath } from "./poison-marker.ts";
 
 /**
  * ST-11: Stream a JSONL file line-by-line using a bounded read buffer (8 KB
@@ -301,6 +302,16 @@ export function applyCompactionUnlocked(
 		logInternalError("event-log-rotation.compact", err, `eventsPath=${eventsPath}`);
 		return undefined;
 	}
+	// U22 fix round: the compacted file is NEW content at the same path — every
+	// old poison marker is meaningless (its byteOffset now names an arbitrary
+	// line of the rewritten file). Drop the sidecar so a stale marker can never
+	// resurrect once the file regrows past the old offsets; the re-parse guard
+	// in the readers (parseJsonlWindow) is the backstop if this rm fails.
+	try {
+		fs.rmSync(poisonMarkerPath(eventsPath), { force: true });
+	} catch (err) {
+		logInternalError("event-log-rotation.compact-poison-sidecar", err, `eventsPath=${eventsPath}`, "debug");
+	}
 	// C2: Re-read to recover any events appended during the compaction window.
 	// ST-11: stream the post-write file instead of `readEvents` (full
 	// readFileSync + JSON.parse per line into an array). We only need the event
@@ -440,7 +451,14 @@ function sweepOldArchives(eventsPath: string, now = Date.now()): void {
 	}
 	const cutoff = now - ARCHIVE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 	for (const name of entries) {
-		if (!name.startsWith(`${base}.`) || !name.endsWith(".archive.jsonl")) continue;
+		if (!name.startsWith(`${base}.`)) continue;
+		// U22 fix round: sweep each archive's poison-marker sidecar
+		// (`<archive>.poison.jsonl`) with the same retention — including
+		// orphans whose archive was already swept (rotateEventLogUnlocked
+		// moves sidecars alongside their archives).
+		const isArchive = name.endsWith(".archive.jsonl");
+		const isArchiveSidecar = name.endsWith(".archive.jsonl.poison.jsonl");
+		if (!isArchive && !isArchiveSidecar) continue;
 		const archivePath = path.join(dir, name);
 		try {
 			if (fs.statSync(archivePath).mtimeMs < cutoff) fs.unlinkSync(archivePath);
@@ -492,6 +510,17 @@ export function rotateEventLogUnlocked(eventsPath: string): boolean {
 		//     async `.alock` are separate) already recreated the file between
 		//     our rename and here, we leave their data intact (EEXIST → skip).
 		fs.renameSync(eventsPath, archivePath);
+		// U22 fix round: the poison-marker sidecar describes the OLD file's
+		// bytes — move it alongside the archive so its markers keep naming the
+		// exact lines they were recorded against. The fresh live file starts
+		// with NO sidecar, so a stale marker can never resurrect on it (the
+		// re-parse guard in the readers is the backstop if this rename fails).
+		try {
+			const sidecar = poisonMarkerPath(eventsPath);
+			if (fs.existsSync(sidecar)) fs.renameSync(sidecar, poisonMarkerPath(archivePath));
+		} catch (error) {
+			logInternalError("event-log.rotate-poison-sidecar", error, `eventsPath=${eventsPath}`, "debug");
+		}
 		try {
 			const fd = fs.openSync(eventsPath, "wx", 0o600);
 			fs.closeSync(fd);

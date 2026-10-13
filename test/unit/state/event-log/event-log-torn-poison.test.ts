@@ -30,7 +30,7 @@ import {
 	readEventsWithIntegrity,
 	type TeamEvent,
 } from "../../../../src/state/event-log/event-log.ts";
-import { generationPath } from "../../../../src/state/event-log/event-log-rotation.ts";
+import { compactEventLog, generationPath, rotateEventLogUnlocked } from "../../../../src/state/event-log/event-log-rotation.ts";
 import { loadPoisonMarkers, poisonMarkerPath } from "../../../../src/state/event-log/poison-marker.ts";
 
 const POISON_LINE = '{"this is not valid json"\n';
@@ -365,6 +365,156 @@ test("regression: clean file (shuffled seqs, blanks, multi-byte UTF-8) is bit-fo
 		assert.deepEqual(seqs(tornCursor.events), [3, 1, 2]);
 		assert.equal(tornCursor.tornTail, true);
 		assert.equal(fs.existsSync(poisonMarkerPath(eventsPath)), false);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// --- AC 8 (review fix): re-parse guard heals a marker resurrected by a regrown
+// file — the same-path rewrite/rotate+regrow hole the shape-based reset policy
+// cannot see (lineIndex < new lineCount AND byteOffset < new fileSize). -------
+
+test("re-parse guard: marker on a regrown file whose line now parses → event DELIVERED, marker pruned (readEvents + both cursor paths)", () => {
+	const dir = tmpDir("pi-crew-poison-regrow-");
+	try {
+		// Plant the marker on the ORIGINAL file: poison is line #1 (0-based),
+		// starting at byte offset len(eventLine(1)).
+		const eventsPath = path.join(dir, "events.jsonl");
+		fs.writeFileSync(eventsPath, `${eventLine(1)}${POISON_LINE}${eventLine(3)}`, "utf-8");
+		const markedByteOffset = Buffer.byteLength(eventLine(1), "utf-8");
+		readEventsWithIntegrity(eventsPath);
+		const planted = loadPoisonMarkers(eventsPath);
+		assert.equal(planted.length, 1);
+		assert.equal(planted[0]?.byteOffset, markedByteOffset);
+		assert.equal(planted[0]?.lineIndex, 1);
+
+		// Replace the file at the SAME path with MORE lines, all healthy, whose
+		// line #1 starts at the SAME byte offset (line 1 is identical). The old
+		// marker is "active" by shape (1 < lineCount, offset < fileSize) — without
+		// the re-parse guard it would resurrect and silently skip the healthy
+		// line 2 on every read.
+		const regrown = [eventLine(1), eventLine(2), eventLine(3), eventLine(4), eventLine(5)].join("");
+		fs.writeFileSync(eventsPath, regrown, "utf-8");
+		assert.ok(fs.statSync(eventsPath).size > markedByteOffset, "precondition: file regrew past the old offset");
+
+		const healed = readEventsWithIntegrity(eventsPath);
+		assert.deepEqual(seqs(healed.events), [1, 2, 3, 4, 5], "the healthy line at the marked offset MUST be delivered");
+		assert.equal(healed.integrity.poisonSkipped, 0, "no skip — the marker was proven stale by re-parse");
+		assert.equal(healed.integrity.parseFailures, 0);
+		assert.equal(loadPoisonMarkers(eventsPath).length, 0, "stale marker pruned from the sidecar");
+
+		// Steady state: the pruned marker stays gone; the event keeps flowing.
+		const again = readEventsWithIntegrity(eventsPath);
+		assert.deepEqual(seqs(again.events), [1, 2, 3, 4, 5]);
+		assert.equal(again.integrity.poisonSkipped, 0);
+		assert.equal(loadPoisonMarkers(eventsPath).length, 0);
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("re-parse guard: readEventsCursor byte-offset path heals the same resurrected marker", () => {
+	const dir = tmpDir("pi-crew-poison-regrow-byte-");
+	try {
+		const eventsPath = path.join(dir, "events.jsonl");
+		fs.writeFileSync(eventsPath, `${eventLine(1)}${POISON_LINE}${eventLine(3)}`, "utf-8");
+		readEventsWithIntegrity(eventsPath);
+		assert.equal(loadPoisonMarkers(eventsPath).length, 1);
+
+		const regrown = [eventLine(1), eventLine(2), eventLine(3), eventLine(4)].join("");
+		fs.writeFileSync(eventsPath, regrown, "utf-8");
+
+		// fromByteOffset path (readJsonlSince consumer of planPoisonSkip).
+		const bytePath = readEventsCursor(eventsPath, { fromByteOffset: 0, sinceSeq: 0 });
+		assert.deepEqual(seqs(bytePath.events), [1, 2, 3, 4], "byte-offset path must deliver the line at the marked offset");
+		assert.equal(bytePath.poisonSkipped, 0);
+		assert.equal(loadPoisonMarkers(eventsPath).length, 0, "marker pruned by the byte-offset path read");
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("re-parse guard: readEventsCursor cached watermark path heals the same resurrected marker", () => {
+	const dir = tmpDir("pi-crew-poison-regrow-cached-");
+	try {
+		const eventsPath = path.join(dir, "events.jsonl");
+		fs.writeFileSync(eventsPath, `${eventLine(1)}${POISON_LINE}${eventLine(3)}`, "utf-8");
+		readEventsWithIntegrity(eventsPath);
+		assert.equal(loadPoisonMarkers(eventsPath).length, 1);
+
+		const regrown = [eventLine(1), eventLine(2), eventLine(3), eventLine(4)].join("");
+		fs.writeFileSync(eventsPath, regrown, "utf-8");
+
+		// sinceSeq+limit path → readEventsCursorTailCached → cache miss (fresh
+		// path) → rebuildCursorTailCache full parse consults the sidecar.
+		const cached = readEventsCursor(eventsPath, { sinceSeq: 1, limit: 10 });
+		assert.deepEqual(seqs(cached.events), [2, 3, 4], "cached path must deliver the line at the marked offset");
+		assert.equal(cached.poisonSkipped, 0);
+		assert.equal(loadPoisonMarkers(eventsPath).length, 0, "marker pruned by the cached-path rebuild");
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// --- AC 9 (review fix): rotation moves the sidecar alongside its archive -----
+
+test("rotate: sidecar follows the archive; the fresh live file starts with NO marker", () => {
+	const dir = tmpDir("pi-crew-poison-rotate-");
+	try {
+		const eventsPath = path.join(dir, "events.jsonl");
+		fs.writeFileSync(eventsPath, `${eventLine(1)}${POISON_LINE}${eventLine(3)}`, "utf-8");
+		readEventsWithIntegrity(eventsPath);
+		const sidecar = poisonMarkerPath(eventsPath);
+		assert.ok(fs.existsSync(sidecar), "precondition: marker planted");
+
+		assert.ok(rotateEventLogUnlocked(eventsPath));
+		assert.ok(!fs.existsSync(sidecar), "the live sidecar must NOT survive rotation");
+		const archives = fs.readdirSync(dir).filter((entry) => entry.endsWith(".archive.jsonl"));
+		assert.equal(archives.length, 1);
+		const archivePath = path.join(dir, archives[0]!);
+		assert.ok(fs.existsSync(poisonMarkerPath(archivePath)), "sidecar moved alongside the archive it describes");
+		const moved = loadPoisonMarkers(archivePath);
+		assert.equal(moved.length, 1);
+		assert.equal(moved[0]?.lineIndex, 1);
+
+		// Post-rotation full-history read: the archived poison line stays
+		// skipped via the MOVED marker; the healthy archive events survive.
+		const after = readEventsWithIntegrity(eventsPath);
+		assert.deepEqual(seqs(after.events), [1, 3]);
+		assert.equal(after.integrity.poisonSkipped, 1, "archived poison skipped via the moved sidecar");
+
+		// The fresh live file is clean: append healthy lines (any offsets) and
+		// confirm nothing is ever skipped.
+		fs.appendFileSync(eventsPath, eventLine(5), "utf-8");
+		const regrown = readEventsWithIntegrity(eventsPath);
+		assert.deepEqual(seqs(regrown.events), [1, 3, 5]);
+		assert.ok(!fs.existsSync(sidecar), "no live sidecar reappears for the fresh file");
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// --- AC 10 (review fix): compaction deletes the sidecar (new content, same
+// path — every old marker is meaningless and must not resurrect on regrow). ---
+
+test("compact: sidecar deleted; regrown content past the old offsets is never skipped", () => {
+	const dir = tmpDir("pi-crew-poison-compact-");
+	try {
+		const eventsPath = path.join(dir, "events.jsonl");
+		fs.writeFileSync(eventsPath, [eventLine(1), POISON_LINE, eventLine(3), eventLine(4), eventLine(5), eventLine(6)].join(""), "utf-8");
+		readEventsWithIntegrity(eventsPath);
+		assert.ok(fs.existsSync(poisonMarkerPath(eventsPath)), "precondition: marker planted");
+
+		const result = compactEventLog(eventsPath, { compactToCount: 2 });
+		assert.ok(result, "compaction must run (5 valid events > compactToCount 2)");
+		assert.ok(!fs.existsSync(poisonMarkerPath(eventsPath)), "compaction must DELETE the sidecar");
+
+		// Regrow past every old offset with healthy lines — no skip, no marker.
+		fs.appendFileSync(eventsPath, eventLine(7) + eventLine(8), "utf-8");
+		const regrown = readEventsWithIntegrity(eventsPath);
+		assert.deepEqual(seqs(regrown.events), [5, 6, 7, 8], "kept window + appended lines all delivered");
+		assert.equal(regrown.integrity.poisonSkipped, 0);
+		assert.equal(loadPoisonMarkers(eventsPath).length, 0);
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}

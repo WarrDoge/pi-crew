@@ -73,7 +73,7 @@ function parseJsonlEventsWithIntegrity(filePath: string): EventsFileReadOutcome 
 	const lineCount = countCompleteLines(buf);
 	const plan = planPoisonSkip(filePath, buf.length, lineCount);
 	const parsed = parseJsonlWindow<TeamEvent>(buf, 0, { poisonOffsets: plan.offsets });
-	const quarantined = commitPoisonFindings(filePath, buf.length, lineCount, parsed.failures);
+	const quarantined = commitPoisonFindings(filePath, buf.length, lineCount, parsed.failures, parsed.staleMarkerOffsets);
 	if (quarantined) {
 		// Cap exceeded — the file was renamed to `<name>.corrupt-<ts>`; return
 		// the safe empty value (never throw).
@@ -100,7 +100,7 @@ function readEventsFileTailWithIntegrity(filePath: string, tailBytes: number): E
 	}
 	const plan = planPoisonSkip(filePath, stat.size, undefined);
 	const tail = readJsonlTail<TeamEvent>(filePath, tailBytes, { poisonOffsets: plan.offsets });
-	const quarantined = commitPoisonFindings(filePath, stat.size, undefined, tail.failures);
+	const quarantined = commitPoisonFindings(filePath, stat.size, undefined, tail.failures, tail.staleMarkerOffsets);
 	if (quarantined) {
 		return { ...emptyEventsFileReadOutcome(), parseFailures: tail.failures.length, truncated: tail.truncated, quarantined: true };
 	}
@@ -400,6 +400,9 @@ function scanEventLines(
 	poisonSkipped: number;
 	/** U22 Phase 1: complete lines in the window (marker reset-policy index). */
 	lineCount: number;
+	/** U22 fix round re-parse guard: marker offsets whose line re-parsed OK
+	 *  (stale markers) — forwarded for sidecar pruning. */
+	staleMarkerOffsets: number[];
 } {
 	// U22 Phase 1: delegate the line scan to the shared torn/poison classifier
 	// so the cached path classifies corrupt content IDENTICALLY to the wide
@@ -423,6 +426,7 @@ function scanEventLines(
 		tornTail: parsed.tornTail,
 		poisonSkipped: parsed.poisonSkipped,
 		lineCount: parsed.lineCount,
+		staleMarkerOffsets: parsed.staleMarkerOffsets,
 	};
 }
 
@@ -468,7 +472,7 @@ function rebuildCursorTailCache(
 		const lineCount = countCompleteLines(buf);
 		const plan = planPoisonSkip(eventsPath, buf.length, lineCount);
 		const scan = scanEventLines(buf, 0, undefined, plan.offsets);
-		const quarantined = commitPoisonFindings(eventsPath, buf.length, lineCount, scan.failures);
+		const quarantined = commitPoisonFindings(eventsPath, buf.length, lineCount, scan.failures, scan.staleMarkerOffsets);
 		const lastLine = scan.lines.at(-1)?.event.metadata?.seq;
 		const entry: CursorTailCacheEntry = {
 			size: stat.size,
@@ -621,7 +625,7 @@ function readEventsCursorTailCached(eventsPath: string, sinceSeq: number, limit:
 			if (delta !== null) {
 				const scan = scanEventLines(delta, previous.verifiedOffset, previous.lastSeq, plan.offsets);
 				if (scan.ok) {
-					const quarantined = commitPoisonFindings(eventsPath, stat.size, undefined, scan.failures);
+					const quarantined = commitPoisonFindings(eventsPath, stat.size, undefined, scan.failures, scan.staleMarkerOffsets);
 					if (!quarantined) {
 						const ring = evictCursorRing([...preRing, ...scan.lines], bound);
 						const lastLineSeq = scan.lines.at(-1)?.event.metadata?.seq;
@@ -773,7 +777,7 @@ export function readEventsCursor(eventsPath: string, options: EventCursorOptions
 			drainedArchiveEvents = readArchiveTailEvents(eventsPath, sinceSeq);
 			read = readJsonlSince<TeamEvent>(eventsPath, { byteOffset: 0, lineCount: 0 }, { poisonOffsets: plan.offsets });
 		}
-		const quarantined = commitPoisonFindings(eventsPath, fileSize, undefined, read.failures);
+		const quarantined = commitPoisonFindings(eventsPath, fileSize, undefined, read.failures, read.staleMarkerOffsets);
 		const safeItems = quarantined ? [] : read.items;
 		const filtered = safeItems.filter((event) => (event.metadata?.seq ?? 0) > sinceSeq);
 		const merged = mergeArchiveTailEvents(drainedArchiveEvents, filtered);

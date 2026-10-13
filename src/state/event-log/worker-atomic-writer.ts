@@ -145,9 +145,26 @@ function syncAtomicWriteFile(filePath, content, mode) {
 
 // PHASE 0 (c): single-fd append+fsync — parity with the event-log main path
 // (FIND-10). Previously appendFileSync with no fsync at all.
+// FIX (security F3): O_NOFOLLOW refuses a final-path symlink (ELOOP), closing
+// the TOCTOU symlink-swap window between the MAIN-side guard and this open —
+// a swapped-in symlink after the guard would otherwise redirect the append.
+// On platforms without O_NOFOLLOW (win32), fall back to a pre-open lstat
+// refusal (best-effort race window, same rejection semantics).
 function syncAppend(filePath, content) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const fd = fs.openSync(filePath, "a");
+  var appendFlags = fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT;
+  if (typeof fs.constants.O_NOFOLLOW === "number") {
+    appendFlags |= fs.constants.O_NOFOLLOW;
+  } else {
+    try {
+      if (fs.lstatSync(filePath).isSymbolicLink()) {
+        throw new Error("Refusing to append: target is a symlink: " + filePath);
+      }
+    } catch (lstatError) {
+      if (!lstatError || lstatError.code !== "ENOENT") throw lstatError;
+    }
+  }
+  const fd = fs.openSync(filePath, appendFlags);
   try {
     fs.writeSync(fd, content, undefined, "utf-8");
     fs.fsyncSync(fd);

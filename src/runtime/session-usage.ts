@@ -45,9 +45,11 @@ function mergeUsageFields(primary: UsageState, fallback: UsageState): UsageState
 /**
  * U16: the single usage-shape parser (session-level `SessionStats` AND
  * message-level `Usage`). Flat/direct fields win; nested payloads
- * (`usage`/`tokenUsage`/`tokens`/`stats`) fill only the MISSING fields, so the
- * SDK session shape `{tokens: {…}, cost}` maps completely while flat legacy
- * shapes parse unchanged.
+ * (`usage`/`message`/`tokenUsage`/`tokens`/`stats`) fill only the MISSING
+ * fields, so the SDK session shape `{tokens: {…}, cost}` maps completely while
+ * flat legacy shapes parse unchanged. `message` restores the legacy
+ * pi-json-output.ts nested key (git d29df7dd — Pi --mode json nests usage
+ * under `message` for message_end/turn_end events) for back-compat.
  */
 export function usageFromValue(value: unknown): UsageState | undefined {
 	const obj = asRecord(value);
@@ -61,7 +63,7 @@ export function usageFromValue(value: unknown): UsageState | undefined {
 		turns: numberField(obj, ["turns", "turnCount", "turn_count"]),
 	};
 	let merged: UsageState | undefined = Object.values(direct).some((entry) => entry !== undefined) ? direct : undefined;
-	for (const key of ["usage", "tokenUsage", "tokens", "stats"]) {
+	for (const key of ["usage", "message", "tokenUsage", "tokens", "stats"]) {
 		const nested = usageFromValue(obj[key]);
 		if (nested) merged = merged ? mergeUsageFields(merged, nested) : nested;
 	}

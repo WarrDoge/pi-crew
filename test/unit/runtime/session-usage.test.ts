@@ -170,3 +170,26 @@ test("a fake LiveSessionLike with getSessionStats() yields complete usage on the
 	const bare: FakeSession = {};
 	assert.equal(usageFromStats(bare.getSessionStats?.()), undefined);
 });
+
+// ─── Review fix: legacy nested key "message" restored (pi-json-output d29df7dd)
+
+test('usageFromValue parses usage nested under "message" (legacy pi-json-output shape)', () => {
+	const usage = usageFromValue({ message: { input: 10, output: 4 } });
+	assert.ok(usage, "message-nested usage must parse (back-compat)");
+	assert.equal(usage.input, 10);
+	assert.equal(usage.output, 4);
+
+	// Deeper legacy shape: { message: { usage: { input, output } } } — the
+	// message-level Usage object itself carrying a nested `usage` field.
+	const nested = usageFromValue({ message: { usage: { input: 7, output: 3 } } });
+	assert.ok(nested, "message { usage { … } } must parse via the nested loop");
+	assert.equal(nested.input, 7);
+	assert.equal(nested.output, 3);
+
+	// Merge semantics preserved: direct/flat fields win; message fills only the
+	// MISSING fields (old parser merged exactly this way).
+	const merged = usageFromValue({ output: 2, message: { input: 10 } });
+	assert.ok(merged);
+	assert.equal(merged.input, 10, "message fills the missing input");
+	assert.equal(merged.output, 2, "direct field wins");
+});
