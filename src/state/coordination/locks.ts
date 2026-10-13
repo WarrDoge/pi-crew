@@ -609,11 +609,18 @@ async function acquireRunLockGuarded(filePath: string, staleMs: number): Promise
 	let attempt = 0;
 	for (;;) {
 		const token = await acquireLockWithRetryAsync(filePath, staleMs, "run");
+		// RR-011 (F02) extended to the dual-guard window: the token must be
+		// visible as a LIVE in-process hold from the moment the file tier is
+		// ours — the socket listen below is a macrotask and can be delayed by
+		// event-loop pressure, which would otherwise make concurrent
+		// same-process acquirers misread our fresh token as a stealable corpse.
+		runLockHeldTokens.add(token);
 		try {
 			const socket = await acquireProcessLock(runLockSocketName(filePath));
 			return { token, socket };
 		} catch (error) {
 			// Never keep the file token without the socket guard that follows it.
+			runLockHeldTokens.delete(token);
 			releaseOwnLock(filePath, token);
 			if (!isProcessLockHeldError(error)) throw error;
 			// Socket contention — WAIT (timer-based, never sleepSync: the live

@@ -336,15 +336,26 @@ test("review F1: static resume registers in the active-run registry before dispa
 
 			// Freeze the first resume mid-execution: hold the run lock its per-op
 			// merges / finalize need, so it cannot reach terminal while we probe.
+			// U21: withRunLock now also takes a kernel socket (listen callback =
+			// macrotask), so acquisition is no longer microtask-fast. Await a
+			// deterministic acquired-signal from the body before probing — the old
+			// assumption (acquisition wins the race against `await second`) was
+			// timing-fragile and U21 merely surfaced it.
 			const frozenManifest = loadRunManifestById(cwd, runId)!.manifest;
 			let releaseFreeze!: () => void;
+			let signalAcquired!: () => void;
+			const freezeAcquired = new Promise<void>((resolve) => {
+				signalAcquired = resolve;
+			});
 			const freeze = withRunLock(
 				frozenManifest,
 				() =>
 					new Promise<void>((resolve) => {
+						signalAcquired();
 						releaseFreeze = resolve;
 					}),
 			);
+			await freezeAcquired;
 
 			const second = await handleTeamTool({ action: "resume", runId }, { cwd, sessionId: "session-owner" });
 			assert.equal(second.isError, true, "concurrent resume while the first is executing must be refused");
