@@ -32,6 +32,13 @@
  *     outcome escalates. A FAILED gate never reaches the classifier — a cheap
  *     classifier may never rubber-stamp a failure (U6B escalation policy),
  *     so consulting it there would only burn a call.
+ *   - Layer 3 (PHASE 4, U13-ADJ determinism, DEFAULT OFF): when
+ *     PI_CREW_VERIFY_DETERMINISM=1 and the default checks are all green, the
+ *     most critical check (test-critical in the default preset) is RERUN
+ *     once; a disagreement (flaky) or a rerun executor failure downgrades
+ *     the verdict to INCONCLUSIVE — never FAILED, never a task failure. It
+ *     never changes the FAILED↔spawn logic; flag off keeps the gate
+ *     bit-for-bit identical to pre-U13-ADJ.
  *
  * SAFETY: a gate that cannot run (disabled by env, no checks resolved,
  * executor failure) degrades to "spawn the LLM verifier as today" — the
@@ -86,6 +93,10 @@ export interface VerifyGateOutcome {
 	evidenceLines: string[];
 	allPassed: boolean;
 	totalDurationMs: number;
+	/** PHASE 4 (U13-ADJ): set ONLY by the layer-3 determinism rerun when it
+	 *  detected flakiness or a rerun executor failure — the note is also
+	 *  appended to evidenceLines and shapes the rendered context trailer. */
+	determinismNote?: string;
 }
 
 /** Injected command executor. The TOOL path wraps ctx.executeTool("bash");
@@ -123,6 +134,16 @@ export function resolveVerifyGateTimeoutMs(explicit?: number): number {
 	const env = getCrewEnvInt("PI_CREW_VERIFY_GATE_TIMEOUT_MS");
 	const raw = env ?? explicit ?? DEFAULT_VERIFY_GATE_TIMEOUT_MS;
 	return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_VERIFY_GATE_TIMEOUT_MS;
+}
+
+/** PHASE 4 (U13-ADJ, upgrade 2026-10-13) layer-3 toggle:
+ *  PI_CREW_VERIFY_DETERMINISM beats the explicit arg; default OFF (unset →
+ *  explicit ?? false). Flag off ⇒ the gate runs exactly as pre-U13-ADJ
+ *  (no third check, no rerun, no verdict downgrade — bit-for-bit). */
+export function resolveVerifyDeterminismEnabled(explicit?: boolean): boolean {
+	const env = getCrewEnvBool("PI_CREW_VERIFY_DETERMINISM");
+	if (env !== undefined) return env;
+	return explicit ?? false;
 }
 
 /**
@@ -242,6 +263,106 @@ export function createSubprocessVerifyGateExecutor(): VerifyGateExecutor {
 	};
 }
 
+/** PHASE 4 (U13-ADJ) layer-3 result — one entry per pre-gate execution. */
+export interface DeterminismLayerResult {
+	/** false → the layer did not run (budget rule / no eligible target). */
+	ran: boolean;
+	/** Metric label: "deterministic" | "flaky" | "rerun_error" when ran;
+	 *  the skip reason ("verdict_failed" | "verdict_inconclusive" |
+	 *  "no_critical_pass") otherwise. */
+	result: string;
+	/** The gate outcome AFTER the layer (the layer-1 outcome when !ran). */
+	outcome: VerifyGateOutcome;
+	/** Non-empty iff the rerun disagreed (flaky) or its executor failed. */
+	note: string;
+}
+
+/** Pick the layer-3 rerun target: the MOST critical check — the LAST check
+ *  with critical !== false that ran and PASSED (default preset order puts
+ *  test-critical last: tests are the strongest determinism signal). Checks
+ *  that failed are never rerun (pointless — a failure already escalates). */
+function pickDeterminismRerunTarget(
+	checks: VerifyGateCheck[],
+	results: VerifyGateCheckResult[],
+): { check: VerifyGateCheck; result: VerifyGateCheckResult } | undefined {
+	let target: { check: VerifyGateCheck; result: VerifyGateCheckResult } | undefined;
+	for (let i = 0; i < checks.length; i++) {
+		const check = checks[i];
+		const result = results[i];
+		if (!check || !result || result.skipped || !result.passed) continue;
+		if (check.critical === false) continue; // critical undefined = critical
+		target = { check, result };
+	}
+	return target;
+}
+
+/** PHASE 4 (U13-ADJ) layer 3 — the determinism rerun. Runs ONLY when the
+ *  layer-1 verdict is PASS (budget rule: never rerun an already-FAILED gate)
+ *  AND at least one critical check passed. Semantics:
+ *  - rerun exit 0 (agrees with run 1) → verdict stays PASS, the rerun is
+ *    recorded as a passing `determinism:<name>` check for evidence;
+ *  - rerun exit ≠ 0 (DISAGREES — flaky) → verdict INCONCLUSIVE (never
+ *    FAILED) + note "deterministic-check: flaky <name>";
+ *  - rerun executor failure (exitCode null) → INCONCLUSIVE (soft-degrade,
+ *    never FAILED) + note "deterministic-check: rerun executor error".
+ *  The layer can ONLY downgrade its own rerun check to INCONCLUSIVE — it
+ *  never changes the FAILED↔spawn decision logic. NEVER rejects. */
+export async function applyVerifyGateDeterminismLayer(
+	checks: VerifyGateCheck[],
+	outcome: VerifyGateOutcome,
+	exec: VerifyGateExecutor,
+	opts: { cwd: string; signal?: AbortSignal; timeoutMs?: number },
+): Promise<DeterminismLayerResult> {
+	// Budget rule: no pointless rerun when the gate already failed / resolved
+	// nothing — layer 3 only re-tests a GREEN gate for hidden nondeterminism.
+	if (outcome.verdict !== "PASS") {
+		return { ran: false, result: `verdict_${outcome.verdict.toLowerCase()}`, outcome, note: "" };
+	}
+	const target = pickDeterminismRerunTarget(checks, outcome.checks);
+	if (!target) {
+		return { ran: false, result: "no_critical_pass", outcome, note: "" };
+	}
+	const timeoutMs = resolveVerifyGateTimeoutMs(opts.timeoutMs);
+	const start = Date.now();
+	let rerun: VerifyGateExecutorResult;
+	try {
+		rerun = await exec(target.check.command, { cwd: opts.cwd, timeoutMs, signal: opts.signal });
+	} catch (error) {
+		// Executor contract says never-reject; defend anyway (soft-degrade).
+		rerun = { exitCode: null, output: "", error: error instanceof Error ? error.message : String(error) };
+	}
+	const rerunCheck: VerifyGateCheckResult = {
+		name: `determinism:${target.check.name}`,
+		command: target.check.command,
+		exitCode: rerun.exitCode,
+		passed: rerun.exitCode === 0,
+		durationMs: Date.now() - start,
+		outputTail: tailOutput(rerun.output ?? ""),
+		...(rerun.error ? { error: rerun.error } : {}),
+	};
+	const base = evaluateVerifyGateResults([...outcome.checks, rerunCheck]);
+	if (rerun.exitCode === 0) {
+		return { ran: true, result: "deterministic", outcome: base, note: "" };
+	}
+	const note =
+		rerun.exitCode === null
+			? `deterministic-check: rerun executor error (${target.check.name})`
+			: `deterministic-check: flaky ${target.check.name}`;
+	return {
+		ran: true,
+		result: rerun.exitCode === null ? "rerun_error" : "flaky",
+		// The rerun check's failure would otherwise read as gate FAILED — the
+		// ONLY thing layer 3 may do is downgrade ITS OWN rerun to INCONCLUSIVE.
+		outcome: {
+			...base,
+			verdict: "INCONCLUSIVE",
+			evidenceLines: [...base.evidenceLines, note],
+			determinismNote: note,
+		},
+		note,
+	};
+}
+
 export interface VerifierSpawnDecision {
 	/** true → do NOT spawn the LLM verifier; the gate verdict stands. */
 	skipVerifier: boolean;
@@ -286,10 +407,19 @@ export function renderVerifyGateContext(outcome: VerifyGateOutcome): string {
 			lines.push(`### ${check.name} output tail`, "```", tail, "```");
 		}
 	}
-	lines.push(
-		"",
-		"The deterministic gate already ran these commands — do NOT re-run them; verify the WORK (diff, files, acceptance), using these results as ground truth for build/test state.",
-	);
+	// PHASE 4 gap 2 (U13-ADJ): distinguish "executor died" (exit=err — spawn /
+	// timer failure, NO exit code) from a real exit≠0. An executor death is
+	// NOT evidence the build is broken — asserting it as ground truth would
+	// bias the LLM verifier against a possibly-fine build. Real exit≠0 keeps
+	// the original wording bit-for-bit; a flaky rerun (layer 3) gets its own
+	// trailer because "do NOT re-run / ground truth" would be provably wrong.
+	const executorDeath = outcome.checks.some((c) => !c.skipped && c.exitCode === null);
+	const trailer = executorDeath
+		? "A verification command could not run (executor error — exit=err). Treat the build/test state as UNKNOWN; run the build/tests yourself before concluding."
+		: outcome.determinismNote
+			? "The gate rerun detected NONDETERMINISM (a check passed once and failed on rerun). These gate results are NOT reliable — re-run the affected command yourself and treat the build/test state as UNKNOWN."
+			: "The deterministic gate already ran these commands — do NOT re-run them; verify the WORK (diff, files, acceptance), using these results as ground truth for build/test state.";
+	lines.push("", trailer);
 	return lines.join("\n");
 }
 
@@ -314,6 +444,9 @@ export interface VerifierGatePreGateInput {
 		taskId?: string;
 	};
 	metricRegistry?: MetricRegistry;
+	/** PHASE 4 (U13-ADJ): explicit layer-3 determinism toggle — env
+	 *  PI_CREW_VERIFY_DETERMINISM beats this; both default OFF. */
+	determinism?: boolean;
 }
 
 export interface VerifierGatePreGateResult {
@@ -333,18 +466,41 @@ function incMetric(registry: MetricRegistry | undefined, name: string, help: str
 }
 
 /**
- * Spawn-site orchestration: run the deterministic gate, consult the U6B
+ * Spawn-site orchestration: run the deterministic gate, optionally the U13-ADJ
+ * layer-3 determinism rerun (flag-gated, default OFF), consult the U6B
  * classifier layer when inconclusive, resolve the two-layer spawn decision,
  * and emit the acceptance metrics. NEVER rejects — executor failures degrade
  * to INCONCLUSIVE checks, which escalate to the LLM verifier.
  */
 export async function runVerifierGatePreGate(input: VerifierGatePreGateInput): Promise<VerifierGatePreGateResult> {
 	const checks = input.checks ?? defaultVerifyGateChecks(input.cwd);
-	const outcome = await runVerifyGate(checks, createSubprocessVerifyGateExecutor(), {
+	const exec = createSubprocessVerifyGateExecutor();
+	let outcome = await runVerifyGate(checks, exec, {
 		cwd: input.cwd,
 		signal: input.signal,
 		timeoutMs: input.timeoutMs,
 	});
+	// ── PHASE 4 (U13-ADJ) layer 3: determinism rerun (DEFAULT OFF) ──────────
+	// Only re-tests a GREEN gate: a flaky critical check or a rerun executor
+	// failure downgrades PASS→INCONCLUSIVE (never FAILED), so a nondeterministic
+	// green gate can no longer skip the LLM verifier. Flag off ⇒ skipped
+	// entirely (bit-for-bit pre-U13-ADJ behavior).
+	let determinismNote = "";
+	if (resolveVerifyDeterminismEnabled(input.determinism)) {
+		const layer = await applyVerifyGateDeterminismLayer(checks, outcome, exec, {
+			cwd: input.cwd,
+			signal: input.signal,
+			timeoutMs: input.timeoutMs,
+		});
+		outcome = layer.outcome;
+		determinismNote = layer.note;
+		incMetric(
+			input.metricRegistry,
+			"crew.verification.verify_gate_determinism_runs_total",
+			"Layer-3 determinism reruns (U13-ADJ) by result",
+			{ result: layer.result },
+		);
+	}
 	let preGate: VerifierPreGateResult | undefined;
 	if (outcome.verdict === "INCONCLUSIVE" && input.classifier?.enabled) {
 		try {
@@ -389,6 +545,7 @@ export async function runVerifierGatePreGate(input: VerifierGatePreGateInput): P
 		outcome,
 		decision,
 		...(preGate ? { preGate } : {}),
-		promptContext: decision.attachGateContext ? renderVerifyGateContext(outcome) : "",
+		promptContext:
+			decision.attachGateContext || (determinismNote !== "" && !decision.skipVerifier) ? renderVerifyGateContext(outcome) : "",
 	};
 }

@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import test from "node:test";
+import { mock, test } from "node:test";
 import { runTeamTask } from "../../../../src/runtime/task-runner.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
@@ -161,5 +161,46 @@ test("U13: PI_CREW_VERIFY_GATE=0 restores the pre-U13 behavior (gate never runs)
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = prevMock;
 		if (prevAllowMock === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = prevAllowMock;
+	}
+});
+
+test("U13-ADJ gap 1: skip-path writeArtifact failure degrades — task completes (never fail a task)", async () => {
+	const cwd = makeRepoDir("pi-crew-u13adj-artifact-", { typecheck: "node -e 0" });
+	const created = createRunManifest({ cwd, team: team as never, workflow: workflow as never, goal: "u13adj-artifact" });
+	const task = created.tasks[0]!;
+	// Inject an FS failure scoped to the skip-path write ONLY: `results` exists
+	// as a regular FILE → writeArtifact's mkdirSync(artifactsRoot/results)
+	// throws (ENOTDIR/EEXIST) — the same class as ENOSPC/EACCES, hermetic and
+	// cross-platform. pre-execution writes prompts/ (unaffected); only the
+	// gate's result write targets results/.
+	fs.mkdirSync(created.manifest.artifactsRoot, { recursive: true });
+	fs.writeFileSync(path.join(created.manifest.artifactsRoot, "results"), "not-a-directory");
+	const errMock = mock.method(console, "error", () => undefined);
+	try {
+		const result = await runTeamTask({
+			manifest: created.manifest,
+			tasks: created.tasks,
+			task,
+			step: workflow.steps[0] as never,
+			agent: agent as never,
+			executeWorkers: true,
+			workspaceId: "test-workspace",
+		});
+		const finished = result.tasks.find((t) => t.id === task.id)!;
+		// The task COMPLETED despite the artifact-write failure (degrade, not fail).
+		assert.equal(finished.status, "completed", `status=${finished.status} error=${finished.error ?? ""}`);
+		assert.equal(finished.resultArtifact, undefined, "degraded: no result artifact");
+		assert.ok(!finished.modelAttempts || finished.modelAttempts.length === 0, "still no LLM verifier spawn");
+		// The degrade is LOUD (console.error) — operators can see why the artifact is missing.
+		const logged = errMock.mock.calls.map((c) => c.arguments.join(" ")).join("\n");
+		assert.match(logged, /verify-gate skip-path writeArtifact failed — degrading/);
+		// Gate decision itself is intact: spawn skipped, provenance recorded.
+		assert.equal((finished.diagnostics as Record<string, { verdict: string }> | undefined)?.verifyGate?.verdict, "PASS");
+		const events = fs.readFileSync(created.manifest.eventsPath, "utf8");
+		assert.match(events, /task\.verifier_pre_gate/);
+		assert.match(events, /SKIPPED/);
+		assert.match(events, /task\.completed/);
+	} finally {
+		errMock.mock.restore();
 	}
 });

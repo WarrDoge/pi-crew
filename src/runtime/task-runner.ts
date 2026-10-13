@@ -160,92 +160,129 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 		//     to its prompt (it diagnoses; it does not re-derive exit codes).
 		// Disabled by PI_CREW_VERIFY_GATE=0; scaffold runtime never gates.
 		if (ctx.task.role === "verifier" && ctx.runtimeKind !== "scaffold" && resolveVerifyGateEnabled()) {
-			const preGate = await runVerifierGatePreGate({
-				cwd: ctx.task.cwd,
-				signal: input.signal,
-				classifier: {
-					enabled: resolveClassifierEnabled(input.runtimeConfig?.classifierEnabled),
-					modelRegistry: input.modelRegistry,
-					classifierModel: resolveClassifierModel(input.runtimeConfig?.classifierModel),
-					eventsPath: manifest.eventsPath,
+			// PHASE 4 (U13-ADJ): the verify-gate itself must NEVER fail a task —
+			// any unexpected error in the pre-gate block (engine bug, FS failure
+			// on an artifact write) degrades to the ungated verifier spawn
+			// (exactly the pre-U13 behavior) instead of throwing out of runTeamTask.
+			try {
+				const preGate = await runVerifierGatePreGate({
+					cwd: ctx.task.cwd,
+					signal: input.signal,
+					classifier: {
+						enabled: resolveClassifierEnabled(input.runtimeConfig?.classifierEnabled),
+						modelRegistry: input.modelRegistry,
+						classifierModel: resolveClassifierModel(input.runtimeConfig?.classifierModel),
+						eventsPath: manifest.eventsPath,
+						runId: manifest.runId,
+						taskId: ctx.task.id,
+					},
+					metricRegistry: input.metricRegistry,
+				});
+				// Diagnostic event (task.verifier_pre_gate — U6B's event type; the
+				// TEAM_EVENT_TYPES registry entry stays report-only pending a
+				// src/state/** lane, same as classifier-pre-gate's own appends).
+				appendEventFireAndForget(manifest.eventsPath, {
+					type: "task.verifier_pre_gate",
 					runId: manifest.runId,
 					taskId: ctx.task.id,
-				},
-				metricRegistry: input.metricRegistry,
-			});
-			// Diagnostic event (task.verifier_pre_gate — U6B's event type; the
-			// TEAM_EVENT_TYPES registry entry stays report-only pending a
-			// src/state/** lane, same as classifier-pre-gate's own appends).
-			appendEventFireAndForget(manifest.eventsPath, {
-				type: "task.verifier_pre_gate",
-				runId: manifest.runId,
-				taskId: ctx.task.id,
-				message: preGate.decision.skipVerifier
-					? `Deterministic verify_gate ${preGate.outcome.verdict} — LLM verifier spawn SKIPPED (${preGate.decision.reason})`
-					: `Deterministic verify_gate ${preGate.outcome.verdict} — LLM verifier spawns with gate context (${preGate.decision.reason})`,
-				data: {
-					verdict: preGate.outcome.verdict,
-					decision: preGate.decision,
-					evidenceLines: preGate.outcome.evidenceLines,
-					...(preGate.preGate ? { classifierAction: preGate.preGate.action } : {}),
-				},
-			});
-			if (preGate.decision.skipVerifier) {
-				// Terminalize WITHOUT spawning: synthesize the branch result (gate
-				// summary as the task result artifact + stdout) and reuse the full
-				// finalizer — events, hooks, persistence, verification evidence.
-				const summary = renderVerifyGateSummary(preGate.outcome, preGate.decision.reason);
-				const resultArtifact = writeArtifact(manifest.artifactsRoot, {
-					kind: "result",
-					relativePath: `results/${ctx.task.id}.txt`,
-					content: `${summary}\n`,
-					producer: ctx.task.id,
-				});
-				ctx.task = {
-					...ctx.task,
-					// Provenance: this verdict came from the deterministic gate, not a
-					// model attempt (U6B mount note: evaluator/model provenance marker).
-					diagnostics: {
-						...(ctx.task.diagnostics ?? {}),
-						verifyGate: {
-							verdict: preGate.outcome.verdict,
-							reason: preGate.decision.reason,
-							evidenceLines: preGate.outcome.evidenceLines,
-						},
+					message: preGate.decision.skipVerifier
+						? `Deterministic verify_gate ${preGate.outcome.verdict} — LLM verifier spawn SKIPPED (${preGate.decision.reason})`
+						: `Deterministic verify_gate ${preGate.outcome.verdict} — LLM verifier spawns with gate context (${preGate.decision.reason})`,
+					data: {
+						verdict: preGate.outcome.verdict,
+						decision: preGate.decision,
+						evidenceLines: preGate.outcome.evidenceLines,
+						...(preGate.outcome.determinismNote ? { determinismNote: preGate.outcome.determinismNote } : {}),
+						...(preGate.preGate ? { classifierAction: preGate.preGate.action } : {}),
 					},
-				};
-				return await finalizeTaskResult(ctx, {
-					resultArtifact,
-					logArtifact: undefined,
-					transcriptArtifact: undefined,
-					exitCode: 0,
-					error: undefined,
-					modelAttempts: [],
-					parsedOutput: undefined,
-					finalStdout: summary,
-					transcriptPath: undefined,
-					terminalEvidence: [],
-					startupEvidence: ctx.startupEvidence,
 				});
-			}
-			if (preGate.promptContext) {
-				// Spawn proceeds — attach the gate results to the verifier prompt
-				// (both channels: full prompt + the user-message half). The prompt
-				// artifact was written in pre-execution with the PRE-gate prompt;
-				// rewrite it so the persisted artifact matches what the worker saw.
-				ctx.prompt = `${ctx.prompt}\n\n${preGate.promptContext}`;
-				if (ctx.userPrompt !== undefined) ctx.userPrompt = `${ctx.userPrompt}\n\n${preGate.promptContext}`;
-				if (ctx.promptArtifact) {
-					ctx.promptArtifact = writeArtifact(manifest.artifactsRoot, {
-						kind: "prompt",
-						// Same relative-path convention pre-execution used
-						// (prompts/<taskId>.md) — ArtifactDescriptor carries only the
-						// absolute path, so the rewrite re-derives the relative path.
-						relativePath: `prompts/${ctx.task.id}.md`,
-						content: `${ctx.prompt}\n`,
-						producer: ctx.task.id,
+				if (preGate.decision.skipVerifier) {
+					// Terminalize WITHOUT spawning: synthesize the branch result (gate
+					// summary as the task result artifact + stdout) and reuse the full
+					// finalizer — events, hooks, persistence, verification evidence.
+					const summary = renderVerifyGateSummary(preGate.outcome, preGate.decision.reason);
+					// PHASE 4 gap 1 (U13-ADJ): the skip-path artifact write must NEVER
+					// fail the task — an FS error here (ENOSPC / EACCES / ENOTDIR)
+					// degrades to "no result artifact" (the finalizer treats it as
+					// optional) instead of throwing out of runTeamTask.
+					let resultArtifact: ArtifactDescriptor | undefined;
+					try {
+						resultArtifact = writeArtifact(manifest.artifactsRoot, {
+							kind: "result",
+							relativePath: `results/${ctx.task.id}.txt`,
+							content: `${summary}\n`,
+							producer: ctx.task.id,
+						});
+					} catch (error) {
+						console.error(
+							`[task-runner] verify-gate skip-path writeArtifact failed — degrading (task continues without a result artifact): ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						);
+					}
+					ctx.task = {
+						...ctx.task,
+						// Provenance: this verdict came from the deterministic gate, not a
+						// model attempt (U6B mount note: evaluator/model provenance marker).
+						diagnostics: {
+							...(ctx.task.diagnostics ?? {}),
+							verifyGate: {
+								verdict: preGate.outcome.verdict,
+								reason: preGate.decision.reason,
+								evidenceLines: preGate.outcome.evidenceLines,
+							},
+						},
+					};
+					return await finalizeTaskResult(ctx, {
+						resultArtifact,
+						logArtifact: undefined,
+						transcriptArtifact: undefined,
+						exitCode: 0,
+						error: undefined,
+						modelAttempts: [],
+						parsedOutput: undefined,
+						finalStdout: summary,
+						transcriptPath: undefined,
+						terminalEvidence: [],
+						startupEvidence: ctx.startupEvidence,
 					});
 				}
+				if (preGate.promptContext) {
+					// Spawn proceeds — attach the gate results to the verifier prompt
+					// (both channels: full prompt + the user-message half). The prompt
+					// artifact was written in pre-execution with the PRE-gate prompt;
+					// rewrite it so the persisted artifact matches what the worker saw.
+					ctx.prompt = `${ctx.prompt}\n\n${preGate.promptContext}`;
+					if (ctx.userPrompt !== undefined) ctx.userPrompt = `${ctx.userPrompt}\n\n${preGate.promptContext}`;
+					if (ctx.promptArtifact) {
+						// PHASE 4 gap 1 (cont.): same never-fail-a-task degrade for the
+						// prompt-artifact rewrite — on FS failure keep the pre-gate
+						// artifact on disk (the worker still gets the extended prompt).
+						try {
+							ctx.promptArtifact = writeArtifact(manifest.artifactsRoot, {
+								kind: "prompt",
+								// Same relative-path convention pre-execution used
+								// (prompts/<taskId>.md) — ArtifactDescriptor carries only the
+								// absolute path, so the rewrite re-derives the relative path.
+								relativePath: `prompts/${ctx.task.id}.md`,
+								content: `${ctx.prompt}\n`,
+								producer: ctx.task.id,
+							});
+						} catch (error) {
+							console.error(
+								`[task-runner] verify-gate prompt-artifact rewrite failed — degrading (persisted prompt keeps the pre-gate content): ${
+									error instanceof Error ? error.message : String(error)
+								}`,
+							);
+						}
+					}
+				}
+			} catch (error) {
+				console.error(
+					`[task-runner] verify-gate pre-gate error — degrading to the ungated verifier spawn: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
 			}
 		}
 		// Destructure mutable fields for branch closures + sync-back

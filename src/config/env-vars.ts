@@ -511,6 +511,11 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		default: "120000",
 		doc: "U13 per-check timeout in ms for the deterministic verify_gate pre-gate commands. Invalid/≤0 → 120000, mirroring runPhaseGates (runtime/verification/verify-gate.ts resolveVerifyGateTimeoutMs)",
 	},
+	PI_CREW_VERIFY_DETERMINISM: {
+		name: "PI_CREW_VERIFY_DETERMINISM",
+		parser: "boolean",
+		doc: "U13-ADJ (upgrade 2026-10-13, PHASE 4) layer-3 determinism rerun, DEFAULT OFF: '1' reruns the most critical default check (usually test:critical) once after a GREEN gate; disagreement (flaky) or a rerun executor failure downgrades the verdict to INCONCLUSIVE (never FAILED, never a task failure) with a 'deterministic-check: flaky <name>' note. Flag off keeps the gate bit-for-bit pre-U13-ADJ (runtime/verification/verify-gate.ts resolveVerifyDeterminismEnabled)",
+	},
 	PI_CREW_RPC_DIALOG_ANSWER: {
 		name: "PI_CREW_RPC_DIALOG_ANSWER",
 		doc: "W7 EXPERIMENTAL dialog auto-answer policy for RPC-mode extension_ui_request dialogs (select/confirm/input/editor): 'cancel' (default) answers {cancelled:true} — universal safe answer; 'block' leaves the server promise pending (debug). Auto-confirm deliberately NOT implemented (security); invalid → 'cancel' (rpc-worker.ts resolveDialogAnswerPolicy)",

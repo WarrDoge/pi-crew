@@ -86,6 +86,7 @@ const SRC_READ_NAMES: readonly string[] = [
 	"PI_CREW_CLASSIFIER_ENABLED",
 	"PI_CREW_CLASSIFIER_MODEL",
 	"PI_CREW_RUN_LOCK_SOCKET", // U21 run-lock dual-guard toggle (locks.ts acquireRunLockGuarded)
+	"PI_CREW_VERIFY_DETERMINISM", // U13-ADJ layer-3 determinism rerun toggle (verify-gate.ts resolveVerifyDeterminismEnabled)
 	"PI_CREW_RPC_DIALOG_ANSWER",
 	"PI_CREW_RPC_TURN_TIMEOUT_MS",
 	"PI_TEAMS_CHILD_RESPONSE_TIMEOUT_MS",
