@@ -1,28 +1,18 @@
 import type { TeamTaskState, UsageState } from "./types.ts";
 
 /**
- * Lifetime usage — accumulated via message_end events, survives compaction.
- * cacheRead is excluded because each turn's cacheRead is the cumulative cached
- * prefix re-read on that one call — summing across turns would count it N times.
- * See: https://github.com/nichekate/pi-subagents3/issues/38
+ * Usage aggregation helpers for the run ledger and cost reporting.
+ *
+ * The ledger (aggregateUsage / RoleUsage) carries the FULL 5-field usage set
+ * (input, output, cacheRead, cacheWrite, cost) for accurate cost attribution.
+ * The canonical 5-field `LifetimeUsage` type lives in `src/runtime/usage-tracker.ts`.
+ *
+ * Token-sum displays and the budget proxy deliberately EXCLUDE cacheRead:
+ * each turn's cacheRead is the cumulative cached prefix re-read on that one
+ * call — summing across turns would count it N times.
+ * See: https://github.com/nichekate/pi-subagents3/issues/38 and
+ * docs/archive/pi-subagents3-deep-analysis.md
  */
-export type LifetimeUsage = {
-	input: number;
-	output: number;
-	cacheWrite: number;
-};
-
-/** Sum of lifetime usage components, or 0 if undefined. */
-export function getLifetimeTotal(u?: LifetimeUsage): number {
-	return u ? u.input + u.output + u.cacheWrite : 0;
-}
-
-/** Add a usage delta into a target accumulator (mutates target). */
-export function addUsage(into: LifetimeUsage, delta: LifetimeUsage): void {
-	into.input += delta.input;
-	into.output += delta.output;
-	into.cacheWrite += delta.cacheWrite;
-}
 
 export function aggregateUsage(tasks: TeamTaskState[]): UsageState | undefined {
 	const total: UsageState = {};
@@ -71,6 +61,8 @@ export interface RoleUsage {
 	role: string;
 	input: number;
 	output: number;
+	/** Ledger field — full cacheRead sum for cost attribution (not shown in token-sum displays). */
+	cacheRead: number;
 	cacheWrite: number;
 	cost: number;
 	turns: number;
@@ -88,6 +80,7 @@ export function aggregateUsageByRole(tasks: TeamTaskState[]): RoleUsage[] {
 				role,
 				input: 0,
 				output: 0,
+				cacheRead: 0,
 				cacheWrite: 0,
 				cost: 0,
 				turns: 0,
@@ -99,6 +92,7 @@ export function aggregateUsageByRole(tasks: TeamTaskState[]): RoleUsage[] {
 		if (!task.usage) continue;
 		bucket.input += task.usage.input ?? 0;
 		bucket.output += task.usage.output ?? 0;
+		bucket.cacheRead += task.usage.cacheRead ?? 0;
 		bucket.cacheWrite += task.usage.cacheWrite ?? 0;
 		bucket.cost += task.usage.cost ?? 0;
 		bucket.turns += task.usage.turns ?? 0;
