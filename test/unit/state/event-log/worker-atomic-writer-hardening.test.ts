@@ -308,11 +308,16 @@ test("P3 mode: atomicWriteFileViaWorker applies the requested mode (0o644)", asy
 		await atomicWriteFileViaWorker(file, "mode test\n", 0o644);
 		// openSync applies mode & ~umask at creation — compare against the same
 		// expression rather than a hardcoded 0o644.
-		assert.equal(fs.statSync(file).mode & 0o777, 0o644 & ~process.umask());
+		assert.equal(fs.statSync(file).mode & 0o777, process.platform === "win32" ? 0o666 : 0o644 & ~process.umask());
 
 		const file2 = path.join(dir, "mode-default.txt");
 		await atomicWriteFileViaWorker(file2, "default mode\n");
-		assert.equal(fs.statSync(file2).mode & 0o777, 0o600 & ~process.umask(), "absent mode keeps 0o600 default");
+		// win32 ignores POSIX creation-mode bits — statSync synthesizes 0o666 (CI-caught: 438 !== 420).
+		assert.equal(
+			fs.statSync(file2).mode & 0o777,
+			process.platform === "win32" ? 0o666 : 0o600 & ~process.umask(),
+			"absent mode keeps 0o600 default",
+		);
 	} finally {
 		terminateWorkerAtomicWriter();
 		fs.rmSync(dir, { recursive: true, force: true });
@@ -328,7 +333,7 @@ test("P3 mode: atomicWriteFileAsync forwards { mode } through the worker path", 
 	try {
 		const file = path.join(dir, "via-async.txt");
 		await atomicWriteFileAsync(file, "via async\n", { mode: 0o644 });
-		assert.equal(fs.statSync(file).mode & 0o777, 0o644 & ~process.umask());
+		assert.equal(fs.statSync(file).mode & 0o777, process.platform === "win32" ? 0o666 : 0o644 & ~process.umask());
 	} finally {
 		terminateWorkerAtomicWriter();
 		fs.rmSync(dir, { recursive: true, force: true });
