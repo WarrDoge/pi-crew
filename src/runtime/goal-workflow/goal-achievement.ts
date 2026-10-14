@@ -10,6 +10,9 @@
  * the false-green is no longer SILENT. It is deliberately conservative:
  *   - read-only / doc-only workflows are never accused (they legitimately make
  *     no project-code edits; their outputs land in gitignored .crew/),
+ *   - a goal that EXPLICITLY declares read-only intent (marker phrase) is
+ *     never accused either, even when the workflow shape is mutating —
+ *     explicit intent beats workflow shape (see `goalDeclaresReadOnly`),
  *   - a false-green is only flagged for CODE-MUTATING runs (executor /
  *     test-engineer steps) in a git repo whose working tree is empty,
  *   - status is downgraded to "failed" ONLY when a corroborating signal (a
@@ -60,6 +63,38 @@ export function isGitWorkingTreeClean(cwd: string): { clean: boolean; repoRoot: 
 }
 
 /**
+ * Goal-text markers that EXPLICITLY declare a read-only task. Each entry is
+ * matched as a substring, case-insensitively, against whitespace-collapsed
+ * lowercase goal text (`goalDeclaresReadOnly`). Keep this list short and
+ * literal — one phrase per line — so it is trivial to extend. Longer phrases
+ * already covered by a shorter entry are intentionally omitted (e.g.
+ * "do not modify, create, or delete" is covered by "do not modify").
+ */
+const READ_ONLY_GOAL_MARKERS: readonly string[] = [
+	"read-only",
+	"read only",
+	"do not modify",
+	"don't modify",
+	"no file modifications",
+	"không sửa",
+	"không chỉnh sửa",
+	"chỉ đọc",
+];
+
+/**
+ * Explicit-intent detector, deliberately conservative: returns true ONLY when
+ * the goal text contains one of the literal READ_ONLY_GOAL_MARKERS phrases
+ * (case-insensitive, whitespace-collapsed). No semantic guessing — a goal
+ * that merely *sounds* non-mutating is NOT suppressed. Battery/probe goal
+ * conventions use exactly these phrases.
+ */
+export function goalDeclaresReadOnly(goal: string | undefined): boolean {
+	if (typeof goal !== "string" || goal.length === 0) return false;
+	const normalized = goal.toLowerCase().replace(/\s+/g, " ").trim();
+	return READ_ONLY_GOAL_MARKERS.some((marker) => normalized.includes(marker));
+}
+
+/**
  * Assess whether a completed run achieved its goal. Pure function over manifest
  * + tasks + workflow — no side effects, easy to unit-test.
  */
@@ -74,6 +109,18 @@ export function assessGoalAchievement(
 		return {
 			achieved: "unknown",
 			reason: "read-only / doc-only workflow (no executor/test-engineer steps)",
+			signals: [],
+		};
+	}
+
+	// (1b) Explicit-intent detector: the WORKFLOW is mutating, but the GOAL TEXT
+	//      explicitly declares a read-only task — a clean tree is then EXPECTED,
+	//      never an accusation. Deliberately conservative (literal markers only,
+	//      no semantic guessing); battery/probe conventions use these phrases.
+	if (goalDeclaresReadOnly(manifest.goal)) {
+		return {
+			achieved: "unknown",
+			reason: "goal declared read-only (no edits expected)",
 			signals: [],
 		};
 	}

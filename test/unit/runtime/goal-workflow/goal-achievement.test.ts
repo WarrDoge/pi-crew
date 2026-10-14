@@ -7,6 +7,7 @@ import test from "node:test";
 import {
 	applyGoalAchievement,
 	assessGoalAchievement,
+	goalDeclaresReadOnly,
 	MUTATING_ROLES,
 	workflowIsMutating,
 } from "../../../../src/runtime/goal-workflow/goal-achievement.ts";
@@ -165,4 +166,74 @@ test("#2 non-git cwd → unknown (no git repo to inspect)", () => {
 	} finally {
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+test("#2 goal-declared-read-only: mutating workflow + clean tree + 'read-only task' goal → unknown, NOT false", () => {
+	const cwd = gitRepoTmp("ga-goalro-");
+	try {
+		// battery-style goal (run team_20261014010550): read README + explicit
+		// read-only declaration, but the workflow shape is mutating (executor step)
+		const m: TeamRunManifest = {
+			...manifest(cwd),
+			goal: "Read README.md and summarize the architecture. Do NOT modify, create, or delete any files — read-only task.",
+		};
+		const a = assessGoalAchievement(m, [task("exec", "executor", "completed")], mutatingWorkflow);
+		assert.equal(a.achieved, "unknown"); // clean tree is EXPECTED — never accused
+		assert.notEqual(a.achieved, false);
+		assert.match(a.reason, /declared read-only|no edits expected/);
+		assert.deepEqual(a.signals, []);
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("#2 goal-declared-read-only: 'Do NOT modify, create, or delete any files' marker → unknown", () => {
+	const cwd = gitRepoTmp("ga-goalro2-");
+	try {
+		const m: TeamRunManifest = {
+			...manifest(cwd),
+			goal: "Audit the config. Do NOT modify, create, or delete any files.",
+		};
+		const a = assessGoalAchievement(m, [task("exec", "executor", "completed")], mutatingWorkflow);
+		assert.equal(a.achieved, "unknown");
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("#2 goal-declared-read-only: Vietnamese marker 'không sửa file nào' → unknown", () => {
+	const cwd = gitRepoTmp("ga-goalro3-");
+	try {
+		const m: TeamRunManifest = {
+			...manifest(cwd),
+			goal: "Đọc README và báo cáo tóm tắt — không sửa file nào.",
+		};
+		const a = assessGoalAchievement(m, [task("exec", "executor", "completed")], mutatingWorkflow);
+		assert.equal(a.achieved, "unknown");
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("#2 mutating + clean tree + goal WITHOUT read-only marker → false (false-green pinned, regression)", () => {
+	const cwd = gitRepoTmp("ga-nomarker-");
+	try {
+		const m: TeamRunManifest = {
+			...manifest(cwd),
+			goal: "Refactor the parser and fix every lint error in src/.",
+		};
+		const a = assessGoalAchievement(m, [task("exec", "executor", "completed")], mutatingWorkflow);
+		assert.equal(a.achieved, false); // real mutating goal → false-green as before
+		assert.match(a.reason, /false-green|no project edits/);
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("goalDeclaresReadOnly: undefined → false; case-insensitive 'READ-ONLY' → true", () => {
+	assert.equal(goalDeclaresReadOnly(undefined), false);
+	assert.equal(goalDeclaresReadOnly(""), false);
+	assert.equal(goalDeclaresReadOnly("READ-ONLY"), true);
+	assert.equal(goalDeclaresReadOnly("Make it   Read   Only  please"), true); // whitespace-collapsed, case-insensitive
+	assert.equal(goalDeclaresReadOnly("rewrite the module and add tests"), false);
 });
