@@ -83,6 +83,10 @@ export interface RetryHooks {
 	 * logInternalError (the repo's console.error wrapper) and treated as false —
 	 * a broken detector must never change retry behavior. Unregistered ⇒
 	 * behaviour is bit-for-bit pre-U9-ADJ.
+	 * F4 (follow-up 2026-10-14 §P3): the hook must settle within
+	 * NO_PROGRESS_HOOK_TIMEOUT_MS (5s) — anything slower (or never-settling)
+	 * is treated as false and logged (retry-executor.noProgressTimeout), so a
+	 * hung detector can never hang the retry loop itself.
 	 */
 	noProgress?: (context: {
 		attempt: number;
@@ -128,6 +132,52 @@ function retryAttemptInfo(attempt: number, hooks: RetryHooks): RetryAttemptInfo 
 		attempt,
 		attemptId: hooks.attemptId?.(attempt) ?? `retry_attempt_${attempt}`,
 	};
+}
+
+/**
+ * F4 (follow-up SPEC 2026-10-14 §P3): wall-clock budget for ONE `noProgress`
+ * hook invocation. Deliberately NOT configurable (no env var / no param): the
+ * hook is dormant (no production caller yet) and a new env-allowlist entry
+ * would be pure surface. Exceeded budget ⇒ hook treated as false (progress
+ * assumed, retry stays queued) + logInternalError("retry-executor.noProgressTimeout").
+ */
+const NO_PROGRESS_HOOK_TIMEOUT_MS = 5000;
+
+/**
+ * F4: race the `noProgress` hook against NO_PROGRESS_HOOK_TIMEOUT_MS. The
+ * timer RESOLVES false (never rejects); hook throws/rejections propagate
+ * unchanged so the existing soft-fail catch in executeWithRetry stays
+ * bit-for-bit. The timer handle is cleared the moment the race settles —
+ * fast hooks leave no pending handle behind, and a never-settling hook is
+ * abandoned once its budget resolved (no dangling handle keeps the loop alive).
+ */
+async function settleNoProgressHook(
+	hook: NonNullable<RetryHooks["noProgress"]>,
+	context: { attempt: number; lastResult: unknown; previousResult: unknown; durationMsLast: number },
+): Promise<boolean> {
+	let timedOut = false;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			Promise.resolve(hook(context)),
+			new Promise<false>((resolve) => {
+				timer = setTimeout(() => {
+					timedOut = true;
+					resolve(false);
+				}, NO_PROGRESS_HOOK_TIMEOUT_MS);
+			}),
+		]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+		if (timedOut) {
+			logInternalError(
+				"retry-executor.noProgressTimeout",
+				{ attempt: context.attempt, timeoutMs: NO_PROGRESS_HOOK_TIMEOUT_MS },
+				"soft-fail: treating as progress, retry stays queued",
+				"error",
+			);
+		}
+	}
 }
 
 export async function executeWithRetry<T>(
@@ -185,10 +235,12 @@ export async function executeWithRetry<T>(
 			// attempt against the previous one and decides. true ⇒ stop the loop
 			// with the distinct no_progress reason (not ordinary give-up exhaustion).
 			// SOFT: hook errors are logged (logInternalError) and treated as false.
+			// F4: the hook races NO_PROGRESS_HOOK_TIMEOUT_MS — slow/never-settling
+			// hooks count as false (see settleNoProgressHook).
 			if (hooks.noProgress) {
 				let noProgressDecision = false;
 				try {
-					noProgressDecision = await hooks.noProgress({
+					noProgressDecision = await settleNoProgressHook(hooks.noProgress, {
 						attempt,
 						lastResult: lastError,
 						previousResult: previousFailedResult,

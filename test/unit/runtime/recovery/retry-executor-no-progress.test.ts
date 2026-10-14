@@ -12,6 +12,11 @@
  *   and the previous failed attempt (undefined on the first failure).
  * - SOFT: a throwing/rejecting hook is logged (console.error) and treated as
  *   false — a broken detector never changes retry behavior.
+ * - F4 (follow-up 2026-10-14 §P3): the hook races the fixed 5s budget
+ *   NO_PROGRESS_HOOK_TIMEOUT_MS. A never-settling hook resolves false via the
+ *   timer (never rejects), is logged as retry-executor.noProgressTimeout, and
+ *   the loop keeps retrying — a hung detector can never hang the retry loop.
+ *   Fast true/throw paths behave bit-for-bit like before.
  * - Unregistered hook ⇒ pre-U9-ADJ behaviour bit-for-bit (attempts + give-up
  *   reason identical).
  *
@@ -152,6 +157,55 @@ test("noProgress hook throwing is soft — logged via console.error, treated as 
 		consoleErrors.every((line) => line.includes("retry-executor.noProgress") && line.includes("detector exploded")),
 		`soft-fail logs carry scope + hook error: ${JSON.stringify(consoleErrors)}`,
 	);
+});
+
+test("F4: never-resolving noProgress hook hits the 5s budget — resolved false via timer, timeout logged, loop runs to exhaustion", async () => {
+	// NOTE: exercises the REAL NO_PROGRESS_HOOK_TIMEOUT_MS (5000ms) wall clock.
+	// The constant is deliberately NOT injectable (no env / no param — the hook
+	// is dormant, no reason to grow the allowlist surface), so this test costs
+	// a real ~5s wait. Only ONE gate call hangs (maxAttempts=2 ⇒ gate consulted
+	// once, after attempt 1) to keep the whole file comfortably under 20s.
+	const startedAtMs = Date.now();
+	let attempts = 0;
+	const consoleErrors: string[] = [];
+	const originalConsoleError = console.error;
+	console.error = (...args: unknown[]) => {
+		consoleErrors.push(args.map((arg) => (arg instanceof Error ? arg.message : String(arg))).join(" "));
+	};
+	try {
+		await assert.rejects(
+			() =>
+				executeWithRetry(
+				async () => {
+					attempts += 1;
+					throw new Error(`boom-${attempts}`);
+				},
+				{ ...fastPolicy, maxAttempts: 2 },
+				{
+					// Hangs forever: the 5s timer must resolve false so the loop
+					// still spawns attempt 2 and exhausts the ordinary way.
+					noProgress: () => new Promise<boolean>(() => undefined),
+				},
+			),
+			(error: unknown) => error instanceof Error && error.message === "boom-2" && !(error instanceof RetryNoProgressError),
+		);
+	} finally {
+		console.error = originalConsoleError;
+	}
+	const elapsedMs = Date.now() - startedAtMs;
+	assert.equal(attempts, 2, "timed-out gate counts as false ⇒ attempt 2 must spawn and exhaustion throws the original error");
+	assert.equal(consoleErrors.length, 1, "exactly one noProgressTimeout log for the single consulted gate call");
+	assert.ok(
+			consoleErrors[0]?.includes("retry-executor.noProgressTimeout"),
+			`timeout log carries the dedicated scope: ${JSON.stringify(consoleErrors)}`,
+		);
+	assert.ok(
+			consoleErrors[0]?.includes('"attempt":1') && consoleErrors[0]?.includes('"timeoutMs":5000'),
+			`timeout log carries { attempt, timeoutMs } context: ${JSON.stringify(consoleErrors)}`,
+		);
+	// The wait really was the budget (loose bounds — CI jitter, not flake-guard):
+	// >= ~4.5s proves the timer (not an instant settle) produced the decision.
+	assert.ok(elapsedMs >= 4500 && elapsedMs < 15000, `expected a real ~5s budget wait, got ${elapsedMs}ms`);
 });
 
 test("unregistered noProgress hook — pre-U9-ADJ behaviour bit-for-bit", async () => {
