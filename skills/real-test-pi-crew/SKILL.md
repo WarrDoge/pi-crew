@@ -1256,6 +1256,27 @@ When a tier fails, the recovery is usually quick. Match the symptom to the cause
 | `team action='schedule' interval=<ms>` always says `Invalid schedule "<N>ms". Use "5m", …` | handle-schedule builds `${interval}ms`; both interval parsers lacked an `ms` unit — every numeric interval died. Fixed 2026-09-21 | The suggested "5m" formats only work via `cron`/`once` params, not `interval` (interval is schema-typed as a plain ms number) |
 | Runs keep appearing under one scheduled job; children of YOUR pi process; machine thrashing | **Interval ≥ 2^31-1 ms (≥24.8 days) overflowed the Node timer to a 1ms hot loop** (fixed 2026-09-22 — clamped hops). Check `.crew/audit/prune.jsonl` for interleaved auto-prunes. Contain: remove job, then `pkill -f '[b]ackground-runner.ts --cwd <root>'` | Any new timer scheduling must clamp below MAX_TIMER_DELAY_MS — grep for `setInterval(`/`setTimeout(` with computed delays |
 
+## Release gate — battery → push → GitHub Actions GREEN → publish (canonical, 2026-10-14)
+
+Local `npm run ci` là LINUX-ONLY — không thay được matrix 3-OS của GitHub Actions.
+Live-proven 2026-10-14: **0.11.19 và 0.11.20 đều publish khi CI GitHub ĐỎ** (local ci + pre-push
+hook xanh hết) — windows fail do child-env thiếu `SYSTEMROOT` (node con không khởi tạo Winsock được,
+stdout rỗng); macOS fail do transient ECONNREFUSED khiến accepting-probe 1 lần coi holder SỐNG là
+corpse → xóa file socket + rebind (STEAL lock) — fix bằng 3-strike takeover (`process-lock.ts`).
+
+**Quy trình BẮT BUỘC cho mọi release (theo thứ tự, không bỏ bước):**
+
+1. Cập nhật skill (wave entry) + CHANGELOG heading cho version sắp release — commit.
+2. Chạy battery theo decision table (đủ tier cho paths đổi) — xanh hết.
+3. `npm version patch` (tạo release commit + tag).
+4. `git push origin main --follow-tags` — pre-push hook tự chạy full unit local.
+5. **`gh run watch <runId> --exit-status` (hoặc poll `gh run list`) — CHỜ matrix 3-OS XANH TOÀN BỘ.**
+   CI đỏ ⇒ KHÔNG publish — fix, push lại, chờ lại. (Check nhanh fail: `gh run view <id>` +
+   `gh api repos/<o>/<r>/actions/jobs/<jobId>//logs` — KHÔNG grep "not ok" mù: tên test có thể
+   chứa literal "not ok" ("malformed JSON is not ok with a message") — grep kèm assertion block.)
+6. CHỈ KHI xanh: `npm publish` → poll `npm view <pkg> dist-tags.latest` → `gh release create`.
+7. Post-release: knowledge.md entry SHIPPED + dọn branch/scratch.
+
 ## Performance budget (per-tier soft limits)
 
 | Tier | Soft limit | Hard limit | What happens over hard limit |

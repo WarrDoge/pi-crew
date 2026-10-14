@@ -163,6 +163,18 @@ if (phase === "contend") {
 
 /** Minimal, PI_CREW-free child env (tests run inside a pi-crew worker with ambient vars). */
 function childEnv(): NodeJS.ProcessEnv {
+	// OS-plumbing pass-through (win32): a stripped env without SYSTEMROOT
+	// cannot initialize Winsock — the child dies before printing anything
+	// (live-caught: CI unit 3/4 windows-latest, runs 38474544070/38512417972 —
+	// U21-5/U21-6 failed with empty stdout). These keys are OS plumbing, never
+	// lock-state carriers — the U21-6 env probe filters /^PI_(CREW|TEAMS)_.*LOCK/.
+	if (process.platform === "win32") {
+		const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
+		for (const key of ["SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "USERNAME"]) {
+			if (process.env[key] !== undefined) env[key] = process.env[key];
+		}
+		return env;
+	}
 	return { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
 }
 

@@ -105,8 +105,20 @@ function socketAddress(name: string): SocketAddress {
 	return { address: fileSocketAddress(key), file: true };
 }
 
-/** True when a live server accepts connections on `address` (leftover-corpse probe). */
-function accepting(address: string): Promise<boolean> {
+/**
+ * Probe whether a live server accepts connections on `address` (leftover-corpse
+ * check). A single refusal is NOT trusted on file-socket platforms: macOS can
+ * return ECONNREFUSED transiently against a LIVE listener (e.g. a momentarily
+ * full listen backlog under load — live-caught in CI 2026-10-14: a foreign
+ * child flipped a held lock to "corpse", DELETED the live socket file and
+ * rebound, stealing the lock). We require TAKEOVER_REFUSALS consecutive
+ * refusals, spaced TAKEOVER_RETRY_MS apart, before declaring a corpse.
+ */
+const TAKEOVER_REFUSALS = 3;
+const TAKEOVER_RETRY_MS = 150;
+
+/** One connect-probe: true = somebody accepts; false = refused (corpse-ish). */
+function acceptingOnce(address: string): Promise<boolean> {
 	return new Promise((resolve) => {
 		const socket = net.connect(address);
 		socket.unref();
@@ -119,6 +131,14 @@ function accepting(address: string): Promise<boolean> {
 			resolve(error.code !== "ECONNREFUSED" && error.code !== "ENOENT");
 		});
 	});
+}
+
+async function accepting(address: string): Promise<boolean> {
+	for (let attempt = 0; attempt < TAKEOVER_REFUSALS; attempt++) {
+		if (attempt > 0) await new Promise((r) => setTimeout(r, TAKEOVER_RETRY_MS));
+		if (await acceptingOnce(address)) return true;
+	}
+	return false;
 }
 
 /**

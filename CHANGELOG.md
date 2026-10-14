@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [0.11.21] — CI matrix fixes: windows child env, macOS takeover probe (2026-10-14)
+
+0.11.19/0.11.20 shipped with red GitHub Actions CI (local `npm run ci` is linux-only and had passed; publish-before-CI-green is now a closed process gap — the real-test skill's Release gate section makes GH-Actions-green mandatory before publish).
+
+### Fixed
+
+- **fix(state): macOS transient-refusal takeover — 3-strike corpse probe** (`process-lock.ts`). On file-socket platforms a single ECONNREFUSED flipped a LIVE holder into "corpse": the contender DELETED the live socket file and rebound, stealing the lock (CI-caught: a foreign child reported SOCKET_FREE while the parent held). macOS can return ECONNREFUSED transiently against a live listener (momentarily full backlog). Takeover now requires 3 consecutive refusals 150ms apart; Linux (abstract sockets) and Windows (named pipes) take no probe path — unchanged.
+- **fix(test): windows child env — OS plumbing keys** (`run-lock-socket.test.ts` `childEnv`). A stripped `{PATH,HOME}` env cannot initialize Winsock on Windows — the spawned child died before printing (U21-5/U21-6 failed with empty stdout on windows-latest). Pass through SYSTEMROOT/SYSTEMDRIVE/WINDIR/COMSPEC/PATHEXT/TEMP/TMP/USERPROFILE/USERNAME (OS plumbing, never lock-carriers — the U21-6 env probe filters `^PI_(CREW|TEAMS)_.*LOCK` and stays meaningful).
+
+### Docs
+
+- **docs(skill): Release gate section (canonical process)** — battery → version → push (pre-push local unit) → **GitHub Actions 3-OS GREEN** → only then npm publish + GitHub release. Publish-before-green is what shipped two red-CI releases.
+
 ## [0.11.20] — follow-up packets: duplicate-notification idle-gate, 5-field usage ledger, uid-namespaced locks, read-only goal verdict (2026-10-14)
 
 Follow-up wave on `v0.11.19` closing the deferred GATES items + one live-caught UX bug. SDD record: `../sdd-pi-durable-followup-2026-10-14/`. 12 commits on `f10da4cc`, merged fast-forward.
