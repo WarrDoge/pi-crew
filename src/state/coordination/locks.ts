@@ -578,9 +578,23 @@ function runLockSocketSupplementEnabled(): boolean {
  * U21: the kernel-socket lock name for a run-lock file path. Derived from the
  * ABSOLUTE run dir path so every process agrees on the name for the same run
  * regardless of cwd/relative-path spelling.
+ *
+ * F2 (2026-10-14): the name is prefixed with the process uid. The socket
+ * namespace is SYSTEM-WIDE (abstract sockets / named pipes are not
+ * per-user), so two different users working on the same run path would
+ * otherwise collide — user A's live holder would lock user B out of B's own
+ * run. The uid prefix removes that cross-user same-path collision. `"noid"`
+ * covers runtimes without `process.getuid` (e.g. Windows).
+ *
+ * Deploy-window: a live holder started on the OLD (uid-less) name is NOT
+ * visible to new code during the transition — SAFE, because the file lock
+ * stays the PRIMARY guard and the socket is only the U21 dual-guard
+ * supplement; once every process runs the new code, all holders use the
+ * unified uid-prefixed name.
  */
 export function runLockSocketName(filePath: string): string {
-	return `run:${path.resolve(filePath)}`;
+	const uid = typeof process.getuid === "function" ? process.getuid() : "noid";
+	return `${uid}:run:${path.resolve(filePath)}`;
 }
 
 /**

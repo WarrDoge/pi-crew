@@ -385,3 +385,28 @@ test("U21-6: no env inheritance — child sees no lock env keys and acquires a D
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("U21-F2: runLockSocketName namespaces by uid — 'uid:run:' prefix + resolved path; distinct paths → distinct names", () => {
+	// The prefix must match THIS process's uid so two users on the same run
+	// path derive different socket names (system-wide abstract namespace).
+	const expectedUid = typeof process.getuid === "function" ? String(process.getuid()) : "noid";
+	const alpha = runLockSocketName("/tmp/u21-f2-alpha/run.lock");
+	const beta = runLockSocketName("/tmp/u21-f2-beta/run.lock");
+	assert.ok(alpha.startsWith(`${expectedUid}:run:`), `socket name must be prefixed with the uid, got: ${alpha}`);
+	assert.ok(beta.startsWith(`${expectedUid}:run:`), `socket name must be prefixed with the uid, got: ${beta}`);
+	assert.notEqual(alpha, beta, "two different run paths must yield two different socket names");
+	// The resolved absolute path stays the distinguishing payload after the uid prefix.
+	assert.ok(alpha.includes(path.resolve("/tmp/u21-f2-alpha/run.lock")));
+	assert.ok(!alpha.includes(path.resolve("/tmp/u21-f2-beta/run.lock")));
+});
+
+test("U21-F2: runtime without process.getuid falls back to the \"noid\" prefix", () => {
+	const original = Object.getOwnPropertyDescriptor(process, "getuid");
+	try {
+		Object.defineProperty(process, "getuid", { value: undefined, configurable: true });
+		const name = runLockSocketName("/tmp/u21-f2-noid/run.lock");
+		assert.ok(name.startsWith("noid:run:"), `expected the noid fallback prefix, got: ${name}`);
+	} finally {
+		if (original) Object.defineProperty(process, "getuid", original);
+	}
+});

@@ -15,6 +15,11 @@
  * forked children via env): pi-crew's child env allowlist strips PI_CREW_*
  * ambient keys (§12.2.1), and nothing about the lock needs to be inherited.
  *
+ * NAME CONVENTION: the socket/pipe namespace is system-wide, NOT per-user —
+ * callers namespace their names by uid when the protected path can be shared
+ * across users (see locks.ts `runLockSocketName`, F2 2026-10-14) so two users
+ * on the same path do not collide.
+ *
  * VENDORED (adapted, not copied verbatim) from `@earendil-works/chord` (MIT),
  * packages/chord/src/manager.ts:82-170 @ a4d040d30 — see NOTICE.md.
  * Adaptations beyond renaming the namespace:
