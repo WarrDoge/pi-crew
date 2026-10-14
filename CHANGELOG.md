@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [0.11.20] — follow-up packets: duplicate-notification idle-gate, 5-field usage ledger, uid-namespaced locks, read-only goal verdict (2026-10-14)
+
+Follow-up wave on `v0.11.19` closing the deferred GATES items + one live-caught UX bug. SDD record: `../sdd-pi-durable-followup-2026-10-14/`. 12 commits on `f10da4cc`, merged fast-forward.
+
+### Fixed
+
+- **fix(extension): idle-gate subagent wake-ups — closes the duplicate-notification race (live-caught 6×)**. A followUp wake-up queued via `sendUserMessage` CANNOT be retracted (the SDK's `clearQueue()` is all-or-nothing — using it would also destroy the user's pending steering), so a leader that proactively joins a background result mid-turn (`get_subagent_result` `wait=true`) still received a stale per-agent "changed state" drip at the next turn boundary — one wasted turn per duplicate. The emit is now deferred while the leader's own turn is active (`ctx.currentCtx.isIdle()`, capability-guarded) and the `resultConsumed` re-check re-runs at the moment the message would actually queue; retry cadence 500ms, hard cap 10min (late beats never). The batch path's `NOTIFY_DEFER_MS` timer is subsumed. Hosts without `isIdle` stay bit-for-bit — pinned by the Rule 1–3 integration suite running on the capability fallback.
+- **fix(goal): read-only-declared goals are never accused false-green**. `assessGoalAchievement` only looked at workflow SHAPE — a read-only goal through a workflow with executor steps (the battery convention) got labeled FALSE-GREEN for the clean tree it was SUPPOSED to leave (run `team_20261014010550`). New step (1b): `goalDeclaresReadOnly` (literal marker phrases EN+VI, case-insensitive, whitespace-collapsed — deliberately conservative, no semantic guessing) short-circuits to `{achieved:"unknown", reason:"goal declared read-only (no edits expected)"}`. Live-verified on run `team_20261014022151`.
+
+### Added
+
+- **feat(coordination): F2 — uid-namespaced run-lock socket name** (`${uid}:run:${abs}`, `"noid"` fallback). The abstract-socket namespace is SYSTEM-WIDE — two users sharing a run path would otherwise collide. Docblocks record the deploy window: an old (uid-less) holder is invisible to new code during transition — safe, the file lock stays the primary guard.
+- **feat(recovery): F4 — `noProgress` hook wall-clock budget (5s)**. `settleNoProgressHook` races the hook against `NO_PROGRESS_HOOK_TIMEOUT_MS = 5000` (module constant, deliberately NOT configurable — the hook is dormant and a new env-allowlist entry would be pure surface). Timer resolves false (never rejects); the throw-path stays bit-for-bit; `Promise.race` subscribes the loser so a late hook rejection cannot become unhandled. A hung detector can never hang the retry loop.
+
+### Changed
+
+- **feat(runtime): 5-field usage ledger everywhere + `usage-bridge` extraction**. `LifetimeUsage` (runtime tracker) gains `cacheRead` + numeric `cost`; `usageStateFromLifetime` stops hardcoding `cacheRead: 0`; the message_end call-site parses cost OBJECTS via the shared parser (`cost.total` → number). The pure usage shape/parser helpers move to `live-session/usage-bridge.ts` (live-session-runtime 1963 → 1926 lines, wc-gate headroom restored; lazy-import ratchet 525 → 526). **m6**: `state/usage.ts` drops its dead 3-field `LifetimeUsage` family (zero src callers) and `RoleUsage` gains `cacheRead` — the header docblock now states the ledger-vs-display split explicitly (token-sum displays and the budget proxy keep excluding cacheRead per issue #38). `formatCostReport` display unchanged. Live-verified: run tasks.json carries `cacheRead` + numeric `cost` end-to-end.
+- **chore(release): dist committed per release** (continues the 0.11.19 policy — `check-bundle-staleness --committed-hash` requires shipped == fresh rebuild bit-for-bit).
+
 ## [0.11.19] — pi-durable wave: events.jsonl durability, run-lock socket dual-guard, usage ledger, verify-gate determinism (2026-10-13)
 
 Spec-driven delivery of the pi-durable research wave (packets U22/U16/U21/U13-ADJ/U9-ADJ + D4) against upstream pi-durable `a4d040d30`. Full SDD record: `../sdd-pi-durable-2026-10-13/` (SPEC + 6 đính chính, WORKITEMS W0–W31, GATES ~21 evidence rows); live battery: `docs/real-test/reports/real-test-2026-10-13-battery-live-session.md`. 15 implementation commits `85917a44`..`1acd01e7` on `d29df7dd`, merged fast-forward 2026-10-13.
