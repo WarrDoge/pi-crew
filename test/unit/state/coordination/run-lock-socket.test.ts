@@ -24,14 +24,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 import { assertOnlyControlEnvKeys } from "../../../../src/runtime/child-pi/child-pi-spawn.ts";
 import { runLockSocketName, withRunLock } from "../../../../src/state/coordination/locks.ts";
 import { acquireProcessLock, isProcessLockHeldError } from "../../../../src/state/coordination/process-lock.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
 
-const LOCKS_TS = fileURLToPath(new URL("../../../../src/state/coordination/locks.ts", import.meta.url));
-const PROCESS_LOCK_TS = fileURLToPath(new URL("../../../../src/state/coordination/process-lock.ts", import.meta.url));
+// Import specifiers for the child fixture — FILE URLs, not native paths: a
+// Windows path (D:\a\…) is an INVALID ESM specifier (backslashes), the child
+// dies before printing anything. file:// URLs are valid cross-platform.
+const LOCKS_TS = new URL("../../../../src/state/coordination/locks.ts", import.meta.url).href;
+const PROCESS_LOCK_TS = new URL("../../../../src/state/coordination/process-lock.ts", import.meta.url).href;
 
 function mkTmp(prefix: string): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -163,19 +165,24 @@ if (phase === "contend") {
 
 /** Minimal, PI_CREW-free child env (tests run inside a pi-crew worker with ambient vars). */
 function childEnv(): NodeJS.ProcessEnv {
+	// TMPDIR pass-through (ALL platforms): process-lock's file-socket branch
+	// derives its address from os.tmpdir() — a child without TMPDIR computes a
+	// DIFFERENT socket path than the parent (falls back to /tmp while the
+	// parent used $TMPDIR) and "acquires" a lock nobody contends — live-caught
+	// on macos-latest CI (U21-5 step b: SOCKET_FREE while the parent held).
 	// OS-plumbing pass-through (win32): a stripped env without SYSTEMROOT
 	// cannot initialize Winsock — the child dies before printing anything
-	// (live-caught: CI unit 3/4 windows-latest, runs 38474544070/38512417972 —
-	// U21-5/U21-6 failed with empty stdout). These keys are OS plumbing, never
-	// lock-state carriers — the U21-6 env probe filters /^PI_(CREW|TEAMS)_.*LOCK/.
+	// (windows-latest CI: U21-5/U21-6 failed with empty stdout). These keys are
+	// OS plumbing, never lock-state carriers — the U21-6 env probe filters
+	// /^PI_(CREW|TEAMS)_.*LOCK/ and stays meaningful.
+	const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
+	if (process.env.TMPDIR !== undefined) env.TMPDIR = process.env.TMPDIR;
 	if (process.platform === "win32") {
-		const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
 		for (const key of ["SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "USERNAME"]) {
 			if (process.env[key] !== undefined) env[key] = process.env[key];
 		}
-		return env;
 	}
-	return { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
+	return env;
 }
 
 function runChild(fixture: string, args: readonly string[]): { status: number | null; stdout: string; stderr: string } {
