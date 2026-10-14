@@ -117,7 +117,11 @@ const BUDGETS = {
 		// kernel socket run-lock supplement) are core sync read/lock paths —
 		// not deferrable — and ship in the single-file bundle. Baseline verified
 		// at main d29df7dd = 523/523.
-		maxFiles: 525,
+		// FOLLOW-UP (2026-10-14): 525 → 526 — runtime/live-session/usage-bridge.ts
+		// (m5 extraction from live-session-runtime.ts; pure usage shape/parser
+		// helpers on the hot session path — not deferrable). Baseline verified at
+		// main f10da4cc = 525/525.
+		maxFiles: 526,
 		forbid: ["test/", "scripts/", "docs/", "dist/"],
 	},
 };

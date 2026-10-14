@@ -18,6 +18,9 @@ test("getTaskUsage returns zeros when no usage tracked", () => {
 	assert.equal(usage.input, 0);
 	assert.equal(usage.output, 0);
 	assert.equal(usage.cacheWrite, 0);
+	// P1: the two new ledger fields default to 0 as well.
+	assert.equal(usage.cacheRead, 0);
+	assert.equal(usage.cost, 0);
 });
 
 test("getRunUsage aliases getTaskUsage", () => {
@@ -31,15 +34,20 @@ test("clearAllTaskUsage resets all tracked data", () => {
 	trackTaskUsage("task-a", { input: 1 });
 	trackTaskUsage("task-b", { output: 2 });
 	clearAllTaskUsage();
+	// P1: LifetimeUsage now carries 5 fields — empty snapshots include cacheRead/cost = 0.
 	assert.deepEqual(getTaskUsage("task-a"), {
 		input: 0,
 		output: 0,
 		cacheWrite: 0,
+		cacheRead: 0,
+		cost: 0,
 	});
 	assert.deepEqual(getTaskUsage("task-b"), {
 		input: 0,
 		output: 0,
 		cacheWrite: 0,
+		cacheRead: 0,
+		cost: 0,
 	});
 });
 

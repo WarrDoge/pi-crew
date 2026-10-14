@@ -43,8 +43,6 @@ import {
 // in a single place: the shared user prompt. See G3 fix.
 import { createStreamingOutput, type StreamingOutputHandle } from "../output/streaming-output.ts";
 import { buildSensitivePathConstraint } from "../sensitive-paths.ts";
-import { usageFromValue } from "../session-usage.ts";
-import { trackTaskUsage } from "../usage-tracker.ts";
 import {
 	buildYieldReminder,
 	DEFAULT_YIELD_CONFIG,
@@ -89,6 +87,7 @@ import {
 import { hasLiveControlRealtimeListeners, subscribeLiveControlRealtime } from "./live-control-realtime.ts";
 import { buildExtensionBridge } from "./live-extension-bridge.ts";
 import { collectLiveSessionHealth, formatLiveSessionDiagnostics } from "./live-session-health.ts";
+import { type SessionStatsLike, trackUsageFromMessageEndEvent, usageFromSessionStats } from "./usage-bridge.ts";
 
 /**
  * Module-scoped latch for the optional peer dependency import. When N
@@ -235,13 +234,8 @@ type LiveSessionLike = {
 	steer?: (text: string) => Promise<void>;
 	abort?: () => Promise<void> | void;
 	dispose?: () => void;
-	/** U16: SDK AgentSession session-level stats surface (aggregate tokens + cost);
-	 *  shaped like live-agent-manager's LiveSessionHandle so the session can be
-	 *  registered there without a cast (extra SDK fields like cost pass structurally). */
-	getSessionStats?: () => {
-		tokens?: { input?: number; output?: number; cacheWrite?: number; cacheRead?: number };
-		contextUsage?: { percent?: number | null; window?: number };
-	};
+	/** U16: SDK AgentSession session-level stats surface (aggregate tokens + cost) — shape: usage-bridge.ts (SessionStatsLike). */
+	getSessionStats?: () => SessionStatsLike;
 	bindExtensions?: (bindings?: Record<string, unknown>) => Promise<void>;
 	getActiveToolNames?: () => string[];
 	setActiveToolsByName?: (names: string[]) => void;
@@ -467,24 +461,6 @@ function applyModelProviderOverride(session: LiveSessionLike | undefined, provid
 	} catch (error) {
 		logInternalError("live-session.model-provider-override", error, "registerNativeProvider failed");
 	}
-}
-
-/**
- * Type-safe extractor for message role from streaming events.
- * Handles the case where message may be a Record with a role field.
- */
-function extractMessageRole(obj: Record<string, unknown> | undefined): string | undefined {
-	const message = obj?.message ? asRecord(obj.message) : undefined;
-	return isString(message?.role) ? message.role : undefined;
-}
-
-/**
- * Type-safe extractor for message usage from streaming events.
- * Handles the case where message may be a Record with usage data.
- */
-function extractMessageUsage(obj: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
-	const message = obj?.message ? asRecord(obj.message) : undefined;
-	return message?.usage && typeof message.usage === "object" ? (message.usage as Record<string, unknown>) : undefined;
 }
 
 /**
@@ -791,13 +767,9 @@ function filterActiveTools(session: LiveSessionLike, agent: AgentConfig, role?: 
 	session.setActiveToolsByName(active);
 }
 
-/** U16 (Fix B): thin adapter — session-stats parsing is delegated to the single
- *  shared parser (`usageFromValue`), which accepts BOTH the nested SDK
- *  `SessionStats` shape (`tokens.{input,output,cacheRead,cacheWrite}` + `cost`)
- *  and flat legacy shapes. Exported for unit tests. */
-export function usageFromStats(stats: unknown): UsageState | undefined {
-	return usageFromValue(stats);
-}
+// U16 (Fix B): the usageFromStats thin adapter moved to usage-bridge.ts (m5);
+// re-exported here so the historical import surface keeps working.
+export { usageFromStats } from "./usage-bridge.ts";
 
 /**
  * U4 hung-tool escape hatch marker error. Thrown when a timed-out prompt did
@@ -1531,17 +1503,9 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 							}
 						}
 					}
-					// Accumulate lifetime usage that survives compaction
-					if (obj?.type === "message_end" && extractMessageRole(obj) === "assistant") {
-						const u = extractMessageUsage(obj);
-						if (u) {
-							trackTaskUsage(input.task.id, {
-								input: typeof u.input === "number" ? u.input : 0,
-								output: typeof u.output === "number" ? u.output : 0,
-								cacheWrite: typeof u.cacheWrite === "number" ? u.cacheWrite : 0,
-							});
-						}
-					}
+					// P1: accumulate lifetime usage that survives compaction — message-level
+					// deltas incl. cacheRead + numeric cost (parsed in usage-bridge).
+					trackUsageFromMessageEndEvent(input.task.id, event);
 					input.onEvent?.(event);
 					const text = [...eventText(event), ...finalAssistantText(event)].join("\n");
 					if (text.trim()) {
@@ -1789,9 +1753,8 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 						emit: emitEmbedded,
 					})
 				: undefined;
-		// U16 (Fix A): the SDK surface is getSessionStats() — the old getStats()
-		// name and session.stats fallback were both dead against the real SDK.
-		const usage = usageFromStats(session.getSessionStats?.());
+		// U16 (Fix A): the real SDK surface is getSessionStats() — see usage-bridge.
+		const usage = usageFromSessionStats(session);
 		updateLiveAgentStatus(agentId, "completed");
 		markLiveAgentCompleted(agentId);
 		return {
