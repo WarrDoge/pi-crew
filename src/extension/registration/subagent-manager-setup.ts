@@ -2,7 +2,7 @@
  * Subagent manager installer for pi-crew.
  *
  * Wires the SubagentManager singleton with:
- *   • a terminal-status callback (Rules 1 + 2 + 3):
+ *   • a terminal-status callback (Rules 1 + 2 + 3 + idle-gate):
  *     - Rule 1 (batch coalescing): explicit batchId → ONE consolidated notify
  *       when all members terminal.
  *     - Rule 2 (consume-race fix): resultConsumed re-check so a leader that
@@ -12,6 +12,12 @@
  *       produce 1 notice — not N drips delivered one-per-turn at turn
  *       boundaries (the symptom: leader joins all, then redundant per-agent
  *       "changed state" notices keep dripping in over later turns).
+ *     - Idle-gate (2026-10-14, dup-close): a queued followUp wake-up cannot be
+ *       retracted (clearQueue is all-or-nothing), so while the leader's turn
+ *       is active the emit is DEFERRED and the resultConsumed re-check re-runs
+ *       once the session is idle — the moment the message would actually
+ *       deliver. A leader that proactively joins the result mid-turn
+ *       (get_subagent_result wait=true) never sees the stale drip.
  *   • an internal event forwarder (subagent.stuck-blocked → notification),
  *   • a hard cap on concurrent subagents (4).
  *
@@ -28,13 +34,6 @@ const MAX_CONCURRENT_SUBAGENTS = 4;
 const SUBAGENT_DEFAULT_TIMEOUT_MS = 1000;
 
 /**
- * Defer window for the BATCH path (explicit batchId). Gives the leader a chance
- * to consume batch members before the consolidated notify emits; the
- * resultConsumed re-check then suppresses.
- */
-const NOTIFY_DEFER_MS = 1500;
-
-/**
  * Coalesce window for NON-batch background completions (Rule 3). Completions
  * within this window (debounced — the timer resets on each new arrival) merge
  * into ONE wake-up, so N near-simultaneous completions produce 1 notice instead
@@ -45,6 +44,63 @@ const NOTIFY_DEFER_MS = 1500;
  * windows.)
  */
 const NOTIFY_COALESCE_MS = 800;
+
+/**
+ * Idle-gate retry cadence (dup-close, 2026-10-14). A queued followUp wake-up
+ * CANNOT be retracted once `sendUserMessage` has queued it (the SDK's
+ * `clearQueue()` is all-or-nothing — it would also destroy the user's own
+ * pending steering). So while the leader's turn is ACTIVE we keep DEFERRING
+ * the emit and re-running the resultConsumed check; the wake-up only queues
+ * once the session is idle — the moment it will actually be delivered — which
+ * closes the duplicate class where the leader proactively joins the result
+ * mid-turn and then gets a stale "changed state" drip at the turn boundary
+ * (live-caught 6× 2026-10-13/14: P3/X1/E5 + 3 research shards).
+ */
+const IDLE_RETRY_MS = 500;
+
+/**
+ * Hard cap for the idle-gate deferral. Leader turns can be long; after the
+ * cap the wake-up is emitted anyway (late beats never) — the resultConsumed
+ * re-check still runs first, so a consumed agent never re-notifies even past
+ * the cap.
+ */
+const IDLE_EMIT_CAP_MS = 10 * 60_000;
+
+/**
+ * True when the leader's own turn is ACTIVE (session streaming). Capability-
+ * guarded: an older host without `ctx.isIdle` (or a bare/absent currentCtx)
+ * reports "not active" so the emit path stays bit-for-bit with the pre-gate
+ * behavior.
+ * @internal — exported for unit tests.
+ */
+export function leaderTurnActive(ctx: RegistrationContext): boolean {
+	const c = ctx.currentCtx;
+	if (!c || typeof c.isIdle !== "function") return false;
+	try {
+		return c.isIdle() === false;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Run `fn` once the leader turn is idle (or immediately when it already is /
+ * the host lacks the capability / the cap expires). `fn` must be safe to call
+ * late: it re-runs its own consume/owner re-checks first.
+ * @internal — exported for unit tests.
+ */
+export function runWhenLeaderIdle(ctx: RegistrationContext, fn: () => void): void {
+	const deadline = Date.now() + IDLE_EMIT_CAP_MS;
+	const attempt = (): void => {
+		if (ctx.cleanedUp) return;
+		if (!leaderTurnActive(ctx) || Date.now() >= deadline) {
+			fn();
+			return;
+		}
+		setTimeout(attempt, IDLE_RETRY_MS);
+	};
+	attempt();
+}
 
 /** A pending non-batch completion awaiting coalesced emit. */
 interface PendingCompletion {
@@ -64,6 +120,7 @@ interface CompletionCoalescer {
 function createCompletionCoalescer(pi: ExtensionAPI, ctx: RegistrationContext): CompletionCoalescer {
 	let pending: PendingCompletion[] = [];
 	let timer: ReturnType<typeof setTimeout> | null = null;
+	let cycleDeadline = 0;
 
 	/** True if the completion is still deliverable (not consumed, current session). */
 	const isLive = (c: PendingCompletion): boolean => {
@@ -80,17 +137,29 @@ function createCompletionCoalescer(pi: ExtensionAPI, ctx: RegistrationContext): 
 			pending = [];
 			return;
 		}
+		// Idle-gate (dup-close): defer the emit while the leader's own turn is
+		// active — a queued followUp cannot be retracted, so we only queue it at
+		// the moment it will actually be delivered. The consume re-check below
+		// then runs at THAT moment: a leader that joined the result mid-turn
+		// suppresses the notify entirely instead of receiving a stale drip.
+		// Past the cap we emit anyway (late beats never).
+		if (leaderTurnActive(ctx) && Date.now() < cycleDeadline) {
+			timer = setTimeout(flush, IDLE_RETRY_MS);
+			return;
+		}
 		const batch = pending.splice(0);
-		if (batch.length === 0) return;
-		// Rule 2: drop agents the leader already consumed during the window.
-		const live = batch.filter(isLive);
-		if (live.length === 0) return;
-		if (live.length === 1) emitIndividualCompletion(pi, ctx, live[0]!);
-		else emitConsolidatedCompletions(pi, ctx, live);
+		if (batch.length > 0) {
+			// Rule 2: drop agents the leader already consumed during the window.
+			const live = batch.filter(isLive);
+			if (live.length === 1) emitIndividualCompletion(pi, ctx, live[0]!);
+			else if (live.length > 1) emitConsolidatedCompletions(pi, ctx, live);
+		}
+		if (pending.length === 0) cycleDeadline = 0;
 	};
 
 	return {
 		enqueue(completion) {
+			if (pending.length === 0) cycleDeadline = Date.now() + IDLE_EMIT_CAP_MS;
 			pending.push(completion);
 			if (timer) clearTimeout(timer);
 			timer = setTimeout(flush, NOTIFY_COALESCE_MS);
@@ -250,9 +319,10 @@ function onTerminalStatus(
 	const agentRunId = record.runId;
 	const agentBatchId = record.batchId;
 
-	// Rule 1 (batch): defer + BatchBarrier consolidated emit.
+	// Rule 1 (batch): defer + BatchBarrier consolidated emit, idle-gated so the
+	// consume re-check runs at the moment the wake-up actually queues.
 	if (agentBatchId) {
-		setTimeout(() => {
+		runWhenLeaderIdle(ctx, () => {
 			if (ctx.cleanedUp) return;
 			const fresh = ctx.subagentManager.getRecord(agentId);
 			const persisted = ctx.currentCtx ? readPersistedSubagentRecord(ctx.currentCtx.cwd, agentId) : undefined;
@@ -290,7 +360,7 @@ function onTerminalStatus(
 			}
 			// Either we just emitted the consolidated notify, or we are still
 			// waiting for other members — in both cases do NOT emit individually.
-		}, NOTIFY_DEFER_MS);
+		});
 		return;
 	}
 
