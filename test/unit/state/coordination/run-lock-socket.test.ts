@@ -400,7 +400,7 @@ test("U21-F2: runLockSocketName namespaces by uid — 'uid:run:' prefix + resolv
 	assert.ok(!alpha.includes(path.resolve("/tmp/u21-f2-beta/run.lock")));
 });
 
-test("U21-F2: runtime without process.getuid falls back to the \"noid\" prefix", () => {
+test('U21-F2: runtime without process.getuid falls back to the "noid" prefix', () => {
 	const original = Object.getOwnPropertyDescriptor(process, "getuid");
 	try {
 		Object.defineProperty(process, "getuid", { value: undefined, configurable: true });

@@ -176,17 +176,17 @@ test("F4: never-resolving noProgress hook hits the 5s budget — resolved false 
 		await assert.rejects(
 			() =>
 				executeWithRetry(
-				async () => {
-					attempts += 1;
-					throw new Error(`boom-${attempts}`);
-				},
-				{ ...fastPolicy, maxAttempts: 2 },
-				{
-					// Hangs forever: the 5s timer must resolve false so the loop
-					// still spawns attempt 2 and exhausts the ordinary way.
-					noProgress: () => new Promise<boolean>(() => undefined),
-				},
-			),
+					async () => {
+						attempts += 1;
+						throw new Error(`boom-${attempts}`);
+					},
+					{ ...fastPolicy, maxAttempts: 2 },
+					{
+						// Hangs forever: the 5s timer must resolve false so the loop
+						// still spawns attempt 2 and exhausts the ordinary way.
+						noProgress: () => new Promise<boolean>(() => undefined),
+					},
+				),
 			(error: unknown) => error instanceof Error && error.message === "boom-2" && !(error instanceof RetryNoProgressError),
 		);
 	} finally {
@@ -196,13 +196,13 @@ test("F4: never-resolving noProgress hook hits the 5s budget — resolved false 
 	assert.equal(attempts, 2, "timed-out gate counts as false ⇒ attempt 2 must spawn and exhaustion throws the original error");
 	assert.equal(consoleErrors.length, 1, "exactly one noProgressTimeout log for the single consulted gate call");
 	assert.ok(
-			consoleErrors[0]?.includes("retry-executor.noProgressTimeout"),
-			`timeout log carries the dedicated scope: ${JSON.stringify(consoleErrors)}`,
-		);
+		consoleErrors[0]?.includes("retry-executor.noProgressTimeout"),
+		`timeout log carries the dedicated scope: ${JSON.stringify(consoleErrors)}`,
+	);
 	assert.ok(
-			consoleErrors[0]?.includes('"attempt":1') && consoleErrors[0]?.includes('"timeoutMs":5000'),
-			`timeout log carries { attempt, timeoutMs } context: ${JSON.stringify(consoleErrors)}`,
-		);
+		consoleErrors[0]?.includes('"attempt":1') && consoleErrors[0]?.includes('"timeoutMs":5000'),
+		`timeout log carries { attempt, timeoutMs } context: ${JSON.stringify(consoleErrors)}`,
+	);
 	// The wait really was the budget (loose bounds — CI jitter, not flake-guard):
 	// >= ~4.5s proves the timer (not an instant settle) produced the decision.
 	assert.ok(elapsedMs >= 4500 && elapsedMs < 15000, `expected a real ~5s budget wait, got ${elapsedMs}ms`);
