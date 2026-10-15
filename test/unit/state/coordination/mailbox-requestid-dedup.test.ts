@@ -23,7 +23,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import { pollWorkerInbox } from "../../../../src/prompt/inbox-poll.ts";
+import { acknowledgeWorkerInboxDelivery, pollWorkerInbox } from "../../../../src/prompt/inbox-poll.ts";
 import {
 	appendMailboxMessage,
 	appendMailboxMessageIdempotent,
@@ -285,6 +285,10 @@ test("U5 ACCEPTANCE: restart mid-run + resume replay + resend → the worker rec
 		const firstPickup = pollWorkerInbox({ stateRoot, runId: RUN_ID, taskId: "task-1", seenIds: new Set() });
 		assert.equal(firstPickup.length, 1, "first delivery lands");
 		assert.equal(firstPickup[0]!.requestId, requestId);
+		// R5-1 (DR-02 2026-10-15): the durable ack is a separate phase the
+		// delivery loop runs AFTER a successful send — mirror it here so the
+		// restart assertions below exercise the real post-delivery state.
+		acknowledgeWorkerInboxDelivery({ stateRoot, runId: RUN_ID, taskId: "task-1" }, firstPickup);
 
 		// ── RESTART: a brand-new worker process — EMPTY seen-set, exactly the
 		// state prompt-runtime.ts would build after a crash/resume. ──
@@ -352,6 +356,8 @@ test("U5: duplicate rows under one requestId (pre-U5 duplicates) deliver exactly
 		const first = pollWorkerInbox({ stateRoot, runId: RUN_ID, taskId: "task-1", seenIds: new Set() });
 		assert.equal(first.length, 1, "within-call requestId dedup — first row wins");
 		assert.equal(first[0]!.id, "msg_dup_a");
+		// R5-1: durable ack after the (successful) delivery.
+		acknowledgeWorkerInboxDelivery({ stateRoot, runId: RUN_ID, taskId: "task-1" }, first);
 		// Restart: the requestId index drops the second row too.
 		const second = pollWorkerInbox({ stateRoot, runId: RUN_ID, taskId: "task-1", seenIds: new Set() });
 		assert.equal(second.length, 0, "the sibling duplicate row never delivers");
@@ -374,12 +380,16 @@ test("U5 audit: events log the dedup chain (mailbox.pickup → mailbox.pickup_de
 			kind: "message",
 			requestId,
 		});
-		pollWorkerInbox({ stateRoot, runId: RUN_ID, taskId: "task-1", seenIds: new Set() });
+		const pickupOne = pollWorkerInbox({ stateRoot, runId: RUN_ID, taskId: "task-1", seenIds: new Set() });
+		// R5-1: the pickup event is emitted by the post-send durable ack, not
+		// by the poll itself — ack to complete the audited delivery.
+		acknowledgeWorkerInboxDelivery({ stateRoot, runId: RUN_ID, taskId: "task-1" }, pickupOne);
 		// "Restart": the next poll drops the row via the durable record and
 		// logs ONE pickup_deduped event per key per process.
 		pollWorkerInbox({ stateRoot, runId: RUN_ID, taskId: "task-1", seenIds: new Set() });
 		pollWorkerInbox({ stateRoot, runId: RUN_ID, taskId: "task-1", seenIds: new Set() });
 		// appendEventFireAndForget is async — wait for the audited chain.
+		await waitForEvents(stateRoot, "mailbox.pickup", 1);
 		await waitForEvents(stateRoot, "mailbox.pickup_deduped", 1);
 		const events = readEvents(stateRoot);
 		const pickups = events.filter((e) => e.type === "mailbox.pickup");

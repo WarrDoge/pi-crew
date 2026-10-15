@@ -23,12 +23,19 @@
  *     must be dropped at consume time);
  *   - dedup by message id across polls via a caller-owned seen-set and/or a
  *     `sinceTs` watermark — one message delivers once;
- *   - U5 (2026-10-10): dedup is ALSO durable across restarts — every picked
- *     row is recorded in delivery.json (`messages[id]="acknowledged"` +
+ *   - U5 (2026-10-10): dedup is ALSO durable across restarts — delivered
+ *     rows are recorded in delivery.json (`messages[id]="acknowledged"` +
  *     `${direction}:${requestId}` index) and re-read on the next poll, so a
  *     worker that restarts mid-run (fresh process, EMPTY seen-set) never
  *     re-delivers. A resend carrying the same requestId is dropped by the
  *     same index; duplicate rows under one requestId deliver exactly once.
+ *   - R5-1 (DR-02, 2026-10-15): the durable record is written in TWO PHASES.
+ *     `pollWorkerInbox` only picks rows and marks the IN-MEMORY seen-set;
+ *     the durable "acknowledged" write lives in
+ *     `acknowledgeWorkerInboxDelivery`, which the delivery loop calls ONLY
+ *     after `pi.sendMessage` succeeded. A send that throws must instead call
+ *     `unmarkSeenInboxIds` so the next tick re-picks the batch — at-least-once
+ *     beats the pre-fix at-most-once-with-a-false-"delivered"-audit-record.
  */
 import * as path from "node:path";
 import {
@@ -125,13 +132,22 @@ function emitPickupEvent(stateRoot: string, runId: string, taskId: string, picke
 
 /**
  * Read the worker's inbox mailbox and return the messages that should be
- * surfaced as fenced context on the next turn.
+ * surfaced as fenced context on the next turn. PICKUP PHASE ONLY (R5-1):
+ * picked rows are marked in the caller-owned in-memory seen-set, but the
+ * durable delivery record is NOT written here — the caller must run
+ * {@link acknowledgeWorkerInboxDelivery} after its send succeeded, and
+ * {@link unmarkSeenInboxIds} when the send threw.
+ *
+ * `limit` (R5-2, DR-02): pick at most this many rows per call (callers pass
+ * their per-tick batch cap). Leftover rows are simply not picked — not
+ * marked, in memory or durably — and flow on a later tick.
  *
  * Stateless apart from the optional caller-owned `seenIds`/`sinceTs` — safe
- * to call on every 500ms poll tick. U5: picked rows are ALSO recorded in the
- * durable delivery state (delivery.json), so dedup survives a restart.
+ * to call on every 500ms poll tick. U5: the durable dedup-read checks
+ * (acknowledged rows / delivered requestIds) still run here so dedup
+ * survives a restart.
  */
-export function pollWorkerInbox(pickup: WorkerInboxPickup): MailboxMessage[] {
+export function pollWorkerInbox(pickup: WorkerInboxPickup, limit?: number): MailboxMessage[] {
 	const { stateRoot, runId, taskId } = pickup;
 	if (!stateRoot || !runId || !taskId) return [];
 	const manifest = { stateRoot, runId } as unknown as TeamRunManifest;
@@ -157,6 +173,11 @@ export function pollWorkerInbox(pickup: WorkerInboxPickup): MailboxMessage[] {
 	const byId = new Set<string>();
 	const byRequestId = new Set<string>();
 	for (const m of messages) {
+		// R5-2 (DR-02): enforce the batch cap AT PICKUP, not at the send site —
+		// every picked row must also be a row the caller can actually send (and
+		// later acknowledge). The pre-fix shape picked N rows, durably acked all
+		// N, then sliced 8 for the send — the surplus was never re-delivered.
+		if (limit !== undefined && picked.length >= limit) break;
 		// Kind gate: only durable `message`s (per §15.2). Notify is
 		// fire-and-forget (its own channel), steer/response/follow-up are
 		// other delivery paths.
@@ -204,25 +225,56 @@ export function pollWorkerInbox(pickup: WorkerInboxPickup): MailboxMessage[] {
 		seen?.add(m.id);
 		picked.push(m);
 	}
-	if (picked.length > 0) {
-		// U5: persist the pickup — the durable record that powers the two
-		// layers above after a restart. Best-effort on failure: the in-memory
-		// seen-set still dedups within THIS process, and logInternalError
-		// makes the lost-durability window visible.
-		try {
-			recordMailboxRequestIdDelivery(
-				manifest,
-				picked.map((m) => ({
-					direction: m.direction,
-					messageId: m.id,
-					requestId: messageIdempotencyKey(m),
-				})),
-			);
-			emitPickupEvent(stateRoot, runId, taskId, picked);
-		} catch (error) {
-			logInternalError("inbox-poll.record-delivery", error, `runId=${runId} taskId=${taskId}`);
-		}
-	}
 	// Deterministic delivery order (same sort readAllMailboxMessages applies).
 	return picked;
+}
+
+/**
+ * R5-1 (DR-02, 2026-10-15): durable-ack phase of the pickup, split OUT of
+ * `pollWorkerInbox`. The caller invokes this ONLY after the picked rows were
+ * successfully delivered (`pi.sendMessage` returned) — the durable
+ * "acknowledged" record and the pickup audit event must never precede a send
+ * that can fail (the pre-fix bug wrote them BEFORE the send, so a send
+ * failure produced a permanent false "delivered" record plus silent message
+ * loss). Mid-batch all-or-nothing: recordMailboxRequestIdDelivery is a single
+ * locked RMW, so acks are atomic per call.
+ *
+ * Best-effort on failure (never throws into the poll tick): the in-memory
+ * seen-set still dedups within THIS process, and logInternalError makes the
+ * lost-durability window visible.
+ */
+export function acknowledgeWorkerInboxDelivery(
+	pickup: Pick<WorkerInboxPickup, "stateRoot" | "runId" | "taskId">,
+	picked: MailboxMessage[],
+): void {
+	const { stateRoot, runId, taskId } = pickup;
+	if (!stateRoot || !runId || !taskId || picked.length === 0) return;
+	const manifest = { stateRoot, runId } as unknown as TeamRunManifest;
+	try {
+		// U5: persist the delivery — the durable record that powers the two
+		// dedup layers above after a restart.
+		recordMailboxRequestIdDelivery(
+			manifest,
+			picked.map((m) => ({
+				direction: m.direction,
+				messageId: m.id,
+				requestId: messageIdempotencyKey(m),
+			})),
+		);
+		emitPickupEvent(stateRoot, runId, taskId, picked);
+	} catch (error) {
+		logInternalError("inbox-poll.record-delivery", error, `runId=${runId} taskId=${taskId}`);
+	}
+}
+
+/**
+ * R5-1 (DR-02): release the in-memory seen marks for a batch whose
+ * `pi.sendMessage` THREW, so the next poll tick re-picks and re-delivers it
+ * (at-least-once beats at-most-once with a false "delivered" audit record).
+ * Mirrors the steer channel's `seenSteers.unmark` + offset-rewind
+ * compensation in prompt-runtime.ts pollSteering.
+ */
+export function unmarkSeenInboxIds(seen: Set<string> | undefined, picked: MailboxMessage[]): void {
+	if (!seen) return;
+	for (const m of picked) seen.delete(m.id);
 }

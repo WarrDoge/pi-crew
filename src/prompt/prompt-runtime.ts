@@ -12,7 +12,7 @@ import { appendEventFireAndForget } from "../state/event-log/event-log.ts";
 import type { TeamRunManifest } from "../state/types.ts";
 import { logInternalError } from "../utils/internal-error.ts";
 import { resolveRealContainedPath } from "../utils/safe-paths.ts";
-import { pollWorkerInbox } from "./inbox-poll.ts";
+import { acknowledgeWorkerInboxDelivery, pollWorkerInbox, unmarkSeenInboxIds } from "./inbox-poll.ts";
 import { createMessageTool, type MessageToolParams as MessageToolInputs, shouldRegisterMessageTool } from "./message-tool.ts";
 import { registerScratchpadLifecycle } from "./scratchpad-lifecycle.ts";
 import { createWorkerActivityTracker, registerSurfaceWorkerLifecycle, trackToolActivity } from "./surface-worker.ts";
@@ -1067,45 +1067,74 @@ export default function registerPiTeamsPromptRuntime(pi: ExtensionAPI): void {
 	// (`deliverAs:"steer"`, customType "crew-inbox") so the model sees
 	// conversations between agents. Dormant-until-env: only when this worker
 	// carries broker credentials (child-pi-spawn sets them for every worker)
-	// + a state root. A message is delivered EXACTLY ONCE via a seen-id set
-	// owned by this loop (the same keying that guards cross-channel steer
-	// dedup; here the durable mailbox is the only channel).
+	// + a state root. R5-1/R5-2 (DR-02, 2026-10-15): delivery is ack-AFTER-send
+	// — the poll picks (in-memory seen-set) up to INBOX_BATCH_MAX rows, the
+	// DURABLE "acknowledged" record is written (acknowledgeWorkerInboxDelivery)
+	// only after pi.sendMessage succeeded; a send throw unmarks the batch
+	// (unmarkSeenInboxIds) so the next tick re-delivers it. Pickup is thus
+	// at-least-once across send failures and exactly-once once the durable
+	// ack lands (it also survives a restart — U5 semantics).
 	const inboxBrokerRunId = getCrewEnv(PI_CREW_BROKER_RUN_ID_ASK_ENV);
 	const inboxStateRoot = getCrewEnv(PI_CREW_STATE_ROOT_ENV);
 	const inboxTaskId = getCrewEnv(PI_CREW_TASK_ID_ASK_ENV) ?? getCrewEnv(PI_CREW_BROKER_TASK_ID_ASK_ENV);
 	if (inboxBrokerRunId && inboxStateRoot && inboxTaskId) {
 		const seenInboxIds = new Set<string>();
 		// Batch cap per tick: bounds a single steer frame that could otherwise
-		// pile up many fenced messages in one delivery.
+		// pile up many fenced messages in one delivery. R5-2 (DR-02): the cap
+		// is enforced AT PICKUP (pollWorkerInbox `limit`) so every picked row is
+		// also a row actually sent + acked — the pre-fix shape acked N rows
+		// durably but sliced 8 for the send, orphaning the surplus forever.
 		const INBOX_BATCH_MAX = 8;
 		const pollInbox = (): void => {
 			try {
-				const picked = pollWorkerInbox({
-					stateRoot: inboxStateRoot,
-					runId: inboxBrokerRunId,
-					taskId: inboxTaskId,
-					seenIds: seenInboxIds,
-				});
+				const picked = pollWorkerInbox(
+					{
+						stateRoot: inboxStateRoot,
+						runId: inboxBrokerRunId,
+						taskId: inboxTaskId,
+						seenIds: seenInboxIds,
+					},
+					INBOX_BATCH_MAX,
+				);
 				if (picked.length === 0) return;
-				const batch = picked.slice(0, INBOX_BATCH_MAX);
 				// §15.2 trust boundary: the sender's body is DATA, never
 				// instructions. pollWorkerInbox hands back raw mailbox entries —
 				// fence each body (control chars stripped, closing fence
 				// neutralized, length capped) before it reaches the agent.
-				const fenced = batch.map((m) => ({
+				const fenced = picked.map((m) => ({
 					from: m.from,
 					to: m.to,
 					body: renderInboxMessage(m),
 				}));
-				pi.sendMessage(
-					{
-						customType: "crew-inbox",
-						content: fenced.map((e) => e.body).join("\n"),
-						display: false,
-						details: { messages: fenced, count: batch.length },
-					},
-					{ deliverAs: "steer" },
-				);
+				try {
+					pi.sendMessage(
+						{
+							customType: "crew-inbox",
+							content: fenced.map((e) => e.body).join("\n"),
+							display: false,
+							details: { messages: fenced, count: picked.length },
+						},
+						{ deliverAs: "steer" },
+					);
+				} catch (sendErr) {
+					// R5-1: the send FAILED (e.g. pre-bind notInitialized — exactly
+					// what the registration-time synchronous pollInbox() below can
+					// hit). No durable ack was written yet, so there is no false
+					// "delivered" record; release the seen marks so the next tick
+					// re-picks and re-delivers the batch — mirrors seenSteers.unmark
+					// + offset rewind in pollSteering above (at-least-once).
+					unmarkSeenInboxIds(seenInboxIds, picked);
+					logInternalError(
+						"prompt-runtime.inbox-delivery-failed",
+						sendErr instanceof Error ? sendErr : new Error(String(sendErr)),
+						`runId=${inboxBrokerRunId} taskId=${inboxTaskId} count=${picked.length}`,
+						"warn",
+					);
+					return;
+				}
+				// R5-1: the durable "acknowledged" record + pickup audit event
+				// happen ONLY after a successful send — never before it.
+				acknowledgeWorkerInboxDelivery({ stateRoot: inboxStateRoot, runId: inboxBrokerRunId, taskId: inboxTaskId }, picked);
 			} catch {
 				// A transient mailbox read error must never break the tick — the
 				// next 500ms (or 50ms under live-session realtime) poll retries.
