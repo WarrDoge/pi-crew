@@ -164,3 +164,12 @@ unchanged.
 - D6 crew-agent-records.ts:687 writeSeqToSidecar: tmp+rename atomic write (reuse atomicWriteFile).
 
 ## Wave-2 gates: same as wave 1 (tsc, targeted, ci:fast, full unit, bundle) — run by lead.
+
+## Wave-2 completion record (2026-10-15, commits c1a6e15e..c751e979)
+All 6 clusters landed and lead-gated: disputed message-tool failure re-run isolated 5/5 green (E's
+stash-verify raced sibling clusters — dismissed). tsc clean · ci:fast exit 0 · full unit **9279 tests /
+9276 pass / 0 fail / 3 pre-existing skips** (+78 vs wave 1) · bundle rebuilt+committed.
+Accepted residual: overflow compaction inside appendEventInsideLock (event-log.ts:1017) stays
+mkdirlock-only (fix risks event-loop stall vs in-process async holders — documented in cluster A
+commit). Steer writers other than `team steer` rely on the receiver-side truncate seam (single choke
+point covers all 4 writers).
