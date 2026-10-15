@@ -4,6 +4,7 @@ import { appendEventAsync } from "../../state/event-log/event-log.ts";
 import { writeArtifact } from "../../state/stores/artifact-store.ts";
 import { loadRunManifestById, saveRunTasksAsync, updateRunStatus } from "../../state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../state/types.ts";
+import { logInternalError } from "../../utils/internal-error.ts";
 import type { WorkflowStep } from "../../workflows/workflow-config.ts";
 import type { ChildPiRunResult } from "../child-pi/child-pi.ts";
 import { appendDeadletter } from "../deadletter.ts";
@@ -150,8 +151,17 @@ export async function runCoalescedTaskGroup(input: CoalescedTaskGroupInput): Pro
 					if (finalWriteStarted) {
 						try {
 							await repairGroupTerminalWrite(manifest, taskIds, updatedTasks);
-						} catch {
-							// best-effort repair — same swallow policy as the heartbeat.
+						} catch (error) {
+							// E1 (DR-02): still best-effort (must not throw into the
+							// interval), but a swallowed failure leaves STALE terminal
+							// status on disk with no trace — surface it at warn so the
+							// tasks.json-vs-events.jsonl divergence is diagnosable.
+							logInternalError(
+								"run-coalesced.repair-terminal-write",
+								error,
+								`runId=${manifest.runId} taskIds=${taskIds.join(",")}`,
+								"warn",
+							);
 						}
 					}
 				}

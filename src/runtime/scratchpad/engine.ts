@@ -24,6 +24,8 @@ import { dirname } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
+import { logInternalError } from "../../utils/internal-error.ts";
+
 /** D6 read-side cap (Checkpoint B, MINOR-2): restoreState refuses a file larger
  *  than this — an independent guard from the lifecycle cap (same value, no
  *  import to keep engine free of a lifecycle cycle). Bounds v8.deserialize
@@ -353,7 +355,14 @@ export class EngineManager {
 	 */
 	async dispose(snapshotPath?: string): Promise<void> {
 		if (snapshotPath && this.engineState === "running") {
-			await this.snapshotState(snapshotPath).catch(() => null);
+			await this.snapshotState(snapshotPath).catch((error: unknown) => {
+				// E2 (DR-02): the guest is SIGKILLed below regardless and dispose
+				// must never throw — but silently discarding the FINAL snapshot made
+				// crash-recovery quietly lose engine state. Surface the loss at
+				// warn before dropping it. Keep returning null (no rethrow).
+				logInternalError("scratchpad.final-snapshot-failed", error, `snapshotPath=${snapshotPath}`, "warn");
+				return null;
+			});
 		}
 		await this.kill();
 	}

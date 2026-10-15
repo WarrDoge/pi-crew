@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clearAllTaskUsage, getRunUsage, getTaskUsage, trackTaskUsage } from "../../../../src/runtime/usage-tracker.ts";
+import {
+	clearAllTaskUsage,
+	getRunUsage,
+	getTaskUsage,
+	MAX_TRACKED_TASK_USAGE,
+	trackTaskUsage,
+} from "../../../../src/runtime/usage-tracker.ts";
 
 test("trackTaskUsage accumulates usage for same taskId", () => {
 	clearAllTaskUsage();
@@ -61,4 +67,32 @@ test("concurrent tracking does not lose increments (simulate rapid sequential ca
 	assert.equal(usage.input, 1000);
 	assert.equal(usage.output, 1000);
 	assert.equal(usage.cacheWrite, 1000);
+});
+
+test("taskUsageMap is FIFO-capped at MAX_TRACKED_TASK_USAGE (DR-02 C2)", () => {
+	clearAllTaskUsage();
+	const total = Math.floor(MAX_TRACKED_TASK_USAGE * 1.5); // 7_500 = 1.5x cap
+	for (let i = 0; i < total; i++) trackTaskUsage(`cap-${i}`, { input: 1, output: 2 });
+	assert.equal(getTaskUsage("cap-0").input, 0, "oldest entry must be evicted (FIFO)");
+	const firstKept = total - MAX_TRACKED_TASK_USAGE;
+	assert.equal(getTaskUsage(`cap-${firstKept - 1}`).input, 0, "exactly the first (total-cap) entries must be evicted");
+	assert.equal(getTaskUsage(`cap-${firstKept}`).input, 1, "first kept entry survives");
+	assert.equal(getTaskUsage(`cap-${total - 1}`).output, 2, "newest entry survives");
+	// clear semantics unchanged by the cap.
+	clearAllTaskUsage();
+	assert.equal(getTaskUsage(`cap-${total - 1}`).input, 0, "clearAllTrackedTaskUsage must still wipe everything");
+});
+
+test("FIFO order is first-INSERTED, not last-touched (Map.set keeps insertion order) (DR-02 C2)", () => {
+	clearAllTaskUsage();
+	trackTaskUsage("old-task", { input: 1 });
+	// Re-track the old task after churn — Map.set on an EXISTING key does not
+	// move it to the back, so it stays first in FIFO order.
+	for (let i = 0; i < 100; i++) trackTaskUsage(`churn-a-${i}`, { input: 1 });
+	trackTaskUsage("old-task", { input: 1 });
+	const total = Math.floor(MAX_TRACKED_TASK_USAGE * 1.5);
+	for (let i = 0; i < total; i++) trackTaskUsage(`churn-b-${i}`, { input: 1 });
+	assert.equal(getTaskUsage("old-task").input, 0, "first-inserted task is evicted even when re-tracked later");
+	assert.ok(getTaskUsage(`churn-b-${total - 1}`).input >= 1, "newest churn entry survives");
+	clearAllTaskUsage();
 });

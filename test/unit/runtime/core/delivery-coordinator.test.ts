@@ -326,5 +326,70 @@ describe("DeliveryCoordinator", () => {
 			assert.deepEqual(emitted, [{ status: "completed" }]);
 			dc.dispose();
 		});
+
+		it("caps the pending queue at MAX_PENDING with drop-oldest (DR-02 C3)", () => {
+			const emitted: Array<{ event: string; data: unknown }> = [];
+			const dc = new DeliveryCoordinator({
+				emit: (event, data) => {
+					emitted.push({ event, data });
+				},
+			});
+			const total = Math.floor(DeliveryCoordinator.MAX_PENDING * 1.5); // 1_500 = 1.5x cap
+			for (let i = 0; i < total; i++) dc.deliverResult(`run-${i}`, { i });
+			assert.equal(dc.getPendingCount(), DeliveryCoordinator.MAX_PENDING, "queue must be capped at MAX_PENDING");
+			dc.activate("session-cap");
+			assert.equal(emitted.length, DeliveryCoordinator.MAX_PENDING, "only the newest MAX_PENDING deliveries flush");
+			const firstPayload = emitted[0]?.data as { i: number };
+			assert.equal(firstPayload.i, total - DeliveryCoordinator.MAX_PENDING, "the OLDEST deliveries must have been dropped");
+			const lastPayload = emitted[emitted.length - 1]?.data as { i: number };
+			assert.equal(lastPayload.i, total - 1, "the newest delivery survives");
+			dc.dispose();
+		});
+
+		it("warns once per overflow episode and re-warns after a drain (DR-02 C3)", () => {
+			const stderr = captureStderrForLog();
+			const dc = new DeliveryCoordinator({
+				emit: () => undefined,
+			});
+			try {
+				const total = Math.floor(DeliveryCoordinator.MAX_PENDING * 1.5);
+				for (let i = 0; i < total; i++) dc.deliverResult(`run-${i}`, { i });
+				assert.equal(
+					stderr.captured.join("").split("delivery-coordinator.pending-overflow").length - 1,
+					1,
+					"an overflow burst of 500 over-cap pushes must warn exactly ONCE",
+				);
+				// Drain below cap, then overflow again — a NEW episode must warn again.
+				dc.activate("session-episode");
+				assert.equal(dc.getPendingCount(), 0, "activate must drain the queue");
+				dc.deactivate(); // second burst must ENQUEUE again, not emit live
+				for (let i = 0; i < total; i++) dc.deliverResult(`run2-${i}`, { i });
+				assert.equal(
+					stderr.captured.join("").split("delivery-coordinator.pending-overflow").length - 1,
+					2,
+					"a separate overflow episode after a drain must warn again",
+				);
+			} finally {
+				stderr.restore();
+				dc.dispose();
+			}
+		});
 	});
 });
+
+/** Capture process.stderr.write chunks (the logInternalError warn sink),
+ *  mirroring the seam used by test/unit/utils/internal-error.test.ts. */
+function captureStderrForLog(): { captured: string[]; restore(): void } {
+	const original = process.stderr.write.bind(process.stderr);
+	const captured: string[] = [];
+	process.stderr.write = ((chunk: string | Uint8Array) => {
+		captured.push(String(chunk));
+		return true;
+	}) as typeof process.stderr.write;
+	return {
+		captured,
+		restore: () => {
+			process.stderr.write = original;
+		},
+	};
+}

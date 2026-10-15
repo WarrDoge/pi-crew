@@ -68,12 +68,23 @@ export function usageStateFromLifetime(lifetime: LifetimeUsage): UsageState {
 	};
 }
 
+// DR-02 C2: crash/abandon paths never run clearTrackedTaskUsage, so per-task
+// ledger entries could accumulate for the whole process lifetime. Bounded
+// FIFO eviction on insert — Map preserves insertion order, so deleting the
+// first key evicts the first-INSERTED task (mirrors the sibling
+// agentEventSeqCache cap in crew-agent-records.ts). Exported for tests.
+export const MAX_TRACKED_TASK_USAGE = 5_000;
 const taskUsageMap = new Map<string, LifetimeUsage>();
 
 export function trackTaskUsage(taskId: string, delta: UsageDelta): void {
 	const existing = taskUsageMap.get(taskId) ?? emptyLifetimeUsage();
 	addUsage(existing, delta);
 	taskUsageMap.set(taskId, existing);
+	while (taskUsageMap.size > MAX_TRACKED_TASK_USAGE) {
+		const oldest = taskUsageMap.keys().next().value;
+		if (oldest === undefined) break;
+		taskUsageMap.delete(oldest);
+	}
 }
 
 export function getTrackedTaskUsage(taskId: string): LifetimeUsage {

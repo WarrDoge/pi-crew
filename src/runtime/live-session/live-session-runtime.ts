@@ -868,6 +868,30 @@ export async function probeLiveSessionRuntime(): Promise<LiveSessionUnavailableR
 	};
 }
 
+// DR-02 C1: the per-agent control-request dedupe Set previously grew for
+// the whole run lifetime — fed by BOTH the 500ms/1000ms control poll and the
+// realtime subscription, with no eviction. Bounded FIFO eviction: a Set
+// preserves insertion order, so deleting the first-added id evicts the OLDEST
+// request id (mirrors the NotificationRouter.SEEN_MAP_MAX_SIZE bounded-seen
+// pattern). Worst case after an eviction is one redelivery of a very old
+// control request; the consumers (steer / follow-up) are idempotent by design.
+export const MAX_SEEN_CONTROL_REQUEST_IDS = 10_000;
+
+class BoundedSeenControlRequestIdSet extends Set<string> {
+	override add(id: string): this {
+		super.add(id);
+		while (this.size > MAX_SEEN_CONTROL_REQUEST_IDS) {
+			const oldest = this.values().next().value;
+			if (oldest === undefined) break;
+			this.delete(oldest);
+		}
+		return this;
+	}
+}
+
+/** @internal — test seam for the C1 cap (see live-agent-control-dedupe tests). */
+export const __test__BoundedSeenControlRequestIdSet = BoundedSeenControlRequestIdSet;
+
 export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<LiveSessionRunResult> {
 	// Cold-start race fix: ensure the hot module graph is warm before touching
 	// any module. Under tsx, concurrent first-imports race module-record
@@ -1406,7 +1430,7 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 		registerLiveAgentModel(agentId, resolvedModelRef ?? "");
 		streamOut = createStreamingOutput(input.manifest, input.task.id);
 		let controlCursor: LiveAgentControlCursor = { offset: 0 };
-		const seenControlRequestIds = new Set<string>();
+		const seenControlRequestIds: Set<string> = new BoundedSeenControlRequestIdSet();
 		let controlBusy = false;
 		const pollControl = async () => {
 			if (!isCurrent() || controlBusy || !session) return;

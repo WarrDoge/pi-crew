@@ -26,6 +26,12 @@ export interface DeliveryCoordinatorDeps {
 const PENDING_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export class DeliveryCoordinator {
+	// DR-02 C3: the queue was TTL-bounded ONLY (24h) — an extension that stays
+	// sessionless while runs keep completing could grow `pending` unboundedly.
+	// Hard count cap with drop-oldest (oldest delivery is the least likely to
+	// still matter); the TTL eviction below stays unchanged. Static (not
+	// module-const) so tests can read/patch it like Semaphore.MAX_QUEUE.
+	static readonly MAX_PENDING = 1_000;
 	private active = false;
 	private generation = 0;
 	private pending: PendingDelivery[] = [];
@@ -36,6 +42,9 @@ export class DeliveryCoordinator {
 	/** The session id passed to the most recent activate(); used by flushQueuedResults
 	 * to park deliveries owned by a different session (vector #12). */
 	private activeSessionId?: string;
+	/** DR-02 C3: set after the first warn of an overflow episode; cleared once
+	 * the queue is back at/below the cap so the NEXT episode warns again. */
+	private pendingOverflowWarned = false;
 
 	constructor(deps: DeliveryCoordinatorDeps) {
 		this.deps = deps;
@@ -215,6 +224,27 @@ export class DeliveryCoordinator {
 			this.ttlTimer.unref();
 		}
 		this.pending.push({ ...delivery, generation: this.generation });
+		// DR-02 C3: count cap — drop-oldest while over cap, warn ONCE per
+		// overflow episode (flag resets once the queue is back under cap, so a
+		// later separate overflow is visible again).
+		if (this.pending.length <= DeliveryCoordinator.MAX_PENDING) {
+			this.pendingOverflowWarned = false;
+			return;
+		}
+		let dropped = 0;
+		while (this.pending.length > DeliveryCoordinator.MAX_PENDING) {
+			if (this.pending.shift() === undefined) break;
+			dropped++;
+		}
+		if (dropped > 0 && !this.pendingOverflowWarned) {
+			this.pendingOverflowWarned = true;
+			logInternalError(
+				"delivery-coordinator.pending-overflow",
+				undefined,
+				`dropped=${dropped} max=${DeliveryCoordinator.MAX_PENDING} remaining=${this.pending.length} runId=${delivery.runId}`,
+				"warn",
+			);
+		}
 	}
 
 	private evictExpired(): void {

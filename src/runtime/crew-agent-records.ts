@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+	atomicWriteFile,
 	atomicWriteJson,
 	atomicWriteJsonCoalesced,
 	cancelPendingCoalescedWriteForPath,
@@ -686,7 +687,12 @@ function readSeqFromSidecar(filePath: string): number | undefined {
 
 function writeSeqToSidecar(filePath: string, seq: number): void {
 	try {
-		fs.writeFileSync(`${filePath}.${AGENT_EVENT_SEQ_SIDECAR}`, String(seq));
+		// D6 (DR-02): tmp+rename so a concurrent reader (nextAgentEventSeq on
+		// another thread/process) never observes a torn or empty .seq.
+		// best-effort durability per F4: the sidecar is only an O(1) lookup
+		// optimization — losing it on a crash costs the O(n) scan fallback,
+		// never correctness. Path and content format unchanged (String(seq)).
+		atomicWriteFile(`${filePath}.${AGENT_EVENT_SEQ_SIDECAR}`, String(seq), { durability: "best-effort" });
 	} catch (error) {
 		logInternalError("crew-agent-records.seq-sidecar", error, `filePath=${filePath}`);
 	}
