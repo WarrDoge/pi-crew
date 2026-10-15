@@ -86,6 +86,9 @@ export class CrewAgentPane {
 	private readonly paneOptions: CrewAgentPaneOptions | undefined;
 	/** Current agent target, read fresh from the panel store each render. */
 	private currentTaskId: string | undefined;
+	/** Run of {@link currentTaskId} — F3: the pane's switch guard is run-scoped
+	 *  so the same-named task in another run resets the transcript state. */
+	private currentRunId: string | undefined;
 	/** Cached manifest for the current run, to avoid re-reading on every tick. */
 	private cachedRunId: string | undefined;
 	private cachedManifest: TeamRunManifest | undefined;
@@ -294,11 +297,15 @@ export class CrewAgentPane {
 		const viewed = getViewedAgent();
 		if (!viewed) return [];
 
-		// Detect agent switch: reset the transcript cursor so the pane shows
-		// the new agent's full history instead of continuing from the old cursor.
-		if (this.currentTaskId !== viewed.taskId) {
-			resetAgentTranscriptCursor(viewed.taskId);
+		// Detect agent switch (F3: run OR task — task ids are positional per
+		// run, so a taskId-only guard let a same-named task in another run
+		// reuse the stale cursor/buffer): reset the transcript cursor so the
+		// pane shows the new agent's full history instead of continuing from
+		// the old cursor.
+		if (this.currentTaskId !== viewed.taskId || this.currentRunId !== viewed.runId) {
+			resetAgentTranscriptCursor(viewed.runId, viewed.taskId);
 			this.currentTaskId = viewed.taskId;
+			this.currentRunId = viewed.runId;
 			this.scrollBack = 0;
 			this.lastItems = [];
 			this.lastTranscriptReadAt = 0;
@@ -371,8 +378,8 @@ export class CrewAgentPane {
 		this.unsubscribePanel();
 		this.cachedManifest = undefined;
 		this.cachedRunId = undefined;
-		// Free the per-task transcript ring buffer (≤500 items with full
+		// Free the per-run::task transcript ring buffer (≤500 items with full
 		// message bodies) instead of retaining it for process lifetime.
-		if (this.currentTaskId) resetAgentTranscriptCursor(this.currentTaskId);
+		if (this.currentRunId && this.currentTaskId) resetAgentTranscriptCursor(this.currentRunId, this.currentTaskId);
 	}
 }

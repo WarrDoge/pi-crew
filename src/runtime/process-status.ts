@@ -140,7 +140,12 @@ export function isDisplayActiveRun(run: TeamRunManifest, agents: CrewAgentRecord
 		if (Number.isFinite(updatedAt) && now - updatedAt > STALE_ACTIVE_RUN_MS) return false;
 	}
 	// Grace period: show completed runs for a few seconds so users see the result.
-	if (run.status === "completed" || run.status === "failed" || run.status === "cancelled") {
+	// R5-4 (DR-02 wave 2): "blocked" is terminal (isFinishedRunStatus) but NOT an
+	// error the user caused — without the grace branch it fell through to
+	// `!isActiveRunStatus` and vanished from the widget instantly while "failed"
+	// lingered 10min. Blocked now gets the same ERROR_VISIBILITY_GRACE_MS so the
+	// block reason stays inspectable.
+	if (run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "blocked") {
 		const grace = run.status === "completed" ? COMPLETED_VISIBILITY_GRACE_MS : ERROR_VISIBILITY_GRACE_MS;
 		const lastAgentActivity = agents.reduce<number>((max, agent) => {
 			const ts = agent.completedAt ?? agent.startedAt;

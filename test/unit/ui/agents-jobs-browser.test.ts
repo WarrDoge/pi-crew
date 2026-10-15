@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import type { ScheduledJob } from "../../../src/runtime/scheduling/scheduler.ts";
+import { loadRunManifestById } from "../../../src/state/stores/state-store.ts";
 import { type AgentsBrowserAgentEntry, AgentsJobsBrowser } from "../../../src/ui/agents-jobs-browser.ts";
 import { visibleWidth } from "../../../src/utils/visual.ts";
 
@@ -143,6 +144,194 @@ test("agent detail without a durable record falls back to a stub, never throws",
 
 	const lines = browser.detailLinesFor(browser.entriesView[0]);
 	assert.match(lines.join("\n"), /agent record unavailable/);
+});
+
+// ─── R5-3: manifest cache invalidation (DR-02 wave 2) ─────────────────────
+
+/** Write a minimal but state-store-loadable run fixture: manifest.json +
+ *  agents.json under `.crew/state/runs/<runId>/`. */
+function writeRunFixture(dir: string, runId: string): { stateRoot: string; iso: string } {
+	const stateRoot = join(dir, ".crew", "state", "runs", runId);
+	mkdirSync(stateRoot, { recursive: true });
+	const iso = new Date().toISOString();
+	writeFileSync(
+		join(stateRoot, "manifest.json"),
+		JSON.stringify({
+			schemaVersion: 1,
+			runId,
+			sessionId: `sess-${runId}`,
+			team: "direct-explorer",
+			workflow: "direct-agent",
+			goal: "R5-3 fixture",
+			status: "completed",
+			workspaceMode: "single",
+			createdAt: iso,
+			updatedAt: iso,
+			cwd: dir,
+			stateRoot,
+			artifactsRoot: join(dir, ".crew", "artifacts", runId),
+			tasksPath: join(stateRoot, "tasks.json"),
+			eventsPath: join(stateRoot, "events.jsonl"),
+			artifacts: [],
+		}),
+	);
+	writeFileSync(
+		join(stateRoot, "agents.json"),
+		JSON.stringify([
+			{
+				id: `${runId}:01_01-agent`,
+				runId,
+				taskId: "01_01-agent",
+				agent: "explorer",
+				role: "Explorer",
+				runtime: "child-process",
+				status: "completed",
+				startedAt: iso,
+				completedAt: iso,
+			},
+		]),
+	);
+	return { stateRoot, iso };
+}
+
+function bareAgentEntry(runId: string): AgentsBrowserAgentEntry {
+	// No record, no manifest — detailLinesFor must resolve BOTH from disk.
+	return { kind: "agent", runId, taskId: "01_01-agent", role: "Explorer", status: "completed" };
+}
+
+test("R5-3: a manifest miss is not durably cached — a manifest created later is visible without force", () => {
+	// Pre-fix: the first miss cached null forever, so a manifest written while
+	// the overlay was open NEVER became visible (loadRunManifestById races
+	// writes lock-free; a transient read failure pinned the miss for life).
+	// NOTE: `.crew` is a project-root marker (project-markers.ts) — create it
+	// BEFORE the first manifest lookup or findRepoRoot caches the negative and
+	// the run state root never resolves to this fixture dir.
+	const dir = mkdtempSync(join(tmpdir(), "crew-browser-manifest-late-"));
+	mkdirSync(join(dir, ".crew"), { recursive: true });
+	try {
+		const runId = "team_test_manifest_late";
+		const browser = new AgentsJobsBrowser({
+			cwd: dir,
+			now: () => NOW,
+			refreshTtlMs: 0,
+			agentsProvider: () => [bareAgentEntry(runId)],
+			jobsProvider: () => ({ jobs: [], hiddenCount: 0 }),
+		});
+		const entry = browser.entriesView[0];
+		assert.ok(entry && entry.kind === "agent");
+		if (entry?.kind !== "agent") return;
+
+		assert.match(
+			browser.detailLinesFor(entry).join("\n"),
+			/agent record unavailable/,
+			"miss before the manifest exists renders the stub",
+		);
+
+		writeRunFixture(dir, runId);
+		const after = browser.detailLinesFor(entry).join("\n");
+		assert.ok(!after.includes("agent record unavailable"), `the miss must not be pinned, got: ${after}`);
+		assert.match(after, /01_01-agent/, "detail renders from the just-written manifest (no force refresh)");
+		browser.dispose();
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("R5-3: refreshData(true) invalidates cached manifests — a deleted manifest.json stops serving after force", () => {
+	// Isolation trick: the RECORD (agents.json) is re-read every call, so only
+	// the manifest layer can explain a difference. Delete manifest.json but
+	// KEEP agents.json — while the manifest is cached, detail still renders
+	// (readCrewAgents reads agents.json through the cached manifest's paths);
+	// after force the cache clears and loadRunManifestById cannot resolve the
+	// run anymore → stub. Pre-fix: the manifest was cached forever, so a run
+	// whose manifest.json was gone kept rendering with no way to notice.
+	const dir = mkdtempSync(join(tmpdir(), "crew-browser-manifest-force-"));
+	mkdirSync(join(dir, ".crew"), { recursive: true });
+	try {
+		const runId = "team_test_manifest_force";
+		const { stateRoot } = writeRunFixture(dir, runId);
+		const browser = new AgentsJobsBrowser({
+			cwd: dir,
+			now: () => NOW,
+			refreshTtlMs: 0,
+			agentsProvider: () => [bareAgentEntry(runId)],
+			jobsProvider: () => ({ jobs: [], hiddenCount: 0 }),
+		});
+		const entry = browser.entriesView[0];
+		assert.ok(entry && entry.kind === "agent");
+		if (entry?.kind !== "agent") return;
+
+		const loaded = browser.detailLinesFor(entry).join("\n");
+		assert.ok(!loaded.includes("agent record unavailable") && loaded.includes("01_01-agent"), `v1 renders, got: ${loaded}`);
+
+		// manifest.json disappears (state trimmed / crash debris). agents.json
+		// stays so the record read itself would still work.
+		rmSync(join(stateRoot, "manifest.json"), { force: true });
+
+		const stillCached = browser.detailLinesFor(entry).join("\n");
+		assert.ok(
+			!stillCached.includes("agent record unavailable") && stillCached.includes("01_01-agent"),
+			`cache hit without force keeps serving the cached manifest, got: ${stillCached}`,
+		);
+
+		// Force refresh clears the manifest cache → resolution fails → stub.
+		browser.refreshData(true);
+		assert.match(
+			browser.detailLinesFor(entry).join("\n"),
+			/agent record unavailable/,
+			"force refresh drops the stale manifest (pre-fix: cached forever)",
+		);
+		browser.dispose();
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("R5-3: detailLinesFor prefers the fresh entry.manifest over a disk re-read", () => {
+	const dir = mkdtempSync(join(tmpdir(), "crew-browser-manifest-entry-"));
+	try {
+		const runId = "team_test_manifest_entry";
+		const { iso } = writeRunFixture(dir, runId);
+		const loaded = loadRunManifestById(dir, runId);
+		assert.ok(loaded, "fixture manifest loads through state-store");
+		const browser = new AgentsJobsBrowser({
+			cwd: dir,
+			now: () => NOW,
+			refreshTtlMs: 0,
+			agentsProvider: () => [
+				{
+					kind: "agent",
+					// entry.runId has NO manifest on disk — only entry.manifest can
+					// satisfy the detail render (pre-fix: manifestFor miss → stub).
+					runId: "run_missing_nowhere",
+					taskId: "01_01-agent",
+					role: "Explorer",
+					status: "completed",
+					manifest: loaded.manifest,
+					record: {
+						taskId: "01_01-agent",
+						runId: "run_missing_nowhere",
+						agent: "explorer",
+						role: "Explorer",
+						runtime: "child-process",
+						status: "completed",
+						startedAt: iso,
+						completedAt: iso,
+					} as never,
+				},
+			],
+			jobsProvider: () => ({ jobs: [], hiddenCount: 0 }),
+		});
+		const entry = browser.entriesView[0];
+		assert.ok(entry && entry.kind === "agent");
+		if (entry?.kind !== "agent") return;
+		const lines = browser.detailLinesFor(entry).join("\n");
+		assert.ok(!lines.includes("agent record unavailable"), `entry.manifest must win, got: ${lines}`);
+		assert.match(lines, /01_01-agent/);
+		browser.dispose();
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 // ─── Keyboard navigation ───────────────────────────────────────────────────

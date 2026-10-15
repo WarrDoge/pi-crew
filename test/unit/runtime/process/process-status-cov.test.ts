@@ -262,4 +262,45 @@ describe("isDisplayActiveRun", () => {
 		];
 		assert.equal(isDisplayActiveRun(run, agents, Date.now()), true);
 	});
+
+	// R5-4 (DR-02 wave 2): blocked is terminal (isFinishedRunStatus) but was
+	// absent from the grace branch — it fell through to `!isActiveRunStatus` and
+	// vanished from the widget INSTANTLY while failed lingered 10min.
+	it("returns true for a blocked run within the error-grace period (R5-4)", () => {
+		const now = Date.now();
+		const run = makeManifest({ status: "blocked", updatedAt: new Date(now).toISOString() });
+		const agents = [
+			{
+				id: "a1",
+				status: "blocked" as unknown as "completed",
+				runId: "r",
+				taskId: "t",
+				agent: "x",
+				role: "r",
+				runtime: "scaffold" as const,
+				startedAt: new Date(now - 60_000).toISOString(),
+				completedAt: new Date(now - 1_000).toISOString(),
+			},
+		];
+		assert.equal(isDisplayActiveRun(run, agents, now), true, "blocked lingers like failed (10min window)");
+	});
+
+	it("returns false for a blocked run beyond the grace period (R5-4)", () => {
+		const now = Date.now();
+		const run = makeManifest({ status: "blocked", updatedAt: new Date(now - 11 * 60 * 1000).toISOString() });
+		const agents = [
+			{
+				id: "a1",
+				status: "blocked" as unknown as "completed",
+				runId: "r",
+				taskId: "t",
+				agent: "x",
+				role: "r",
+				runtime: "scaffold" as const,
+				startedAt: new Date(now - 12 * 60 * 1000).toISOString(),
+				completedAt: new Date(now - 11 * 60 * 1000).toISOString(),
+			},
+		];
+		assert.equal(isDisplayActiveRun(run, agents, now), false, "11min-old block reason retires");
+	});
 });

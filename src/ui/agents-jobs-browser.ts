@@ -266,7 +266,9 @@ export class AgentsJobsBrowser {
 	/** Transient header notice (e.g. why `p` did nothing) — auto-expires. */
 	private notice: { text: string; until: number } | undefined;
 	private pollTimer: ReturnType<typeof setInterval> | undefined;
-	private readonly manifests = new Map<string, TeamRunManifest | null>();
+	/** Manifest reads, cached until the next force refresh (R5-3: misses are
+	 *  never stored — see manifestFor). */
+	private readonly manifests = new Map<string, TeamRunManifest>();
 	/** U7: committed-state caches (default data path only). */
 	private readonly manifestCache?: ManifestCache;
 	private readonly snapshotCache?: RunSnapshotCache;
@@ -361,6 +363,10 @@ export class AgentsJobsBrowser {
 
 	/** Reload the merged list when the TTL expired (or `force`). */
 	refreshData(force = false): void {
+		// R5-3 (DR-02 wave 2): a force refresh invalidates the manifest cache too
+		// — manifests used to live for the browser's whole lifetime, so a manifest
+		// created/renamed while the overlay was open never became visible.
+		if (force) this.manifests.clear();
 		const ttl = this.options.refreshTtlMs ?? REFRESH_TTL_MS_DEFAULT;
 		const at = this.nowMs();
 		if (!force && ttl > 0 && at - this.cachedAt < ttl) return;
@@ -519,16 +525,21 @@ export class AgentsJobsBrowser {
 	}
 
 	private manifestFor(runId: string): TeamRunManifest | null {
-		if (this.manifests.has(runId)) return this.manifests.get(runId) ?? null;
-		let manifest: TeamRunManifest | null = null;
+		const cached = this.manifests.get(runId);
+		if (cached) return cached;
+		// R5-3 (DR-02 wave 2): a miss (manifest not found / transient read
+		// failure — loadRunManifestById takes no run lock, so a read can race a
+		// write) is NEVER cached: returning null without touching the map makes
+		// the next call retry instead of pinning the miss for the overlay's
+		// lifetime. Successful loads still cache until the next force refresh.
 		try {
 			const loaded = loadRunManifestById(this.options.cwd, runId); // NOTE: no run lock — best-effort read, mirrors viewers.ts
-			manifest = loaded ? loaded.manifest : null;
+			if (!loaded) return null;
+			this.manifests.set(runId, loaded.manifest);
+			return loaded.manifest;
 		} catch {
-			manifest = null;
+			return null;
 		}
-		this.manifests.set(runId, manifest);
-		return manifest;
 	}
 
 	private recordFor(runId: string, taskId: string): CrewAgentRecord | undefined {
@@ -559,7 +570,10 @@ export class AgentsJobsBrowser {
 			return lines;
 		}
 		const record = entry.record ?? this.recordFor(entry.runId, entry.taskId);
-		const manifest = this.manifestFor(entry.runId);
+		// R5-3: prefer the FRESH entry.manifest the list pipeline already
+		// carries (re-read on every refresh tick) — manifestFor is the fallback
+		// for provider-based entries without one.
+		const manifest = entry.manifest ?? this.manifestFor(entry.runId);
 		if (!record || !manifest) {
 			return [
 				`▸ ${entry.taskId ?? "?"} (${entry.role ?? "?"})`,

@@ -23,6 +23,7 @@ import {
 } from "../../../src/ui/inline-panel/agent-transcript.ts";
 
 const TASK = "task_1";
+const RUN = "run_1";
 
 interface Fixture {
 	manifest: TeamRunManifest;
@@ -30,12 +31,12 @@ interface Fixture {
 	file: string;
 }
 
-function makeFixture(): Fixture {
+function makeFixture(runId: string = RUN): Fixture {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "crew-agent-transcript-test-"));
 	const agentsDir = path.join(dir, "agents", TASK);
 	fs.mkdirSync(agentsDir, { recursive: true });
 	const file = path.join(agentsDir, "events.jsonl");
-	const manifest = { stateRoot: dir, artifactsRoot: dir } as unknown as TeamRunManifest;
+	const manifest = { runId, stateRoot: dir, artifactsRoot: dir } as unknown as TeamRunManifest;
 	return { manifest, dir, file };
 }
 
@@ -305,21 +306,53 @@ test("cursor accumulator returns full history, capped at MAX", () => {
 	}
 });
 
-test("switch + teardown reset per-task state", () => {
+test("switch + teardown reset per-run::task state", () => {
 	const fixture = makeFixture();
 	try {
 		writeEvents(fixture, [{ type: "tool_execution_start", toolName: "read", args: {} }]);
 		readAgentTranscript(fixture.manifest, TASK);
-		assert.ok(__hasAgentTranscriptState(TASK), "state retained while the task is active");
+		assert.ok(__hasAgentTranscriptState(RUN, TASK), "state retained while the task is active");
 
-		resetAgentTranscriptCursor(TASK);
-		assert.ok(!__hasAgentTranscriptState(TASK), "switch clears the old task's state");
+		resetAgentTranscriptCursor(RUN, TASK);
+		assert.ok(!__hasAgentTranscriptState(RUN, TASK), "switch clears the old task's state");
 
 		// Re-reading replays from scratch (new cursor starts at 0).
 		const items = readAgentTranscript(fixture.manifest, TASK);
 		assert.equal(items.length, 1);
 	} finally {
 		cleanup(fixture);
+	}
+});
+
+test("F3: transcript state is keyed by run::task — the same task id in another run starts fresh", () => {
+	// Task ids are positional per run ("01_01-agent"), so the same name in a
+	// LATER run used to inherit the earlier run's cursor/buffer: its events
+	// were skipped as "already read" and the pane showed the OLD run's items.
+	const runA = makeFixture("run_a");
+	const runB = makeFixture("run_b");
+	try {
+		writeEvents(runA, [{ type: "tool_execution_start", toolName: "read", args: {} }]);
+		const fromA = readAgentTranscript(runA.manifest, TASK);
+		assert.equal(fromA.length, 1, "run A read its own event");
+
+		// Same task id, different run: B's log is empty — it must NOT see A's
+		// buffered item through the shared taskId key.
+		const fromB = readAgentTranscript(runB.manifest, TASK);
+		assert.equal(fromB.length, 0, "no stale cross-run buffer/cursor reuse");
+
+		// B's log grows and accumulates independently of A.
+		writeEvents(runB, [{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "B says hi" }] } }]);
+		const fromBLater = readAgentTranscript(runB.manifest, TASK);
+		assert.equal(fromBLater.length, 1);
+		assert.equal(fromBLater[0]?.type === "assistant" ? fromBLater[0].text : "", "B says hi");
+
+		// Resetting run A's state leaves run B's untouched (and vice versa).
+		resetAgentTranscriptCursor("run_a", TASK);
+		assert.ok(!__hasAgentTranscriptState("run_a", TASK), "A cleared");
+		assert.ok(__hasAgentTranscriptState("run_b", TASK), "B still holds its own state");
+	} finally {
+		cleanup(runA);
+		cleanup(runB);
 	}
 });
 

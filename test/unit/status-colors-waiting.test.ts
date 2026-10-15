@@ -23,3 +23,18 @@ describe("Status colors for waiting state", () => {
 		assert.equal(colorForStatus("something_else"), "dim");
 	});
 });
+
+describe("F4: planning joins the status palette (DR-02 wave 2)", () => {
+	it("planning is informational/dim — explicit, not default-by-luck", () => {
+		assert.equal(colorForStatus("planning"), "dim");
+	});
+
+	it("planning carries the dim-dot glyph from the colorize vocabulary", () => {
+		assert.equal(iconForStatus("planning"), "·");
+	});
+
+	it("blocked stays warning (parity with rail statusSlot)", () => {
+		assert.equal(colorForStatus("blocked"), "warning");
+		assert.equal(iconForStatus("blocked"), "⏸");
+	});
+});

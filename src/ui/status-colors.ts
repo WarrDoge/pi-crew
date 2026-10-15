@@ -19,6 +19,11 @@ export function colorForStatus(status: RunStatus): CrewThemeColor {
 			return "accent";
 		case "waiting":
 			return "muted";
+		// F4 (DR-02 wave 2): "planning" was missing from BOTH palettes — it
+		// fell through to this default, which was correct-by-luck but unsigned.
+		// Informational/dim, same tier as queued's default fall-through.
+		case "planning":
+			return "dim";
 		case "completed":
 			return "success";
 		case "failed":
@@ -52,6 +57,10 @@ export function iconForStatus(status: RunStatus, options?: { runningGlyph?: stri
 			return "⏳";
 		case "queued":
 			return "◦";
+		case "planning":
+			// F4: informational — the dim dot already used for unknown-but-known
+			// states; kept in the colorizeStatusGlyphs vocabulary (dim tier).
+			return "·";
 		case "blocked":
 			return "⏸";
 		case "needs_attention":

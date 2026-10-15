@@ -107,7 +107,12 @@ export function shortId(id: string | undefined): string {
 
 export type RailSlot = "border" | "borderAccent" | "success" | "error" | "warning";
 
-/** Status → rail colour. One mapping for every surface (was: per-surface maps). */
+/** Status → rail colour. One mapping for every surface (was: per-surface maps).
+ *  F4 (DR-02 wave 2): "blocked" joins the warning tier — parity with
+ *  status-colors.ts (colorForStatus("blocked") === "warning"), so the rail no
+ *  longer falls to the neutral border while the glyph next to it is painted
+ *  warning. "planning" stays in the default border tier (informational/dim —
+ *  same tier status-colors assigns it). */
 export function statusSlot(status: string | undefined): RailSlot {
 	switch (status) {
 		case "completed":
@@ -128,6 +133,7 @@ export function statusSlot(status: string | undefined): RailSlot {
 			return "borderAccent";
 		case "waiting":
 		case "needs_attention":
+		case "blocked":
 		case "stale":
 		case "pending":
 			return "warning";

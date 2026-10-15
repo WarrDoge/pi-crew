@@ -312,6 +312,47 @@ test("L4: the countdown reads the FIXED deadline (remaining shrinks) and stays i
 	}
 });
 
+test("F5: the countdown advances across UNCHANGED-state renders (coarse time bucket in the signature)", (t) => {
+	// Pre-fix: buildSignature only changes on state, so while NOTHING else
+	// moved the countdown line froze inside cachedLines ("3s…" until close).
+	// Post-fix: a per-second bucket joins the signature while the terminal
+	// countdown is armed, so each second re-renders the line.
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+	const { cwd, manifest, tasks } = setupRun("f5-countdown-fresh");
+	try {
+		const snapshot = buildSnapshot({ ...manifest, status: "completed" }, tasks, "sig-f5");
+		const { cache } = makeSnapshotCache(snapshot);
+		let closes = 0;
+		const sidebar = new LiveRunSidebar({
+			cwd,
+			runId: manifest.runId,
+			done: () => {
+				closes++;
+			},
+			config: { autoCloseDashboardMs: 3000 },
+			snapshotCache: cache,
+		});
+		const t0 = sidebar.render(80).map(stripAnsi);
+		assert.ok(
+			t0.some((l) => l.includes("auto-close in 3s…")),
+			`countdown armed at t=0, got: ${t0.join(" | ")}`,
+		);
+		// 1500ms pass with NO state change (same snapshot signature, no agents,
+		// no task moves) — the ONLY thing that moved is the clock.
+		t.mock.timers.tick(1500);
+		const t15 = sidebar.render(80).map(stripAnsi);
+		const row = t15.find((l) => l.includes("auto-close in"));
+		assert.ok(row?.includes("auto-close in 2s…"), `unchanged-state render must still advance the countdown (F5), got: ${row}`);
+		// And the close itself still lands on the FIXED deadline (L4 intact).
+		t.mock.timers.tick(1500);
+		assert.equal(closes, 1, "auto-close fires at the fixed deadline");
+		sidebar.dispose();
+	} finally {
+		t.mock.timers.reset();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("L4: leaving the terminal window cancels the deadline; re-entry captures a NEW one", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	const { cwd, manifest, tasks } = setupRun("l4-rearm");

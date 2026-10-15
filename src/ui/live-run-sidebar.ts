@@ -117,9 +117,10 @@ export class LiveRunSidebar {
 		agents: ReturnType<typeof readCrewAgents>,
 		waitingCount: number,
 		snapshot?: RunUiSnapshot,
+		countdownBucket = "",
 	): string {
 		const animation = agents.some((agent) => agent.status === "running") ? `:spin=${spinnerBucket()}` : "";
-		if (snapshot) return `${snapshot.signature}:${waitingCount}${animation}`;
+		if (snapshot) return `${snapshot.signature}:${waitingCount}${animation}${countdownBucket}`;
 		const taskSig = tasks
 			.map(
 				(task) =>
@@ -143,7 +144,17 @@ export class LiveRunSidebar {
 				].join(":"),
 			)
 			.join("|");
-		return `${manifestStatus}|${agents.length}|${waitingCount}|${taskSig}|${agentSig}${animation}`;
+		return `${manifestStatus}|${agents.length}|${waitingCount}|${taskSig}|${agentSig}${animation}${countdownBucket}`;
+	}
+
+	/** F5 (DR-02 wave 2): while the terminal auto-close countdown is armed, a
+	 *  coarse per-second bucket joins the render signature — the base signature
+	 *  only changes on state, so the countdown line used to freeze inside
+	 *  cachedLines until some OTHER state changed. The close timer itself is
+	 *  untouched (L4 fixed-deadline semantics stay exactly as they were). */
+	private autoCloseSignatureFragment(): string {
+		if (this.hasAutoClosed || this.autoCloseDeadline === undefined) return "";
+		return `:close=${Math.ceil(Math.max(0, this.autoCloseDeadline - Date.now()) / 1000)}`;
 	}
 
 	private colorLine(line: string): string {
@@ -231,7 +242,7 @@ export class LiveRunSidebar {
 		const active = agents.filter((agent) => agent.status === "running");
 		const completed = agents.filter((agent) => agent.status !== "running").slice(-5);
 		const waiting = tasks.filter((task) => task.status === "queued");
-		const signature = this.buildSignature(run.updatedAt, tasks, agents, waiting.length, snapshot);
+		const signature = this.buildSignature(run.updatedAt, tasks, agents, waiting.length, snapshot, this.autoCloseSignatureFragment());
 		if (signature !== this.cachedSignature || w !== this.cachedWidth) {
 			// RAIL (§2.E): the rounded `╭─╮│╰─╯` box is retired — the surface is a
 			// `┏ LIVE ▸ <run8>` canopy, `┃` body rows, `┣ SECTION` headers and a

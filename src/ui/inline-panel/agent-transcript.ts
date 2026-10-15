@@ -13,8 +13,8 @@
  * detached spawner, so a memory feed would show an empty pane for exactly the
  * runs users background. Disk works for both with one parser.
  *
- * Per task, a module-level ring buffer accumulates parsed items across reads
- * (cursor + persisted parse state), mirroring pi-subtask's `fork.transcript`.
+ * Per run::task (F3), a module-level ring buffer accumulates parsed items across
+ * reads (cursor + persisted parse state), mirroring pi-subtask's `fork.transcript`.
  * This matters for two reasons the naive delta-read gets wrong:
  *  - tool `start`/`end` events can straddle a read boundary, so the
  *    unmatched-start map must survive between reads;
@@ -83,12 +83,19 @@ export type CrewTranscriptItem =
 
 type PendingTool = CrewTranscriptItem & { type: "tool" };
 
-/** Per-task parse state, persisted across reads. */
+/** Per-run::task parse state, persisted across reads (F3: keyed by run —
+ *  task ids are positional per run, so a taskId-only key would let the same
+ *  task name in a LATER run reuse the earlier run's cursor/buffer). */
 const buffers = new Map<string, CrewTranscriptItem[]>();
 const pendingByTask = new Map<string, Map<string, PendingTool>>();
 const cursors = new Map<string, number>();
-/** Tasks whose worker prompt has been prepended to the buffer. */
+/** Run::task keys whose worker prompt has been prepended to the buffer. */
 const promptSeeded = new Set<string>();
+
+/** F3 (DR-02 wave 2): module-state key — `${runId}::${taskId}`. */
+function transcriptStateKey(runId: string | undefined, taskId: string): string {
+	return `${runId ?? ""}::${taskId}`;
+}
 
 /**
  * The child pi never logs its INITIAL user message (input is not an event),
@@ -287,14 +294,15 @@ function matchPending(
  * cursor skips re-parse and the existing buffer is returned as-is.
  */
 export function readAgentTranscript(manifest: TeamRunManifest, taskId: string): CrewTranscriptItem[] {
-	const sinceSeq = cursors.get(taskId) ?? 0;
+	const key = transcriptStateKey(manifest.runId, taskId);
+	const sinceSeq = cursors.get(key) ?? 0;
 	const { events, nextSeq } = readCrewAgentEventsCursor(manifest, taskId, { sinceSeq });
-	if (nextSeq > sinceSeq) cursors.set(taskId, nextSeq);
+	if (nextSeq > sinceSeq) cursors.set(key, nextSeq);
 
-	let buffer = buffers.get(taskId) ?? [];
+	let buffer = buffers.get(key) ?? [];
 	if (events.length > 0) {
-		const pending = pendingByTask.get(taskId) ?? new Map<string, PendingTool>();
-		pendingByTask.set(taskId, pending);
+		const pending = pendingByTask.get(key) ?? new Map<string, PendingTool>();
+		pendingByTask.set(key, pending);
 
 		for (const record of events) {
 			const parsed = asRecord(record);
@@ -302,26 +310,29 @@ export function readAgentTranscript(manifest: TeamRunManifest, taskId: string): 
 			buffer.push(...parseEventRecord(parsed, pending));
 		}
 	}
-	if (buffer.length > 0 && !promptSeeded.has(taskId)) {
+	if (buffer.length > 0 && !promptSeeded.has(key)) {
 		const prompt = readWorkerPrompt(manifest, taskId);
 		if (prompt !== undefined) {
-			promptSeeded.add(taskId);
+			promptSeeded.add(key);
 			buffer.unshift({ type: "user", text: prompt, seq: 0 });
 		}
 	}
 	if (buffer.length > MAX_TRANSCRIPT_ITEMS) {
 		buffer = buffer.slice(buffer.length - MAX_TRANSCRIPT_ITEMS);
 	}
-	buffers.set(taskId, buffer);
+	buffers.set(key, buffer);
 	return buffer;
 }
 
-/** Drop everything learned about a task (used when the pane switches agents). */
-export function resetAgentTranscriptCursor(taskId: string): void {
-	cursors.delete(taskId);
-	buffers.delete(taskId);
-	pendingByTask.delete(taskId);
-	promptSeeded.delete(taskId);
+/** Drop everything learned about a run's task (used when the pane switches
+ *  agents or runs — F3: scoped to the run so switching runs never leaves the
+ *  old run's ring buffer reachable under the new one's key). */
+export function resetAgentTranscriptCursor(runId: string, taskId: string): void {
+	const key = transcriptStateKey(runId, taskId);
+	cursors.delete(key);
+	buffers.delete(key);
+	pendingByTask.delete(key);
+	promptSeeded.delete(key);
 }
 
 /** Clear all per-task state (session teardown / test isolation). */
@@ -332,7 +343,8 @@ export function resetAllAgentTranscriptCursors(): void {
 	promptSeeded.clear();
 }
 
-/** Test-only: whether the module currently holds state for a task. */
-export function __hasAgentTranscriptState(taskId: string): boolean {
-	return buffers.has(taskId) || cursors.has(taskId) || pendingByTask.has(taskId);
+/** Test-only: whether the module currently holds state for a run's task. */
+export function __hasAgentTranscriptState(runId: string, taskId: string): boolean {
+	const key = transcriptStateKey(runId, taskId);
+	return buffers.has(key) || cursors.has(key) || pendingByTask.has(key);
 }

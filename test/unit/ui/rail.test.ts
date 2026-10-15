@@ -107,7 +107,9 @@ test("statusSlot / statusBadge / statusIcon: one status mapping for every surfac
 	assert.equal(statusSlot("cancelled"), "error");
 	assert.equal(statusSlot("running"), "borderAccent");
 	assert.equal(statusSlot("waiting"), "warning");
+	assert.equal(statusSlot("blocked"), "warning", "F4: blocked aligns with status-colors (warning), not the neutral default");
 	assert.equal(statusSlot("queued"), "border");
+	assert.equal(statusSlot("planning"), "border", "F4: planning is informational — same neutral tier as status-colors' dim");
 	assert.equal(strip(statusBadge("completed", theme)), "●");
 	assert.equal(strip(statusBadge("failed", theme)), "✖");
 	assert.equal(strip(statusBadge("running", theme)), "◉");
