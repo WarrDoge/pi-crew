@@ -87,3 +87,80 @@ P1: R4-2 compaction race (design spec), R4-4, R4-5, R4-6/7, R5-3..7. P2/P3 per r
 - WI-3: DONE — pickup/durable-ack split: `pollWorkerInbox(pickup, limit)` picks+seen-adds up to limit (R5-2); `acknowledgeWorkerInboxDelivery` called by pollInbox ONLY after pi.sendMessage succeeds; send-throw → `unmarkSeenInboxIds` + warn (mirrors steer F-L2); registration-time poll tolerates throw by construction. U5 restart pins updated to two-phase contract, exactly-once preserved. Tests: +3 new, 12/12 + dedup 7/7 + adjacent 15/15.
 
 Gates (lead, 2026-10-15): tsc ✓ · targeted 42/42 ✓ · ci:fast exit 0 (16 gates, post-rebuild) ✓ · full unit **9201 tests / 9198 pass / 0 fail / 3 pre-existing skips** (+15 tests) ✓ · bundle rebuilt ✓.
+
+---
+
+# Wave 2 — P1 + P2/P3 (2026-10-15, base 8a40cc6e)
+
+## Clusters (file-disjoint, one executor each)
+
+### Cluster A — R4-2 events.jsonl compaction race (P1, design decided by lead)
+DESIGN: mutual exclusion, NOT archive-style. Async appends hold `.alock` across the
+open→appendFile await gap (event-log.ts:606-610); the orphaned-fd loss happens because compaction's
+rename (event-log-rotation.ts:299 atomicWriteFile) runs under `.mkdirlock` only. Fix: compaction
+additionally acquires `.alock` in SYNC mode (mkdirSync O_EXCL — same lock-dir protocol, cross-process
+compatible with the async acquirer) BEFORE readTailSince+rename, releases after C2 check. Lock order is
+strictly mkdirlock→alock (async family never takes mkdirlock — verify by reading event-log.ts), so no
+deadlock; reuse the stale-reclaim (mtime+pid) machinery pattern from the existing locks. C2 recovery
+unchanged.
+
+### Cluster B — R4-4 needs_attention at finalize + R4-5 verify-decorative surfacing + B4 fail-closed
+- R4-4 (detection-first, no status flip): finalize-run.ts — when no failed/waiting/running/queued but
+  ≥1 needs_attention, summary must state it ("Team workflow completed with N task(s) needing attention
+  (no result submitted)."); policy-engine.ts adds a NON-blocking notify block listing them.
+- R4-5 (surface, don't false-fail): green-contract.ts inferGreenLevelFromTask — when required level
+  ≠none but contract.commands empty → keep satisfied logic BUT stamp evidence notes
+  "self-attested (no verification commands configured)" and expose a `decorative: true` flag consumed
+  by post-execution.ts evidence builder; progress-line note optional. Do NOT change
+  defaultVerificationContract defaults.
+- B4 (post-execution.ts:431-478 catch): fail-closed — on verification-execution throw, when
+  requiredGreenLevel ≠ "none": evidence becomes {satisfied:false, observed:"none", notes:
+  "Verification execution failed (fail-closed): ..."}. Level none → unchanged.
+
+### Cluster C — R4-6/R4-7/D5 unlocked tasks.json RMW → withRunLockSync + fresh reload
+- run-action-dispatcher.ts:125,141 (kill-stale): wrap load→map→save in withRunLockSync with fresh
+  re-read inside the lock (canonical pattern: heartbeat.ts:33-40). Keep best-effort semantics on lock
+  timeout (skip + warn, do NOT block UI on contention).
+- async-notifier.ts:73-92 (async-died): same wrap; preserve per-task terminal guard if present.
+- goal-loop-runner.ts:757 (post-turn saveRunTasks): fresh reload + merge (or lock) — do not clobber
+  newer heartbeat/claim/delegate fields; merge turn's task fields onto freshly-read tasks.
+
+### Cluster D — UI/surface: R5-3, R5-4, F3, F4, F5
+- R5-3 agents-jobs-browser.ts:521: clear this.manifests on refreshData(true); do NOT cache null
+  permanently (retry next open); prefer entry.manifest in detailLinesFor when fresh.
+- R5-4 process-status.ts:141-149: add "blocked" to the ERROR-grace branch (10min linger). Update
+  pinned fixtures.
+- F3 agent-transcript.ts:87-91: key module maps by `${runId}::${taskId}`; agent-pane.ts:299 switch
+  guard compares runId too; update __hasAgentTranscriptState seam consumers/tests.
+- F4 rail.ts:111-133: add `case "blocked"` (warning slot); status-colors.ts: add "planning" mapping
+  (dim/informational) — align both vocabularies.
+- F5 live-run-sidebar.ts:352-364: countdown line must not freeze — include a coarse time bucket
+  (e.g. ceil(remaining/1000)) in the cached signature fragment while terminal countdown active.
+
+### Cluster E — prompt/budget: R5-5, R5-6, R5-7, G6, G7
+- R5-5 task-output-context.ts applyHandoffBudget (:723-742): failed/needs-attention deps get the same
+  +1000 priority the 96KB layer uses (enforceDependencyInlineBudget :337-347); compact-form head
+  (budgetTrimmedDependencyEntryLines :674) runs through important-line preservation (reuse
+  important-line-classifier) so error lines from ANYWHERE in the summary survive the 240-char head.
+  Status line + pointer stay.
+- R5-6 steer reject-drop: send-side clamp — find where leader writes steering (rg steer.*write /
+  appendSteering in src) and clamp body to MAX_STEER_MESSAGE_LENGTH with a truncation marker
+  (mirror renderInboxMessage's 8192 marker pattern); receiver keeps its validation as backstop.
+- R5-7 estimateHandoffTokens (task-output-context.ts:575) + dynamic-workflow-context.ts:361 reserve:
+  switch to utils/token-counter.ts countTokens (in-tree, CJK-safe; Vietnamese diacritics already
+  over-estimate safely — keep max(heuristic, measured) anchor semantics).
+- G6 (:337-347 L4 downgrade): render "[result withheld by inline budget — see artifact path above]"
+  instead of falling into "(no result output)".
+- G7 task-packet.ts sanitizeTaskText: keep existing markers; when any redaction fired, append ONE
+  trailing note to the packet objective: "(N security redaction(s) applied — rephrase constraints to
+  avoid trigger patterns if this removed intended meaning)". Count = per-rule hits.
+
+### Cluster F — micro-hardening: E1, E2, C1, C2, C3, D6
+- E1 run-coalesced-task-group.ts:148-153: logInternalError in the repair catch (status-stale visibility).
+- E2 scratchpad/engine.ts:354-359: logInternalError warn on final-snapshot failure before kill.
+- C1 live-session-runtime.ts:1409 seenControlRequestIds: cap 10_000 FIFO (delete first added).
+- C2 usage-tracker.ts:71 taskUsageMap: cap 5_000 FIFO eviction (consistent with sibling caps).
+- C3 delivery-coordinator.ts:217 pending: MAX 1000 + drop-oldest + warn log (TTL stays).
+- D6 crew-agent-records.ts:687 writeSeqToSidecar: tmp+rename atomic write (reuse atomicWriteFile).
+
+## Wave-2 gates: same as wave 1 (tsc, targeted, ci:fast, full unit, bundle) — run by lead.
