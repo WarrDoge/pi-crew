@@ -104,6 +104,24 @@ export function evaluateCrewPolicy(input: PolicyEngineInput): PolicyDecision[] {
 		}
 	}
 
+	// R4-4 (DR-02 wave 2): needs_attention is a TERMINAL-without-result status
+	// (surface-lost / no-yield paths in post-execution) and the scheduler counts
+	// it as done, so a run can otherwise complete green while a task never
+	// submitted its result. Surface it as a NON-blocking notify decision —
+	// detection-first: no status flip, no block, no retry (re-queue/recovery is
+	// owned by the surface-degrade drain machinery, not the policy engine).
+	const needsAttentionTasks = input.tasks.filter((t) => t.status === "needs_attention");
+	if (needsAttentionTasks.length > 0) {
+		const ids = needsAttentionTasks.map((t) => t.id).join(", ");
+		decisions.push(
+			decision(
+				"notify",
+				"task_needs_attention",
+				`${needsAttentionTasks.length} task(s) finished needs_attention without submitting a result: ${ids}.`,
+			),
+		);
+	}
+
 	if (decisions.length === 0 && input.tasks.length > 0 && input.tasks.every((task) => task.status === "completed")) {
 		decisions.push(decision("closeout", "run_complete", "All tasks completed and no policy blockers were found."));
 	}

@@ -345,3 +345,36 @@ test("maxTaskDepth: parentId cycles do not hang and still measure depth", () => 
 	assert.equal(depthDecisions.length, 2, "cycle walk terminates and reports both tasks");
 	assert.deepEqual(depthDecisions.map((d) => d.taskId).sort(), ["a", "b"]);
 });
+
+// ─── R4-4 (DR-02 wave 2): needs_attention non-blocking notify ──────
+
+test("R4-4: needs_attention task → exactly one notify (task_needs_attention) listing the ids, no block/escalate", () => {
+	const decisions = decide({
+		tasks: [task({ id: "t_na", status: "needs_attention" }), task({ id: "t_ok", status: "completed" })],
+	});
+	const notify = decisions.filter((d) => d.action === "notify" && d.reason === "task_needs_attention");
+	assert.equal(notify.length, 1, `one task_needs_attention notify, got: ${JSON.stringify(decisions)}`);
+	assert.ok(notify[0]!.message.includes("t_na"), "notify lists the needs_attention task id");
+	assert.ok(!notify[0]!.message.includes("t_ok"), "completed task id is not listed");
+	// Detection-first: the notify is NON-blocking.
+	assert.ok(!decisions.some((d) => d.action === "block" || d.action === "escalate" || d.action === "fail"));
+	// And it suppresses the all-completed closeout (the run is not all-green).
+	assert.ok(!decisions.some((d) => d.action === "closeout"));
+});
+
+test("R4-4: all-green run → closeout only, no task_needs_attention notify", () => {
+	const decisions = decide({ tasks: [task({ id: "t1", status: "completed" })] });
+	assert.equal(decisions.length, 1);
+	assert.equal(decisions[0]?.action, "closeout");
+	assert.ok(!decisions.some((d) => d.reason === "task_needs_attention"));
+});
+
+test("R4-4: needs_attention coexists with a task_failed escalate (both surface, statuses independent)", () => {
+	const decisions = decide({
+		tasks: [task({ id: "t_failed", status: "failed" }), task({ id: "t_na", status: "needs_attention" })],
+	});
+	const escalate = decisions.filter((d) => d.action === "escalate" && d.reason === "task_failed");
+	assert.equal(escalate.length, 1, "failed task still escalates");
+	const notify = decisions.filter((d) => d.action === "notify" && d.reason === "task_needs_attention");
+	assert.equal(notify.length, 1, "needs_attention notify also present");
+});

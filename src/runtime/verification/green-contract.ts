@@ -33,6 +33,18 @@ export function inferGreenLevelFromTask(success: boolean, contract: Verification
 	return contract.allowManualEvidence ? contract.requiredGreenLevel : "targeted";
 }
 
+/** R4-5 (DR-02 wave 2): true when the contract REQUIRES a green level but
+ *  configures zero verification commands — the default contract shape for
+ *  every `verify: true` step (task-packet defaultVerificationContract).
+ *  With no commands to run, satisfaction can only ever come from
+ *  self-attestation (allowManualEvidence → inferGreenLevelFromTask returns
+ *  the required level), which silently reports e.g. "targeted/targeted".
+ *  Surface that as `decorative: true` on the evidence instead of changing
+ *  the satisfied logic or the defaults (detection-first, no behavior flip). */
+export function isDecorativeVerification(contract: VerificationContract): boolean {
+	return contract.requiredGreenLevel !== "none" && contract.commands.length === 0;
+}
+
 export function createVerificationEvidence(contract: VerificationContract, success: boolean, notes: string): VerificationEvidence {
 	const observedGreenLevel = inferGreenLevelFromTask(success, contract);
 	const outcome = evaluateGreenContract(contract, {
@@ -42,6 +54,10 @@ export function createVerificationEvidence(contract: VerificationContract, succe
 		commands: [],
 		notes,
 	});
+	// R4-5: stamp the decorative flag so consumers (post-execution evidence
+	// builder, policy engine, UI) can tell self-attested satisfaction from
+	// command-backed satisfaction. Satisfied logic is untouched.
+	const decorative = isDecorativeVerification(contract);
 	return {
 		requiredGreenLevel: contract.requiredGreenLevel,
 		observedGreenLevel,
@@ -51,5 +67,6 @@ export function createVerificationEvidence(contract: VerificationContract, succe
 			status: "not_run" as const,
 		})),
 		notes,
+		...(decorative ? { decorative: true } : {}),
 	};
 }

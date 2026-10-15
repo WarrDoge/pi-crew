@@ -439,9 +439,20 @@ export async function finalizeRun(ctx: SchedulerContext): Promise<{ manifest: Te
 		// (No updateRunStatus call: from===to is a no-op, but the intent here is
 		// explicitly "leave the earlier decision intact".)
 	} else {
+		// R4-4 (DR-02 wave 2): needs_attention is terminal-without-result and the
+		// scheduler counts it as done, so the run still COMPLETES — but the green
+		// "Team workflow completed." summary must not hide that a task's result
+		// was never submitted. Detection-first surfacing only: status stays
+		// "completed" (no flip, no block); the policy engine emits a matching
+		// non-blocking notify decision listing the task ids.
+		const needsAttentionCount = tasks.filter((task) => task.status === "needs_attention").length;
 		manifest = applyStatusInMemory(
 			"completed",
-			input.executeWorkers ? "Team workflow completed." : "Team workflow scaffold completed without launching child workers.",
+			needsAttentionCount > 0
+				? `Team workflow completed with ${needsAttentionCount} task(s) needing attention (no result submitted).`
+				: input.executeWorkers
+					? "Team workflow completed."
+					: "Team workflow scaffold completed without launching child workers.",
 		);
 	}
 	manifest = writeProgress(manifest, tasks, "team-runner", input.executeWorkers, input.runtimeConfig);

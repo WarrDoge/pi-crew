@@ -43,6 +43,11 @@ export interface VerificationEvidence {
 	satisfied: boolean;
 	commands: VerificationCommandResult[];
 	notes?: string;
+	/** R4-5 (DR-02 wave 2): true when the contract REQUIRES a green level but
+	 *  configures zero verification commands — satisfaction can then only come
+	 *  from self-attestation (allowManualEvidence). Surfacing flag only: the
+	 *  satisfied logic and defaultVerificationContract are unchanged. */
+	decorative?: boolean;
 }
 
 export interface TaskOutputSchema {
@@ -162,7 +167,10 @@ export type PolicyDecisionReason =
 	| "review_rejected"
 	| "branch_stale"
 	| "scope_mismatch"
-	| "ineffective_worker";
+	| "ineffective_worker"
+	/** R4-4 (DR-02 wave 2): task terminalised needs_attention without ever
+	 *  submitting a result (surface-lost / no-yield paths). Notify-level only. */
+	| "task_needs_attention";
 
 export interface PolicyDecision {
 	action: PolicyDecisionAction;

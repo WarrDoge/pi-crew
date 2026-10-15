@@ -130,3 +130,39 @@ test("createVerificationEvidence: creates evidence from failure", () => {
 	assert.equal(evidence.satisfied, false);
 	assert.equal(evidence.notes, "tests failed");
 });
+
+// ─── R4-5 (DR-02 wave 2): decorative verification surfacing ───────────────
+
+test("R4-5: required level ≠ none + zero commands → evidence stamped decorative:true (satisfied logic unchanged)", () => {
+	// Exact shape of defaultVerificationContract(verify:true) — commands stay
+	// empty by default (defaults UNTOUCHED by the fix).
+	const contract: VerificationContract = {
+		requiredGreenLevel: "targeted",
+		commands: [],
+		allowManualEvidence: true,
+	};
+	const evidence = createVerificationEvidence(contract, true, "child-process worker finished without reporting a verification failure.");
+	assert.equal(evidence.decorative, true, "decorative contract must be stamped");
+	// Surface, don't false-fail: self-attested satisfaction is unchanged.
+	assert.equal(evidence.satisfied, true);
+	assert.equal(evidence.observedGreenLevel, "targeted");
+});
+
+test("R4-5: contract with commands → NO decorative flag", () => {
+	const evidence = createVerificationEvidence(BASE_CONTRACT, true, "all tests pass");
+	assert.equal(evidence.decorative, undefined);
+});
+
+test("R4-5: level none with zero commands → NOT decorative (nothing required)", () => {
+	const contract: VerificationContract = { requiredGreenLevel: "none", commands: [], allowManualEvidence: true };
+	const evidence = createVerificationEvidence(contract, true, "note");
+	assert.equal(evidence.decorative, undefined);
+});
+
+test("R4-5: failed run on a decorative contract → flag still stamped (contract shape, not outcome)", () => {
+	const contract: VerificationContract = { requiredGreenLevel: "targeted", commands: [], allowManualEvidence: true };
+	const evidence = createVerificationEvidence(contract, false, "Task failed: x");
+	assert.equal(evidence.decorative, true);
+	assert.equal(evidence.satisfied, false);
+	assert.equal(evidence.observedGreenLevel, "none");
+});

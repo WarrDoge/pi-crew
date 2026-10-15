@@ -424,12 +424,23 @@ export async function finalizeTaskResult(ctx: TaskExecutionContext, execResult: 
 				? "Safe scaffold mode; verification commands were not executed."
 				: `${runtimeKind} worker finished without reporting a verification failure.`,
 	);
+	// R4-5 (DR-02 wave 2): decorative contract — required green level but zero
+	// verification commands — means satisfaction is purely self-attested. The
+	// `decorative` flag is stamped by createVerificationEvidence; surface it in
+	// the notes too so the evidence artifact reads honestly WITHOUT changing
+	// the satisfied logic or defaultVerificationContract defaults.
+	const seededEvidence: VerificationEvidence = baseEvidence.decorative
+		? {
+				...baseEvidence,
+				notes: `${baseEvidence.notes ?? ""} — self-attested (no verification commands configured)`,
+			}
+		: baseEvidence;
 
 	// Only execute verification commands when:
 	// 1. Task completed successfully (no error)
 	// 2. Verification contract has commands
 	// 3. Not in scaffold mode (scaffold mode intentionally skips execution)
-	let verificationEvidence: VerificationEvidence = baseEvidence;
+	let verificationEvidence: VerificationEvidence = seededEvidence;
 	if (runtimeKind !== "scaffold" && taskPacket.verification?.commands?.length) {
 		try {
 			const commandResults = await executeVerificationCommands(
@@ -470,11 +481,20 @@ export async function finalizeTaskResult(ctx: TaskExecutionContext, execResult: 
 					: `${failedCount}/${commandResults.length} verification commands failed`,
 			};
 		} catch (execError) {
-			// On execution error, return base evidence with error note
-			verificationEvidence = {
-				...baseEvidence,
-				notes: `Verification execution failed: ${execError instanceof Error ? execError.message : String(execError)}`,
-			};
+			// B4 (DR-02 wave 2): verification execution THREW — fail CLOSED instead of
+			// keeping the self-attested baseEvidence (satisfied=true via manual
+			// evidence), which used to green-light a task whose verification never
+			// ran. Only contracts that require a green level flip to unsatisfied;
+			// level "none" has nothing to gate, so baseEvidence stays untouched.
+			if (taskPacket.verification && taskPacket.verification.requiredGreenLevel !== "none") {
+				const message = execError instanceof Error ? execError.message : String(execError);
+				verificationEvidence = {
+					...seededEvidence,
+					satisfied: false,
+					observedGreenLevel: "none",
+					notes: `Verification execution failed (fail-closed): ${message}`,
+				};
+			}
 		}
 	}
 
