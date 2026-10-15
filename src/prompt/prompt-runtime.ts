@@ -32,12 +32,30 @@ const DATE_HEADER = "\nCurrent date:";
 // ── FIX-02: Steering content sanitization limits ──────────────────────────
 // Bounded to keep a malformed/malicious steer entry from blowing up the
 // worker's prompt budget or smuggling control sequences into the agent.
-const MAX_STEER_MESSAGE_LENGTH = 4096;
+export const MAX_STEER_MESSAGE_LENGTH = 4096;
 const MAX_STEER_MESSAGE_NEWLINES = 50;
 // C0 control characters minus the printable whitespace (\t \n \r). These
 // are the bytes most useful for ANSI escapes, terminal-control tricks, and
 // NUL-injection attacks when steer content reaches the worker's UI.
 const STEER_CONTROL_CHAR_PATTERN = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
+
+/** R5-6 (DR-02 round-5): truncation marker for oversized steer bodies —
+ *  mirrors renderInboxMessage's 8192-char marker pattern below. The clamp
+ *  slices so the FINAL message (slice + marker) stays ≤
+ *  {@link MAX_STEER_MESSAGE_LENGTH}, keeping the receiver's length invariant
+ *  honest. */
+const STEER_TRUNCATION_MARKER = `\n[message truncated at ${MAX_STEER_MESSAGE_LENGTH} chars]`;
+
+/** R5-6 (DR-02 round-5): clamp a steer body to
+ *  {@link MAX_STEER_MESSAGE_LENGTH} with a truncation marker. The send side
+ *  (team-tool handleSteer) clamps at dispatch; this helper is the receiver's
+ *  clean seam — every delivery path (file poll AND broker push) funnels
+ *  through `sanitizeSteerMessage`, so an oversized steer from ANY writer is
+ *  delivered truncated-with-marker instead of rejected-and-dropped. */
+export function clampSteerMessage(message: string): string {
+	if (message.length <= MAX_STEER_MESSAGE_LENGTH) return message;
+	return `${message.slice(0, MAX_STEER_MESSAGE_LENGTH - STEER_TRUNCATION_MARKER.length)}${STEER_TRUNCATION_MARKER}`;
+}
 
 export interface SteerSanitizeResult {
 	valid: boolean;
@@ -118,25 +136,28 @@ export function createSeenSteerIdSet(): {
 
 /**
  * Validate a single steering-file entry before forwarding it to
- * `pi.sendMessage`. FIX-02: reject oversized payloads, excessive newlines,
- * or control characters that could be used to confuse the worker UI.
- */
+ * `pi.sendMessage`. FIX-02: reject excessive newlines or control characters
+ * that could be used to confuse the worker UI. R5-6 (DR-02 round-5): an
+ * OVERSIZED payload (>4096 chars) is no longer rejected-and-dropped — the
+ * rejection was terminal (the poll cursor advanced past the line, warn-only)
+ * and the send side had no clamp, so a leader steer over the limit silently
+ * vanished. It is now truncated-with-marker ({@link clampSteerMessage}) and
+ * delivered; the newline/control-char rejections remain terminal (different
+ * failure modes — UI confusion / escape smuggling, not length). */
 export function sanitizeSteerMessage(entry: SteerEntry): SteerSanitizeResult {
 	const message = entry.message;
 	if (typeof message !== "string" || message.length === 0) {
 		return { valid: false, reason: "missing-or-empty-message" };
 	}
-	if (message.length > MAX_STEER_MESSAGE_LENGTH) {
-		return { valid: false, reason: `message-too-long:${message.length}` };
-	}
-	const newlineCount = (message.match(/\n/g) ?? []).length;
+	const clamped = clampSteerMessage(message);
+	const newlineCount = (clamped.match(/\n/g) ?? []).length;
 	if (newlineCount > MAX_STEER_MESSAGE_NEWLINES) {
 		return { valid: false, reason: `too-many-newlines:${newlineCount}` };
 	}
-	if (STEER_CONTROL_CHAR_PATTERN.test(message)) {
+	if (STEER_CONTROL_CHAR_PATTERN.test(clamped)) {
 		return { valid: false, reason: "contains-control-characters" };
 	}
-	return { valid: true, message };
+	return { valid: true, message: clamped };
 }
 
 // ── FIX-03: Steering file path containment validation ─────────────────────

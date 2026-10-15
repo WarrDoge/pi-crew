@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { DependencyContextEntry } from "../../../../src/runtime/task-output-context.ts";
-import { enforceDependencyInlineBudget, MAX_TOTAL_DEP_INLINE_BYTES } from "../../../../src/runtime/task-output-context.ts";
+import {
+	enforceDependencyInlineBudget,
+	MAX_TOTAL_DEP_INLINE_BYTES,
+	renderDependencyOutputContext,
+} from "../../../../src/runtime/task-output-context.ts";
 
 /**
  * L4 total-budget: trims the inline `resultSummary` of low-priority
@@ -36,6 +40,63 @@ function makeDep(overrides: Partial<DependencyContextEntry> & { taskId: string }
 describe("MAX_TOTAL_DEP_INLINE_BYTES constant", () => {
 	it("is 96_000 (3x per-dep cap)", () => {
 		assert.equal(MAX_TOTAL_DEP_INLINE_BYTES, 96_000);
+	});
+});
+
+describe("G6 (DR-02 round-5): path-only downgrade renders a withheld marker, not the (no result output) lie", () => {
+	it("enforceDependencyInlineBudget flags downgraded deps with resultWithheldByBudget", () => {
+		const deps = [
+			makeDep({ taskId: "d1", relevance: 1.0, resultPath: "/a/r.txt" }),
+			makeDep({ taskId: "d2", relevance: 0.9, resultPath: "/b/r.txt" }),
+			makeDep({ taskId: "d3", relevance: 0.8, resultPath: "/c/r.txt" }),
+			makeDep({ taskId: "d4", relevance: 0.7, resultPath: "/d/r.txt" }),
+			makeDep({ taskId: "d5", relevance: 0.6, resultPath: "/e/r.txt" }),
+		];
+		const out = enforceDependencyInlineBudget(deps);
+		for (const dep of out) {
+			if ((dep.inlineBytes ?? 0) === 0) {
+				assert.equal(dep.resultWithheldByBudget, true, `downgraded ${dep.taskId} must carry the flag`);
+			} else {
+				assert.equal(dep.resultWithheldByBudget, undefined, `kept ${dep.taskId} must not carry the flag`);
+			}
+		}
+	});
+
+	it("full-form render says the output was withheld by the inline budget (output exists on disk)", () => {
+		const l4downgraded = makeDep({
+			taskId: "d-l4",
+			resultSummary: "",
+			inlineBytes: 0,
+			resultWithheldByBudget: true,
+			resultPath: "/artifacts/run-g6/results/d-l4.txt",
+		});
+		const out = renderDependencyOutputContext({ dependencies: [l4downgraded], sharedReads: [] }, { budgetTokens: 0 });
+		assert.ok(out.includes("[result withheld by inline budget — see artifact path above]"), "withheld marker rendered");
+		assert.ok(!out.includes("(no result output)"), "the false empty-output lie is gone");
+		assert.ok(out.includes("Result artifact: /artifacts/run-g6/results/d-l4.txt"), "artifact pointer kept");
+	});
+
+	it("compact (budget-trimmed) form of an L4-downgraded dep uses the below-pointer variant", () => {
+		const l4downgraded = makeDep({
+			taskId: "d-l4",
+			resultSummary: "",
+			inlineBytes: 0,
+			resultWithheldByBudget: true,
+			resultPath: "/artifacts/run-g6c/results/d-l4.txt",
+		});
+		const out = renderDependencyOutputContext(
+			{ dependencies: [l4downgraded], sharedReads: [], runId: "run-g6c" },
+			{ budgetTokens: 10 },
+		);
+		assert.ok(out.includes("[result withheld by inline budget — see full output path below]"), "compact withheld marker");
+		assert.ok(!out.includes("(no result output)"), "no false lie in the compact form either");
+		assert.ok(out.includes("full output: artifacts/run-g6c/results/d-l4.txt"), "pointer below the marker");
+	});
+
+	it("a genuinely empty summary (no L4 downgrade flag) still renders (no result output)", () => {
+		const emptyDep = makeDep({ taskId: "d-empty", resultSummary: "" });
+		const out = renderDependencyOutputContext({ dependencies: [emptyDep], sharedReads: [] }, { budgetTokens: 0 });
+		assert.ok(out.includes("(no result output)"), "no flag → the empty-output wording is correct, not a lie");
 	});
 });
 

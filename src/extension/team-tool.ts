@@ -954,11 +954,33 @@ export async function handleResume(params: TeamToolParamsValue, ctx: TeamContext
 	);
 }
 
+// R5-6 (DR-02 round-5): send-side clamp for `team steer` bodies. The
+// worker-side receiver (prompt-runtime sanitizeSteerMessage) clamps too (its
+// rejection of >4096-char steers was terminal — the poll cursor advanced
+// past the line, so an oversized leader steer was silently dropped), but the
+// send-side clamp means pendingSteers, the steering JSONL, and the
+// task.steer_queued event all already carry a receiver-safe body with the
+// truncation marker visible to the leader's audit trail. Deliberately
+// duplicated from prompt-runtime's clampSteerMessage (same rationale as the
+// estimateHandoffTokens duplication in task-output-context.ts): importing
+// prompt-runtime here would pull the broker-client/scratchpad/surface-worker
+// graph into the extension registration path (cold-start). Keep the two
+// clamps in sync.
+const TEAM_STEER_MAX_MESSAGE_LENGTH = 4096;
+const TEAM_STEER_TRUNCATION_MARKER = `\n[message truncated at ${TEAM_STEER_MAX_MESSAGE_LENGTH} chars]`;
+function clampSteerBody(message: string): string {
+	if (message.length <= TEAM_STEER_MAX_MESSAGE_LENGTH) return message;
+	return `${message.slice(0, TEAM_STEER_MAX_MESSAGE_LENGTH - TEAM_STEER_TRUNCATION_MARKER.length)}${TEAM_STEER_TRUNCATION_MARKER}`;
+}
+
 export function handleSteer(params: TeamToolParamsValue, ctx: TeamContext): PiTeamsToolResult {
-	const { runId, taskId, message } = params;
-	if (!runId || !taskId || !message) {
+	const { runId, taskId } = params;
+	const rawMessage = params.message;
+	if (!runId || !taskId || !rawMessage) {
 		return result("steer requires runId, taskId, and message", { action: "steer", status: "error" }, true);
 	}
+	// R5-6: clamp BEFORE any sink (pending queue, JSONL, event) sees the body.
+	const message = clampSteerBody(String(rawMessage));
 	const runCwd = locateRunCwd(runId, ctx.cwd);
 	if (!runCwd) return result(`Run '${runId}' not found`, { action: "steer", status: "error" }, true);
 	const loaded = loadRunManifestById(runCwd, runId); // NOTE: no withRunLock - best-effort only; concurrent writes may cause inconsistency

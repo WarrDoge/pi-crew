@@ -6,9 +6,11 @@ import { atomicWriteFile } from "../state/atomic-write.ts";
 import { writeArtifact } from "../state/stores/artifact-store.ts";
 import type { ArtifactDescriptor, TeamRunManifest, TeamTaskState } from "../state/types.ts";
 import { resolveRealContainedPath } from "../utils/safe-paths.ts";
+import { countTokens } from "../utils/token-counter.ts";
 import type { WorkflowStep } from "../workflows/workflow-config.ts";
 import { applyCompactPipeline } from "./compaction/compact-pipeline.ts";
 import { ANSI_STRIP_STAGE, BLANK_COLLAPSE_STAGE, TruncationStage } from "./compaction/compact-stages/index.ts";
+import { splitWithImportantLines } from "./compaction/important-line-classifier.ts";
 import { DEFAULT_PRUNE_CONFIG, type FileEditEvent, pruneToolOutputs, type ToolResultEntry } from "./compaction/tool-output-pruner.ts";
 
 export interface DependencyContextEntry {
@@ -47,6 +49,13 @@ export interface DependencyContextEntry {
 	 *  block for marked entries; `writeTaskInputsArtifact` still serializes the
 	 * ORIGINAL (untrimmed) context — the trim is render-only, never persisted. */
 	budgetTrimmed?: boolean;
+	/** G6 (DR-02 round-5): set by {@link enforceDependencyInlineBudget} when the
+	 *  96KB layer downgraded this dep to path-only (`resultSummary: ""`). The
+	 *  renderer uses it to emit "[result withheld by inline budget — see
+	 *  artifact path above]" instead of the false "(no result output)" — the
+	 *  output EXISTS on disk at `resultPath`; only the inline copy was
+	 *  budgeted away. */
+	resultWithheldByBudget?: boolean;
 }
 
 export interface DependencyOutputContext {
@@ -302,6 +311,22 @@ function aggregateUsage(task: TeamTaskState): DependencyContextEntry["usage"] {
 	return { inputTokens, outputTokens, durationMs };
 }
 
+/** L4 + handoff-budget shared priority score (higher = keep inline / keep
+ *  FULL form longer). R5-5 (DR-02): the handoff-budget trim
+ *  (`applyHandoffBudget`) reuses the exact scoring the 96KB L4 layer
+ *  (`enforceDependencyInlineBudget`) uses so a failed/needs-attention dep is
+ *  the LAST thing either budget layer trims.
+ *
+ * Score: (highPriority?1000:0) + (recency/1e10) + (relevance*10) - (index*0.001)
+ * The 1000 base ensures high-priority wins even with no recency/relevance.
+ * recency/1e10 keeps it in [0, 1] for ms timestamps up to 1e13 (~year 2286).
+ * relevance*10 puts it in [0, 10].
+ * index*0.001 keeps stable order within the same bucket. */
+function inlinePriorityScore(dep: DependencyContextEntry, originalIndex: number): number {
+	const highPriority = dep.status === "failed" || dep.status === "needs-attention";
+	return (highPriority ? 1000 : 0) + (dep.recency ?? 0) / 1e10 + (dep.relevance ?? 0) * 10 - originalIndex * 0.001;
+}
+
 /**
  * L4 total-budget trim. When the SUM of `inlineBytes` across all deps
  * exceeds {@link MAX_TOTAL_DEP_INLINE_BYTES}, downgrade the lowest-priority
@@ -330,16 +355,11 @@ export function enforceDependencyInlineBudget(dependencies: DependencyContextEnt
 	// Build an index-keyed array so we can sort AND preserve the original
 	// position (for stable output order). Each entry gets a numeric
 	// priority score (higher = more important) and a stable tie-breaker.
-	const indexed = dependencies.map((dep, originalIndex) => {
-		const highPriority = dep.status === "failed" || dep.status === "needs-attention";
-		// Score: (highPriority?1000:0) + (recency/1e10) + (relevance*10) - (index*0.001)
-		// The 1000 base ensures high-priority wins even with no recency/relevance.
-		// recency/1e10 keeps it in [0, 1] for ms timestamps up to 1e13 (~year 2286).
-		// relevance*10 puts it in [0, 10].
-		// index*0.001 keeps stable order within the same bucket.
-		const score = (highPriority ? 1000 : 0) + (dep.recency ?? 0) / 1e10 + (dep.relevance ?? 0) * 10 - originalIndex * 0.001;
-		return { dep, originalIndex, score };
-	});
+	const indexed = dependencies.map((dep, originalIndex) => ({
+		dep,
+		originalIndex,
+		score: inlinePriorityScore(dep, originalIndex),
+	}));
 	const sorted = [...indexed].sort((a, b) => b.score - a.score);
 	let used = 0;
 	const keepSet = new Set<number>(); // originalIndex values to KEEP inline
@@ -358,6 +378,10 @@ export function enforceDependencyInlineBudget(dependencies: DependencyContextEnt
 			resultSummary: "",
 			structuredResults: undefined,
 			inlineBytes: 0,
+			// G6 (DR-02): flag the path-only downgrade so the renderer says the
+			// output was withheld by the inline budget instead of falling into the
+			// false "(no result output)" (the output exists at resultPath).
+			resultWithheldByBudget: true,
 		};
 	});
 }
@@ -548,33 +572,33 @@ function sanitizeFencedBody(body: string): string {
 	return body.replace(DEPENDENCY_CONTROL_CHAR_PATTERN, "").replace(/<\/dependency-context/g, "&lt;/dependency-context");
 }
 
-// ── Handoff budget (effective-token cap on this layer: chars/4 heuristic ──
-// anchored upward by measured worker usage — U10) ─────────────────────────
+// ── Handoff budget (effective-token cap on this layer: countTokens — ──
+// CJK-aware, in-tree utils/token-counter.ts — anchored upward by measured
+// worker usage, U10) ───────────────────────────────────────────────────────
 
 /** Default effective-token budget for the dynamic.dependencyContext layer
- *  (tokens as measured by the chars/4 heuristic, floored by measured worker
- *  usage where available — U10). */
+ *  (tokens as measured by `countTokens` (utils/token-counter.ts — R5-7,
+ *  DR-02: CJK-aware; the old chars/4 heuristic underestimated CJK ~2-3x),
+ *  floored by measured worker usage where available — U10). */
 export const DEFAULT_HANDOFF_BUDGET_TOKENS = 1800;
 /** Budget ceiling: a resolved budget above this is treated as the off-switch
  *  (same semantics as ≤0 — clearly not a real handoff cap, so render
  *  untrimmed instead of guessing). */
 export const HANDOFF_BUDGET_CEILING_TOKENS = 1_000_000;
-/** Summary head kept per dependency when the budget trims it. */
+/** Summary head+tail budget kept per dependency when the budget trims it.
+ *  R5-5 (DR-02): the compact form is no longer a plain head slice — the
+ *  summary runs through `splitWithImportantLines` (75% head + important
+ *  middle lines + 25% tail) so error/failed/exception lines from ANYWHERE in
+ *  the summary survive, matching the full-form TruncationStage behavior. */
 export const HANDOFF_SUMMARY_HEAD_CHARS = 240;
+/** Slack fraction of {@link HANDOFF_SUMMARY_HEAD_CHARS} available for
+ *  important middle lines in the compact form (R5-5). The classifier default
+ *  (0.15 = 36 chars) is too tight for realistic diagnostics; 0.25 (60 chars)
+ *  admits 1-2 typical error lines while keeping the compact entry small. */
+const HANDOFF_COMPACT_IMPORTANT_SLACK = 0.25;
 
 /** Strict integer env syntax — "12abc" must NOT parse as 12. */
 const HANDOFF_BUDGET_ENV_RE = /^[+-]?\d+$/;
-
-/** Est tokens = chars/4 — the same heuristic as `estimateTokens(chars)` in
- *  src/runtime/task-runner/prompt-builder.ts (SR-02 breakdown). Duplicated
- *  here instead of imported: importing prompt-builder would pull its
- *  retrieval/workspace-tree graph into every task-output-context consumer
- *  (post-execution, aggregate outputs) for a one-line heuristic. Keep the
- *  two in sync if either changes; the U10 max(heuristic, measured) combine
- *  rule mirrors prompt-builder's `estimateTokens(chars, measuredTokens)`. */
-function estimateHandoffTokens(chars: number): number {
-	return Math.round(chars / 4);
-}
 
 /** U10 measured-token anchor: Σ measured `usage.outputTokens` over the deps
  *  still rendered in FULL form. The usage record is the worker's REAL
@@ -590,9 +614,10 @@ function estimateHandoffTokens(chars: number): number {
  *  path is the compact form's artifact pointer.
  *
  *  Compact (`budgetTrimmed`) deps are deliberately NOT charged: their inline
- *  body is a ≤240-char head + pointer, no longer the worker's output, so the
- *  chars/4 heuristic on the small head is the honest measure — otherwise an
- *  output-heavy dep could never fit any budget even fully trimmed. */
+ *  body is a ≤240-char head/tail + pointer, no longer the worker's output, so
+ *  the countTokens heuristic on the small body is the honest measure —
+ *  otherwise an output-heavy dep could never fit any budget even fully
+ *  trimmed. */
 function measuredHandoffTokens(context: DependencyOutputContext): number {
 	let measured = 0;
 	for (const dep of context.dependencies) {
@@ -602,19 +627,18 @@ function measuredHandoffTokens(context: DependencyOutputContext): number {
 	return measured;
 }
 
-/** Measure a candidate context in EFFECTIVE tokens (U10): the chars/4
- *  heuristic on the rendered body, floored by the measured-token anchor —
- *  `max(heuristic, Σ measured output tokens of full-form deps)`, mirroring
- *  the render byte-for-byte (same parts builder; `.trim()` matches the render
- *  join). The max rule mirrors `estimateTokens(chars, measuredTokens)` in
- *  prompt-builder.ts: a real measurement can only TIGHTEN the estimate
- *  (spec U10 — the budget must never be exceeded when measured usage is
- *  larger than the heuristic), never loosen it below the heuristic. */
+/** Measure a candidate context in EFFECTIVE tokens (U10): the
+ *  `countTokens` heuristic on the rendered body (R5-7, DR-02: CJK-aware —
+ *  replaces the chars/4 estimate that under-counted CJK summaries ~2-3x),
+ *  floored by the measured-token anchor — `max(heuristic, Σ measured output
+ *  tokens of full-form deps)`, mirroring the render byte-for-byte (same parts
+ *  builder; `.trim()` matches the render join). The max rule mirrors
+ *  `estimateTokens(chars, measuredTokens)` in prompt-builder.ts: a real
+ *  measurement can only TIGHTEN the estimate (spec U10 — the budget must
+ *  never be exceeded when measured usage is larger than the heuristic),
+ *  never loosen it below the heuristic. */
 function measureHandoffTokens(context: DependencyOutputContext): number {
-	return Math.max(
-		estimateHandoffTokens(buildDependencyOutputBodyParts(context).join("\n").trim().length),
-		measuredHandoffTokens(context),
-	);
+	return Math.max(countTokens(buildDependencyOutputBodyParts(context).join("\n").trim()), measuredHandoffTokens(context));
 }
 
 /** Budget active iff it is a positive finite number at or below the ceiling;
@@ -646,7 +670,11 @@ function dependencyEntryLines(dep: DependencyContextEntry): string[] {
 		`Status: ${dep.status}`,
 		dep.resultPath ? `Result artifact: ${dep.resultPath}` : "",
 		"",
-		dep.resultSummary?.trim() || "(no result output)",
+		// G6 (DR-02 round-5): an L4 path-only downgrade has output on disk —
+		// never fall into the "(no result output)" lie for it.
+		dep.resultWithheldByBudget
+			? "[result withheld by inline budget — see artifact path above]"
+			: dep.resultSummary?.trim() || "(no result output)",
 		"",
 	];
 	// P1-A dependency tee-recovery hint: when the dependency's result was
@@ -662,18 +690,35 @@ function dependencyEntryLines(dep: DependencyContextEntry): string[] {
 }
 
 /** Compact handoff-budget form for one dependency (pre-sanitize): keeps the
- *  taskId/role/status lines + a ≤240-char summary head (with a truncation
- *  marker when the summary was longer) + a relative artifact pointer the
- *  worker can `read`. Drops structuredResults, usage, artifactsProduced and
- *  the absolute-path lines — all recoverable via the pointer. The pointer is
- *  built ONLY from manifest-derived runId/taskId (same trust level as the
- *  existing `## <taskId>` headers and the results/<taskId>.txt artifact
- *  naming); dep-controlled content never reaches it. */
+ *  taskId/role/status lines + a head/tail summary budget of
+ *  {@link HANDOFF_SUMMARY_HEAD_CHARS} chars with important-line preservation
+ *  (R5-5, DR-02: the old plain 240-char HEAD slice dropped a failed dep's
+ *  error tail and any diagnostic beyond char 240 — the summary now runs
+ *  through the same `splitWithImportantLines` the full-form TruncationStage
+ *  path uses, so error/failed/exception lines from ANYWHERE in the summary
+ *  survive) + a `[trimmed, N chars total]` marker when the summary was longer
+ *  + a relative artifact pointer the worker can `read`. Drops
+ *  structuredResults, usage, artifactsProduced and the absolute-path lines —
+ *  all recoverable via the pointer. The pointer is built ONLY from
+ *  manifest-derived runId/taskId (same trust level as the existing
+ *  `## <taskId>` headers and the results/<taskId>.txt artifact naming);
+ *  dep-controlled content never reaches it. */
 function budgetTrimmedDependencyEntryLines(dep: DependencyContextEntry, runId: string | undefined): string[] {
 	const summary = dep.resultSummary?.trim() ?? "";
-	const head = summary.slice(0, HANDOFF_SUMMARY_HEAD_CHARS);
-	const body =
-		summary.length > HANDOFF_SUMMARY_HEAD_CHARS ? `${head}\n[trimmed, ${summary.length} chars total]` : summary || "(no result output)";
+	let body: string;
+	if (dep.resultWithheldByBudget) {
+		// G6 (DR-02): compact form of an L4-downgraded dep — same anti-lie
+		// marker; the pointer line below is the recovery path.
+		body = "[result withheld by inline budget — see full output path below]";
+	} else if (summary.length <= HANDOFF_SUMMARY_HEAD_CHARS) {
+		body = summary || "(no result output)";
+	} else {
+		const split = splitWithImportantLines(summary, HANDOFF_SUMMARY_HEAD_CHARS, {
+			slackFactor: HANDOFF_COMPACT_IMPORTANT_SLACK,
+		});
+		const segments = [split.head, ...split.importantLines, split.tail].filter((segment) => segment.length > 0);
+		body = `${segments.join("\n")}\n[trimmed, ${summary.length} chars total]`;
+	}
 	return [
 		`## ${dep.taskId} (${dep.role})`,
 		`Status: ${dep.status}`,
@@ -715,9 +760,10 @@ function buildDependencyOutputBodyParts(context: DependencyOutputContext): strin
 
 /**
  * Handoff budget: trim the dependency-output context to an EFFECTIVE-token
- * budget (U10). Effective tokens = max(chars/4 heuristic on the rendered
- * body, Σ measured `usage.outputTokens` of full-form deps — real tokenizer
- * numbers from message_end usage persisted on the task state). Measured
+ * budget (U10). Effective tokens = max(countTokens heuristic on the rendered
+ * body — R5-7 (DR-02): CJK-aware, from utils/token-counter.ts — Σ measured
+ * `usage.outputTokens` of full-form deps — real tokenizer numbers from
+ * message_end usage persisted on the task state). Measured
  * usage can only tighten: when a worker reports MORE tokens than the
  * heuristic estimates, the measured number governs and the trim fires at
  * least as early as before (spec U10 acceptance — the budget is never
@@ -727,14 +773,20 @@ function buildDependencyOutputBodyParts(context: DependencyOutputContext): strin
  * input reference unchanged when the budget is off (≤0 or >1_000_000) or
  * the context already fits.
  *
- * Trim policy (declaration order): dependencies are probed from ALL-full
- * downward — the largest prefix of dependencies that still fits keeps its
- * FULL output; every dependency after the cutoff is downgraded to the
- * compact form (taskId/role/status + ≤240-char summary head + truncation
- * marker + `artifacts/<runId>/results/<taskId>.txt` pointer). Earlier deps
- * therefore always keep ≥ as much as later ones. Long (>240 chars) sharedRead
- * bodies are replaced by a trim marker (the Path pointer is already
- * rendered); short shared reads pass through.
+ * Trim policy (R5-5, DR-02 — failed-priority, mirroring the 96KB layer):
+ * dependencies are probed from ALL-full downward in DOWNGRADE-PRIORITY
+ * order — the same score `enforceDependencyInlineBudget` uses
+ * (`inlinePriorityScore`: status failed/needs-attention gets the +1000
+ * boost, then recency, then relevance, then declaration index). The
+ * lowest-keep-priority deps are downgraded to the compact form
+ * (taskId/role/status + head/tail summary ≤240 chars with important-line
+ * preservation + `artifacts/<runId>/results/<taskId>.txt` pointer) FIRST;
+ * failed/needs-attention deps therefore keep their FULL form longest — the
+ * downstream worker must see the failure. Declaration order still
+ * guarantees that among same-priority deps, earlier ones keep ≥ as much as
+ * later ones. Long (>240 chars) sharedRead bodies are replaced by a trim
+ * marker (the Path pointer is already rendered); short shared reads pass
+ * through.
  *
  * When even the fully-trimmed form exceeds the budget (extreme dependency
  * count), the fully-trimmed context is returned as the bounded best effort —
@@ -757,16 +809,36 @@ export function applyHandoffBudget(context: DependencyOutputContext, budgetToken
 			? { ...read, content: `[content trimmed, ${content.length} chars total — read Path above for the full file]` }
 			: read;
 	};
-	const candidateAt = (fullCount: number): DependencyOutputContext => ({
-		...base,
-		dependencies: base.dependencies.map((dep, index) => (index < fullCount ? dep : { ...dep, budgetTrimmed: true })),
-		sharedReads: base.sharedReads.map(trimmedRead),
-	});
-	for (let fullCount = base.dependencies.length; fullCount >= 0; fullCount--) {
-		const candidate = candidateAt(fullCount);
+	// R5-5 (DR-02): downgrade ORDER — ascending keep-priority (the FIRST
+	// entries are downgraded first). Reuses the exact scoring the 96KB L4
+	// layer uses (`inlinePriorityScore`) so failed/needs-attention deps land
+	// LAST and keep their FULL form longest; within the same priority bucket
+	// later-declared deps are downgraded before earlier ones.
+	const downgradeOrder = base.dependencies
+		.map((dep, originalIndex) => ({ originalIndex, score: inlinePriorityScore(dep, originalIndex) }))
+		.sort((a, b) => a.score - b.score)
+		.map((item) => item.originalIndex);
+	const candidateAt = (downgradedCount: number): DependencyOutputContext => {
+		// Downgrade the `downgradedCount` LOWEST-keep-priority deps first
+		// (R5-5): failed/needs-attention deps are last in `downgradeOrder`, so
+		// they keep their FULL form longest.
+		const downgradedIndexes = new Set(downgradeOrder.slice(0, downgradedCount));
+		return {
+			...base,
+			dependencies: base.dependencies.map((dep, index) => (downgradedIndexes.has(index) ? { ...dep, budgetTrimmed: true } : dep)),
+			sharedReads: base.sharedReads.map(trimmedRead),
+		};
+	};
+	// Probe from fewest-downgraded upward and return the first candidate that
+	// fits — the maximum FULL-form set under the failed-priority order. More
+	// downgrades strictly shrink the measure (compact form < full form for
+	// both the heuristic and the measured anchor), so the first fit is the
+	// best fit.
+	for (let downgradedCount = 0; downgradedCount <= base.dependencies.length; downgradedCount++) {
+		const candidate = candidateAt(downgradedCount);
 		if (measureHandoffTokens(candidate) <= budgetTokens) return candidate;
 	}
-	return candidateAt(0);
+	return candidateAt(base.dependencies.length);
 }
 
 export interface RenderDependencyOutputContextOptions {

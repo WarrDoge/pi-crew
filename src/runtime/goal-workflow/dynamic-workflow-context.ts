@@ -33,6 +33,7 @@ import type { TeamRunManifest } from "../../state/types.ts";
 import type { TeamConfig } from "../../teams/team-config.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
 import { safeAbort } from "../../utils/safe-abort.ts";
+import { countTokens } from "../../utils/token-counter.ts";
 import { cleanupAgentWorktreeAsync, prepareAgentWorktreeAsync } from "../../worktree/worktree-manager.ts";
 import type { DwfCheckpointState } from "../dwf-state-store.ts";
 import { parsePiJsonOutput } from "../output/pi-json-output.ts";
@@ -41,7 +42,6 @@ import { executeWithRetry } from "../recovery/retry-executor.ts";
 import { runWorker } from "../run-worker.ts";
 import { mapConcurrent } from "../scheduling/parallel-utils.ts";
 import { Semaphore } from "../scheduling/semaphore.ts";
-import { estimateTokens } from "../task-runner/prompt-builder.ts";
 import { renderPlanTemplate } from "./plan-templates.ts";
 
 export interface AgentCallOpts {
@@ -348,17 +348,19 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 			let worktreePath: string | undefined;
 			let worktreeBranch: string | undefined;
 			// BDG-2 + G14 (SDD-3): content-based reserve estimate — replaces the flat
-			// ESTIMATE=4096. estimateTokens() (chars/4, the in-tree heuristic exported
-			// from runtime/task-runner/prompt-builder.ts — the same estimator
-			// pre-execution.ts uses) runs over the call's prompt + optional
-			// systemPrompt override, floored at 512 tokens for the fixed per-call
-			// overhead (schema/JSON directive, artifact headers) not present in the
-			// prompt string. Short calls stop over-reserving; very long prompts
-			// reserve proportionally so N concurrent calls cannot blow past the
-			// budget between reserve and the post-run adjust. Every BDG-2 site
-			// below (check/reserve/un-reserve/adjust/refund) uses THIS value, so
-			// refund always matches what was reserved.
-			const estimate = Math.max(512, estimateTokens((call.prompt?.length ?? 0) + (call.systemPrompt?.length ?? 0)));
+			// ESTIMATE=4096. countTokens() (R5-7, DR-02 round-5: the in-tree
+			// CJK-aware estimator from utils/token-counter.ts — replaces the chars/4
+			// estimateTokens call, which under-counted CJK/Vietnamese-diacritic
+			// prompts ~2-3x and could let N concurrent calls blow past the budget)
+			// runs over the call's prompt + optional systemPrompt override, floored
+			// at 512 tokens for the fixed per-call overhead (schema/JSON directive,
+			// artifact headers) not present in the prompt string. Short calls stop
+			// over-reserving; very long prompts reserve proportionally so N
+			// concurrent calls cannot blow past the budget between reserve and the
+			// post-run adjust. Every BDG-2 site below (check/reserve/un-reserve/
+			// adjust/refund) uses THIS value, so refund always matches what was
+			// reserved.
+			const estimate = Math.max(512, countTokens(`${call.prompt ?? ""}${call.systemPrompt ?? ""}`));
 			let reserved = false;
 			try {
 				// SDD-3 W-C G13: agent-call cap — the structured bound for no-budget runs.

@@ -17,7 +17,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import { sanitizeSteerMessage, validateSteeringFile } from "../../../src/prompt/prompt-runtime.ts";
+import {
+	clampSteerMessage,
+	MAX_STEER_MESSAGE_LENGTH,
+	sanitizeSteerMessage,
+	validateSteeringFile,
+} from "../../../src/prompt/prompt-runtime.ts";
 
 function trySymlink(target: string, linkPath: string, kind: "file" | "dir" | "junction"): boolean {
 	try {
@@ -44,11 +49,34 @@ function isSymlinkTestUnsupportedOn(): boolean {
 
 // ── FIX-02: sanitizeSteerMessage ─────────────────────────────────────────
 
-test("FIX-02: sanitizeSteerMessage rejects message > 4096 chars", () => {
+// R5-6 (DR-02 round-5): an oversized steer is TRUNCATED-WITH-MARKER, no
+// longer rejected-and-dropped. The pre-fix rejection was terminal — the
+// poll cursor advanced past the line (warn-only) and the send side had no
+// clamp, so a leader steer >4096 chars silently vanished.
+test("R5-6: sanitizeSteerMessage truncates message > 4096 chars with a marker instead of dropping it", () => {
 	const message = "a".repeat(4097);
 	const result = sanitizeSteerMessage({ type: "steer", message });
-	assert.equal(result.valid, false);
-	assert.match(result.reason ?? "", /message-too-long/);
+	assert.equal(result.valid, true, "oversized steers must be delivered truncated, not rejected-and-dropped");
+	assert.ok(result.message !== undefined, "clamped body returned");
+	assert.ok((result.message?.length ?? Number.POSITIVE_INFINITY) <= MAX_STEER_MESSAGE_LENGTH, "clamped body fits the receiver limit");
+	assert.ok(
+		result.message?.includes(`[message truncated at ${MAX_STEER_MESSAGE_LENGTH} chars]`),
+		"truncation marker mirrors renderInboxMessage's pattern",
+	);
+	assert.ok(result.message?.startsWith("a".repeat(100)), "message head preserved");
+});
+
+test("R5-6: clampSteerMessage is a no-op at/below the limit, slices+marker above it", () => {
+	assert.equal(clampSteerMessage("short"), "short");
+	assert.equal(
+		clampSteerMessage("b".repeat(MAX_STEER_MESSAGE_LENGTH)),
+		"b".repeat(MAX_STEER_MESSAGE_LENGTH),
+		"boundary: exactly 4096 is verbatim",
+	);
+	const clamped = clampSteerMessage("c".repeat(MAX_STEER_MESSAGE_LENGTH + 5000));
+	assert.ok(clamped.length <= MAX_STEER_MESSAGE_LENGTH, "slice+marker stays within the limit (receiver backstop passes)");
+	assert.ok(clamped.endsWith(`\n[message truncated at ${MAX_STEER_MESSAGE_LENGTH} chars]`), "marker appended");
+	assert.ok(clamped.startsWith("c".repeat(100)), "head preserved");
 });
 
 test("FIX-02: sanitizeSteerMessage accepts message at the 4096-char boundary", () => {

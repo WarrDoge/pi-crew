@@ -11,6 +11,28 @@ import { generateTaskHashId } from "./task-id.ts";
 // See: SECURITY-ISSUES.md SEC-007
 // ═══════════════════════════════════════════════════════════════════════════
 
+export interface TaskTextSanitizeResult {
+	/** Sanitized text WITHOUT the redaction note (the note is composed by the
+	 *  caller — see {@link sanitizeTaskText} / {@link appendSecurityRedactionNote}). */
+	text: string;
+	/** G7 (DR-02 round-5): number of content redactions applied by rules 1b–9
+	 *  (each replaced match counts 1 — marker substitutions AND strip-to-empty
+	 *  removals). Zero-width stripping (rule 1) and blank-line collapse
+	 *  (rule 10) are cosmetic and never counted. */
+	redactionCount: number;
+}
+
+/** G7 (DR-02 round-5): the single trailing note line appended when ≥1
+ *  security redaction fired. Silent redaction left sanitized objectives
+ *  like "do not [suspicious-write-redacted]s to logs" with no explanation —
+ *  the worker could not tell meaning was removed. Count = number of
+ *  replacements made. No note when nothing was redacted (byte-identical to
+ *  the pre-G7 output for clean inputs). */
+export function appendSecurityRedactionNote(text: string, redactionCount: number): string {
+	if (redactionCount <= 0) return text;
+	return `${text}\n\n(${redactionCount} security redaction(s) applied by task-text sanitizer — rephrase constraints avoiding trigger patterns if this removed intended meaning)`;
+}
+
 /**
  * Sanitize workflow step task text to reduce injection risk.
  *
@@ -23,51 +45,74 @@ import { generateTaskHashId } from "./task-id.ts";
  * - Strip known prompt injection directive patterns
  * - Strip base64/hex encoded payloads
  * - Collapse excessive whitespace
+ *
+ * G7: every content redaction is counted; `sanitizeTaskText` appends ONE
+ * trailing note line when ≥1 fired (see {@link appendSecurityRedactionNote}).
  */
-export function sanitizeTaskText(task: string): string {
+export function sanitizeTaskTextWithRedactionCount(task: string): TaskTextSanitizeResult {
 	let sanitized = task;
+	let redactionCount = 0;
+	// Counting replacer: each replacement the pattern performs (marker
+	// substitution or strip-to-empty removal) counts as one redaction hit.
+	const counted = (replacement: string) => (): string => {
+		redactionCount += 1;
+		return replacement;
+	};
 
-	// 1. Strip zero-width and invisible Unicode characters
+	// 1. Strip zero-width and invisible Unicode characters (cosmetic — never
+	// counted: removing invisible chars cannot change intended meaning).
 	sanitized = sanitized.replace(/[\u200B-\u200F\u2028-\u202F\u2060-\u206F\uFEFF]/g, "");
 
 	// 1b. Strip HTML/JS comments and script tags (instruction hiding).
 	// SEC-4: bounded quantifier {0,8192} prevents polynomial O(n²) backtracking
 	// DoS on pathological inputs (e.g. an unclosed `<!--` with no matching `-->`).
-	sanitized = sanitized.replace(/<!--[\s\S]{0,8192}?-->|<\/?script[^>]*>/gi, "");
+	sanitized = sanitized.replace(/<!--[\s\S]{0,8192}?-->|<\/?script[^>]*>/gi, counted(""));
 
 	// 2. Strip known prompt injection directive patterns
 	sanitized = sanitized.replace(
 		/^\s*(?:SYSTEM|INSTRUCTION|IGNORE(?:\s+ALL)?\s+(?:PREVIOUS|INSTRUCTIONS)?|OVERRIDE|YOUR\s+ROLE\s+IS|MALICIOUS)\s*:.*$/gim,
-		"",
+		counted(""),
 	);
 
 	// 3. Strip base64/hex encoded command payloads
-	sanitized = sanitized.replace(/\b(?:base64|base32|hex)\s*['":]\s*([A-Za-z0-9+\/=]{16,})/gi, "[encoded-redacted]");
+	sanitized = sanitized.replace(/\b(?:base64|base32|hex)\s*['":]\s*([A-Za-z0-9+\/=]{16,})/gi, counted("[encoded-redacted]"));
 
 	// 4. Strip embedded instruction patterns in brackets (incl. MALICIOUS to match agent sanitizer)
-	sanitized = sanitized.replace(/\[(?:SYSTEM|INSTRUCTION|OVERRIDE|MALICIOUS)\s*:[^\]]*\]/gi, "");
+	sanitized = sanitized.replace(/\[(?:SYSTEM|INSTRUCTION|OVERRIDE|MALICIOUS)\s*:[^\]]*\]/gi, counted(""));
 
 	// 5. Strip eval/exec patterns with encoded content
-	sanitized = sanitized.replace(/\b(?:eval|exec|spawn|subprocess)\s*\(\s*(?:base64|Buffer\.from)\s*\(/gi, "[suspicious-call-redacted]");
+	sanitized = sanitized.replace(
+		/\b(?:eval|exec|spawn|subprocess)\s*\(\s*(?:base64|Buffer\.from)\s*\(/gi,
+		counted("[suspicious-call-redacted]"),
+	);
 
 	// 6. Strip markdown codeblocks that attempt to hide instructions.
 	// SEC-4: bounded quantifier {0,8192} prevents polynomial backtracking DoS.
-	sanitized = sanitized.replace(/```\s*(?:system|instruction|prompt)\n[\s\S]{0,8192}?```/gi, "");
+	sanitized = sanitized.replace(/```\s*(?:system|instruction|prompt)\n[\s\S]{0,8192}?```/gi, counted(""));
 
 	// 7. Strip YAML-like assignment patterns that could override behavior.
 	// Applied unconditionally — task text is always untrusted.
-	sanitized = sanitized.replace(/^\s*(?:role|persona|behavior|directive)\s*[=:].*$/gim, "");
+	sanitized = sanitized.replace(/^\s*(?:role|persona|behavior|directive)\s*[=:].*$/gim, counted(""));
 
 	// 8. Strip potential exfiltration patterns
-	sanitized = sanitized.replace(/\b(?:write|append)\s+.*(?:secrets?|keys?|token|credential)/gi, "[suspicious-write-redacted]");
+	sanitized = sanitized.replace(/\b(?:write|append)\s+.*(?:secrets?|keys?|token|credential)/gi, counted("[suspicious-write-redacted]"));
 
 	// 9. Strip network exfiltration patterns
-	sanitized = sanitized.replace(/\b(?:fetch|curl|wget|axios)\s+.*(?:exfil|steal|leak|send)/gi, "[suspicious-network-redacted]");
+	sanitized = sanitized.replace(/\b(?:fetch|curl|wget|axios)\s+.*(?:exfil|steal|leak|send)/gi, counted("[suspicious-network-redacted]"));
 
-	// 10. Collapse multiple blank lines (cleanup after removals)
+	// 10. Collapse multiple blank lines (cleanup after removals — cosmetic, never counted)
 	sanitized = sanitized.replace(/\n{3,}/g, "\n\n");
 
-	return sanitized.trim();
+	return { text: sanitized.trim(), redactionCount };
+}
+
+/**
+ * Sanitize task text and, when any content redaction fired, append ONE
+ * trailing note line explaining it (G7, DR-02 round-5).
+ */
+export function sanitizeTaskText(task: string): string {
+	const { text, redactionCount } = sanitizeTaskTextWithRedactionCount(task);
+	return appendSecurityRedactionNote(text, redactionCount);
 }
 
 export interface BuildTaskPacketInput {
@@ -120,9 +165,17 @@ export function buildTaskPacket(input: BuildTaskPacketInput): TaskPacket {
 	const scope = inferTaskScope(input.step);
 	const reads = input.step.reads === false ? [] : (input.step.reads ?? []);
 	const scopePath = reads.length === 1 ? reads[0] : reads.length > 1 ? reads.join(", ") : undefined;
-	// SEC-007: Sanitize task text before inserting into task packet
-	const sanitizedTask = sanitizeTaskText(input.step.task);
-	const sanitizedGoal = sanitizeTaskText(input.manifest.goal);
+	// SEC-007: Sanitize task text before inserting into task packet.
+	// G7 (DR-02 round-5): count redactions on BOTH the task and the goal — the
+	// packet objective carries ONE combined trailing note so the worker knows
+	// meaning may have been removed (per-text notes inside the {goal}
+	// substitution could land mid-objective and stack to two notes).
+	const sanitizedTaskResult = sanitizeTaskTextWithRedactionCount(input.step.task);
+	const sanitizedGoalResult = sanitizeTaskTextWithRedactionCount(input.manifest.goal);
+	const objective = appendSecurityRedactionNote(
+		sanitizedTaskResult.text.replaceAll("{goal}", sanitizedGoalResult.text),
+		sanitizedTaskResult.redactionCount + sanitizedGoalResult.redactionCount,
+	);
 
 	// Generate a deterministic hash-based task ID for traceability and logging.
 	// Uses goal + step ID + run ID as content parts.
@@ -130,7 +183,7 @@ export function buildTaskPacket(input: BuildTaskPacketInput): TaskPacket {
 	const _taskHashId = generateTaskHashId([input.manifest.goal, input.step.id, input.manifest.runId]);
 
 	return {
-		objective: sanitizedTask.replaceAll("{goal}", sanitizedGoal),
+		objective,
 		...(declaredSpecRefs.length > 0 ? { specRefs: declaredSpecRefs, specSnapshots } : {}),
 		...(unresolvedSpecRefs.length > 0 ? { unresolvedSpecRefs } : {}),
 		...(input.specStrict === true ? { specStrict: true } : {}),
