@@ -74,7 +74,7 @@ export function buildStringEnum(values: readonly string[], description: string, 
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// API-5 facade split: the 54-action mega-tool schema is split into 5 domain
+// API-5 facade split: the 57-action mega-tool schema is split into 5 domain
 // schemas. Each domain owns a subset of the action union; all parameter fields
 // are shared across every variant so Phase 1 validation is identical to the
 // pre-split flat Object (additionalProperties: true → no tightening).

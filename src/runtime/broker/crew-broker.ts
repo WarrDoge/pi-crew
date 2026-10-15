@@ -1,24 +1,35 @@
 /**
  * crew-broker.ts — Root-only local socket server for cross-process pi-worker
- *                  message transport. PHASE 0 skeleton (sub-task 0.4).
+ *                  message transport (grew out of the Phase 0 skeleton,
+ *                  sub-task 0.4 — see history note below).
  *
  *  - Bound to a `node:net` Unix domain socket or Windows named pipe.
  *  - One broker per root session; per-run token auth on first `hello`.
  *  - NDJSON framing, 256 KiB UTF-8 cap, 1s hello deadline.
  *  - Per-connection outbound queue cap (default 256) with drop-newest +
  *    `needsResync` marker.
- *  - Phase 0 dispatches ONLY `hello` and `ping`. All other methods return
- *    a typed `not-implemented` response (preserves forward-compat without
- *    pretending Phase 1 methods are live).
+ *  - Dispatches 12 methods post-hello: `ping`, `hello`, `msg.send`,
+ *    `msg.inbox`, `events.since`, `events.subscribe`, `task.waitStatus`,
+ *    `steer.push`, `escalate`, `wait.request`/`wait.resolve`
+ *    (capability-gated via `options.waitMethodsEnabled`, fail-closed), and
+ *    `delegate.request` (governed-nesting grandchild spawn through
+ *    `delegate-spawn.ts`, capability-gated via `options.nestingEnabled`,
+ *    fail-closed). Unknown methods return a typed `not-implemented`.
+ *  - Mailbox/event persistence flows through the `src/state/` stores
+ *    (`appendMailboxMessage*`, event-log) — the broker itself keeps no
+ *    durable state of its own.
  *  - Token map is HEAP ONLY; cleared on `stop()`. Never serialized.
  *  - `stop()` is idempotent. Never calls `process.kill`.
  *  - All log/error scopes use `crew-broker.*` prefix; every diagnostic
  *    passes through `redactSecretString` from `src/utils/redaction.ts`.
  *
- *  NO outbound TCP. NO persistence. NO children. NO process killing.
+ *  NO outbound TCP. NO process killing.
  *
- *  See `reports/inter-pi-broker-impl-plan-2026-07-21.md` §"0.4" for the
- *  full contract and acceptance criteria.
+ *  History: the Phase 0 contract (hello/ping only, no persistence, no
+ *  children) lives in `reports/inter-pi-broker-impl-plan-2026-07-21.md` §0.4;
+ *  the 12-method surface above supersedes it. DR-01 (2026-10-14) rewrote
+ *  this header after it had drifted ~1900 LOC past the skeleton it
+ *  described.
  */
 
 import { randomUUID } from "node:crypto";

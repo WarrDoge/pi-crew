@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **fix(runtime): P0 false-green — worker 429-exhaustion (empty settle) now fails on ALL three execution paths** (DR-01, deep review 2026-10-14). Upstream rate-limit exhaustion ends a pi session as a chain of EMPTY assistant `message_end` events (content `[]`, usage 0) between auto-retry cycles → `agent_settled`, exit 0, NO `stopReason:"error"` — the legacy 429 detector never fired, and `finalText` kept an early pre-outage sentence ("finalText lies"). Live evidence: runs `team_20261014082741` / `team_20261014093334` marked 7/7 tasks `completed` with zero findings. Fix per path: (1) task-runner attempt loop — new `ParsedPiJsonOutput.settledWithoutAnswer` (parser tracks the LAST assistant message_end) + an `attemptErrorFor` branch → retryable error → model-fallback advance / task `failed`; (2) RPC transport — no transcript file there, so `runRpcWorker` stamps the same error from live settle tracking (abort-gated; `rpcAgentStarted` keeps the stdio-fallback predicate honest); (3) DWF `ctx.agent()` — calls `runWorker` directly, bypassing the attempt loop; the step gate now also fails on `settledWithoutAnswer`. New mock seam `PI_TEAMS_MOCK_CHILD_PI=json-429-empty-settle` reproduces the live shape; 19 new tests incl. a pre-fix counterfactual pin and replay verification against both historical failed runs.
+
+### Docs
+
+- **docs(src): truth fixes + drift gates (F2/F3)**. `crew-broker.ts` header still described the "PHASE 0 skeleton (hello/ping only, NO persistence, NO children)" — rewritten to the real 12-method dispatch surface (+ history note). Action-count comments claimed "54-action"/"9"/"16" while the schema holds 57 (10+17+7+17+6) — fixed, and `team-tool-docs-sync.test.ts` gains a source-comment gate: numeric-claim scan + `ACTION_TO_DOMAIN`↔schema set-compare (comment drift can no longer go undetected). Records: `docs/reviews/pi-crew-deep-review-2026-10-14.md` + `docs/specs/DR-01-deep-review-fixes-2026-10-14.md` (SDD, 4 milestones, all gates green).
+
+### Chore
+
+- **chore(test): `npm run test:coverage`** — optional `node --experimental-test-coverage` mirror of `test:unit` (deliberately NOT in `ci` yet). Housekeeping: 487 legacy `docs/perf-report-team_*.md` (gitignored local debris, never tracked) moved to `docs/archive/perf-report-team_/`.
+
 ## [0.11.21] — CI matrix fixes: windows child env, macOS takeover probe (2026-10-14)
 
 0.11.19/0.11.20 shipped with red GitHub Actions CI (local `npm run ci` is linux-only and had passed; publish-before-CI-green is now a closed process gap — the real-test skill's Release gate section makes GH-Actions-green mandatory before publish).

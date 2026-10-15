@@ -110,3 +110,101 @@ describe("team-tool docs sync (A3)", () => {
 		}
 	});
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// DR-01 (deep review 2026-10-14): source-comment + dispatch-map truth gate.
+// History: the schema arrays grew to 57 actions while src comments kept
+// claiming "54-action" (team-tool-schema.ts, dispatch/index.ts header) and
+// the dispatch header listed run with 9 actions (missing `plans`), manage
+// with 16. Docs were already gated; the SOURCE comments were not. This block
+// fails whenever src comments or the ACTION_TO_DOMAIN map drift from the
+// schema arrays. If it fails after changing an `*_ACTIONS` array: update the
+// numeric claims AND the per-domain listing in dispatch/index.ts — do NOT
+// relax this test.
+// ───────────────────────────────────────────────────────────────────────────
+describe("team tool source-comment action-surface truth (DR-01)", () => {
+	const SCHEMA_REL = "src/schema/team-tool-schema.ts";
+	const DISPATCH_REL = "src/extension/team-tool/dispatch/index.ts";
+
+	/** Parse the five `const X_ACTIONS = [...] as const` arrays from schema source. */
+	const domainArraysFromSchemaSource = (): Record<string, string[]> => {
+		const src = readRepoFile(SCHEMA_REL);
+		const out: Record<string, string[]> = {};
+		for (const match of src.matchAll(/const ([A-Z]+)_ACTIONS = \[([^\]]*)\] as const/g)) {
+			const domain = match[1].toLowerCase();
+			const items = match[2]
+				.split(",")
+				.map((entry) => entry.trim().replace(/^"|"$/g, ""))
+				.filter((entry) => entry.length > 0);
+			out[domain] = items;
+		}
+		return out;
+	};
+
+	/** Parse ACTION_TO_DOMAIN entries from dispatch source. */
+	const actionToDomainFromDispatchSource = (): Record<string, string> => {
+		const src = readRepoFile(DISPATCH_REL);
+		const start = src.indexOf("const ACTION_TO_DOMAIN");
+		assert.ok(start >= 0, `${DISPATCH_REL}: ACTION_TO_DOMAIN map not found`);
+		const body = src.slice(start, src.indexOf("};", start));
+		const out: Record<string, string> = {};
+		for (const match of body.matchAll(/^\t(?:"([a-z0-9-]+)"|([a-z0-9_]+)):\s*"(run|status|control|manage|automate)",/gm)) {
+			const action = match[1] ?? match[2];
+			out[action] = match[3];
+		}
+		return out;
+	};
+
+	it("allActionLiterals holds exactly 57 unique actions (surface tripwire)", () => {
+		assert.equal(
+			schemaActions.length,
+			57,
+			"action surface changed — update docs/actions-reference.md, CLAUDE.md, README.md, and the numeric claims in team-tool-schema.ts + dispatch/index.ts",
+		);
+		assert.equal(schemaSet.size, schemaActions.length, "allActionLiterals contains duplicates");
+	});
+
+	it("numeric action-count claims in src comments equal allActionLiterals.length", () => {
+		const expected = schemaActions.length;
+		for (const rel of [SCHEMA_REL, DISPATCH_REL]) {
+			const src = readRepoFile(rel);
+			const claims: { text: string; value: number }[] = [];
+			for (const match of src.matchAll(/(\d+)-action/g)) claims.push({ text: match[0], value: Number(match[1]) });
+			for (const match of src.matchAll(/(\d+) action strings/g)) claims.push({ text: match[0], value: Number(match[1]) });
+			for (const match of src.matchAll(/(\d+)→(\d+) mapping/g)) claims.push({ text: match[0], value: Number(match[1]) });
+			assert.ok(
+				claims.length > 0,
+				`${rel} no longer states any action count — keep at least one claim so comment drift stays detectable`,
+			);
+			for (const claim of claims) {
+				assert.equal(claim.value, expected, `${rel} claims '${claim.text}' but allActionLiterals.length is ${expected}`);
+			}
+		}
+	});
+
+	it("ACTION_TO_DOMAIN map matches the schema domain arrays exactly", () => {
+		const domains = domainArraysFromSchemaSource();
+		const map = actionToDomainFromDispatchSource();
+		const total = Object.values(domains).reduce((sum, list) => sum + list.length, 0);
+		assert.equal(
+			total,
+			schemaActions.length,
+			"parsed *_ACTIONS arrays no longer cover allActionLiterals — parser regex needs updating",
+		);
+		for (const [domain, actions] of Object.entries(domains)) {
+			for (const action of actions) {
+				assert.equal(
+					map[action],
+					domain,
+					`dispatch map: '${action}' expected domain '${domain}' but got '${map[action] ?? "<missing>"}'`,
+				);
+			}
+		}
+		const mapActions = Object.keys(map);
+		assert.equal(
+			mapActions.length,
+			schemaActions.length,
+			`dispatch map has ${mapActions.length} entries but schema has ${schemaActions.length} — map and schema drifted`,
+		);
+	});
+});

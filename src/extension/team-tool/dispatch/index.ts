@@ -1,12 +1,13 @@
 /**
  * API-5 facade dispatch — domain router registry.
  *
- * `domainForAction(action)` maps each of the 54 action strings to one of 5
+ * `domainForAction(action)` maps each of the 57 action strings to one of 5
  * domains. `handleTeamTool` (in team-tool.ts) calls this to pick the right
  * domain router, preserving the exact same public API and zero caller changes.
  *
- * 54→5 mapping:
- *   run     (9):  run, parallel, plan, orchestrate, resume, retry, wait, steer, goal
+ * 57→5 mapping (kept in sync by test/unit/schema/team-tool-docs-sync.test.ts —
+ * DR-01: this header drifted to 54/9/16 while the schema had 57/10/17):
+ *   run     (10): run, parallel, plan, plans, orchestrate, resume, retry, wait, steer, goal
  *   status  (17): status, list, get, events, artifacts, breakdown, summary, graph,
  *                 search, health, worktrees, checkpoint, cache, explain, onboard, recommend, help
  *   control (7):  cancel, invalidate, respond, cleanup, prune, forget, doctor
@@ -24,7 +25,7 @@ import { handleStatusDomain } from "./status.ts";
 export { handleAutomateDomain, handleControlDomain, handleManageDomain, handleRunDomain, handleStatusDomain };
 
 const ACTION_TO_DOMAIN: Record<string, TeamDomain> = {
-	// run domain (9)
+	// run domain (10)
 	run: "run",
 	plans: "run",
 	parallel: "run",
@@ -64,7 +65,7 @@ const ACTION_TO_DOMAIN: Record<string, TeamDomain> = {
 	forget: "control",
 	doctor: "control",
 
-	// manage domain (16)
+	// manage domain (17)
 	create: "manage",
 	update: "manage",
 	delete: "manage",
