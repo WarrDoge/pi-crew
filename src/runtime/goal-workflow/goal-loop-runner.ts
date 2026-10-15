@@ -20,6 +20,8 @@ import { createRequire } from "node:module";
 import type { AgentConfig } from "../../agents/agent-config.ts";
 import { loadConfig } from "../../config/config.ts";
 import { effectiveRunConfig } from "../../extension/team-tool/config-patch.ts";
+import { isTerminalTaskStatus } from "../../state/contracts.ts";
+import { withRunLockSync } from "../../state/coordination/locks.ts";
 import { appendEventBuffered } from "../../state/event-log/event-log.ts";
 import { registerActiveRun, unregisterActiveRun } from "../../state/stores/active-run-registry.ts";
 import { collectRunMetrics } from "../../state/stores/run-metrics.ts";
@@ -28,6 +30,7 @@ import type { GoalLoopState, GoalLoopStatus, GoalVerdict, TeamRunManifest, TeamT
 import type { TeamConfig } from "../../teams/team-config.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
 import type { WorkflowConfig } from "../../workflows/workflow-config.ts";
+import { isRunLockBusyError } from "../broker/protocol/lock-busy.ts";
 import { resolveCrewRuntime } from "../model/runtime-resolver.ts";
 import { registryFromModelContext } from "../model/session-model.ts";
 import { executeTeamRun } from "../team-runner.ts";
@@ -35,6 +38,43 @@ import { compareSnapshot, snapshotManifests } from "../verification/verification
 import { acquireWorkspaceLock, refreshWorkspaceLockHeartbeat, type WorkspaceLockHandle } from "../workspace-lock.ts";
 import { bundleEvidence, evaluateGoal } from "./goal-evaluator.ts";
 import { GoalStore } from "./goal-state-store.ts";
+
+/**
+ * D5 (DR-02 Wave 2 Cluster C): merge the turn's FINAL task states onto a
+ * FRESH tasks.json read. The turn owns exactly the terminal-evidence fields
+ * its executor wrote (status/finishedAt/resultArtifact/error/exitCode);
+ * everything else on the fresh task (heartbeat/lastSeenAt, claim, delegate
+ * state, usage…) may be NEWER than the turn's in-memory snapshot and must
+ * never be regressed by the post-turn persist.
+ *
+ * Terminal-preserve: a task that is ALREADY terminal in the fresh read (an
+ * external decision — operator cancel, crash-recovery, the async-died
+ * notifier) keeps its fresh state entirely; the turn must not resurrect or
+ * re-decide it (same guard class as heartbeat.ts R13-S1). Turn tasks missing
+ * from the fresh read are appended — the turn created them and the
+ * budget/audit reads this persist exists for expect them on disk.
+ */
+export function mergeTurnFinalTasksOntoFresh(freshTasks: readonly TeamTaskState[], turnTasks: readonly TeamTaskState[]): TeamTaskState[] {
+	const freshById = new Map(freshTasks.map((task) => [task.id, task]));
+	const turnById = new Map(turnTasks.map((task) => [task.id, task]));
+	const merged = freshTasks.map((freshTask) => {
+		const turnTask = turnById.get(freshTask.id);
+		if (!turnTask) return freshTask;
+		if (isTerminalTaskStatus(freshTask.status)) return freshTask;
+		return {
+			...freshTask,
+			status: turnTask.status,
+			...(turnTask.finishedAt !== undefined ? { finishedAt: turnTask.finishedAt } : {}),
+			...(turnTask.resultArtifact !== undefined ? { resultArtifact: turnTask.resultArtifact } : {}),
+			...(turnTask.error !== undefined ? { error: turnTask.error } : {}),
+			...(turnTask.exitCode !== undefined ? { exitCode: turnTask.exitCode } : {}),
+		};
+	});
+	for (const turnTask of turnTasks) {
+		if (!freshById.has(turnTask.id)) merged.push(turnTask);
+	}
+	return merged;
+}
 
 /** Required minimal shape for the worker + agents discovery (P0 uses the goal's workerAgent). */
 export interface GoalLoopRuntimeDeps {
@@ -803,10 +843,41 @@ export async function runGoalLoop(input: RunGoalLoopInput): Promise<RunGoalLoopR
 			}
 
 			// Persist final task states for budget/audit reads.
+			// D5 (DR-02 Wave 2 Cluster C): the bare saveRunTasks(turnResult.tasks) was
+			// an UNLOCKED write of the executor's in-memory snapshot (goal-loop-runner.ts
+			// ":757") — it clobbered any NEWER state written under the run lock between
+			// the executor's last persist and this save (worker heartbeats/lastSeenAt,
+			// task claims, delegate statuses). Now a run-locked RMW: fresh re-read inside
+			// the lock, then a field-level merge — the turn re-decides only the fields it
+			// owns and never regresses fresh heartbeat/claim/delegate data.
 			try {
-				saveRunTasks(turnResult.manifest, turnResult.tasks);
+				withRunLockSync(turnResult.manifest, () => {
+					const fresh = loadRunManifestById(turnResult.manifest.cwd, turnResult.manifest.runId);
+					if (!fresh) {
+						logInternalError(
+							"goal-loop.saveTurnTasks",
+							new Error(`turn run '${turnResult.manifest.runId}' vanished before the final task persist — skipped`),
+							"best-effort",
+							"warn",
+						);
+						return;
+					}
+					saveRunTasks(fresh.manifest, mergeTurnFinalTasksOntoFresh(fresh.tasks, turnResult.tasks));
+				});
 			} catch (error) {
-				logInternalError("goal-loop.saveTurnTasks", error, `turnRunId=${created.manifest.runId}`);
+				if (isRunLockBusyError(error)) {
+					// Best-effort persist: the executor already persisted terminal task
+					// states during the turn — this merge is belt-and-suspenders for
+					// budget/audit reads, so contention skips it with a warn.
+					logInternalError(
+						"goal-loop.saveTurnTasks",
+						error,
+						`turnRunId=${created.manifest.runId} run lock busy — skipped final task merge`,
+						"warn",
+					);
+				} else {
+					logInternalError("goal-loop.saveTurnTasks", error, `turnRunId=${created.manifest.runId}`);
+				}
 			}
 
 			// GL-1: if the turn ended in blocked/failed status, stop the loop without spawning the judge.

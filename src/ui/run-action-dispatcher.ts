@@ -13,11 +13,14 @@ async function handleTeamTool(
 }
 
 import { isToolError, textFromToolResult } from "../extension/tool-result.ts";
+import { isRunLockBusyError } from "../runtime/broker/protocol/lock-busy.ts";
 import { readCrewAgents } from "../runtime/crew-agent-records.ts";
 import { exportDiagnostic } from "../runtime/diagnostic-export.ts";
+import { withRunLockSync } from "../state/coordination/locks.ts";
 import type { MailboxDirection, MailboxMessage } from "../state/coordination/mailbox.ts";
 import { appendEventBuffered } from "../state/event-log/event-log.ts";
 import { loadRunManifestById, saveRunTasks } from "../state/stores/state-store.ts";
+import type { TeamTaskState } from "../state/types.ts";
 import { logInternalError } from "../utils/internal-error.ts";
 import { formatCount } from "./format-helpers.ts";
 
@@ -120,35 +123,80 @@ export function dispatchHealthRecovery(ctx: ExtensionContext, runId: string): Pr
 	});
 }
 
+/** Staleness window for the kill-stale sweep (R4-6). */
+const KILL_STALE_HEARTBEAT_MS = 60_000;
+
+/**
+ * R4-6 (DR-02 Wave 2 Cluster C): pure RMW core of the kill-stale sweep —
+ * mark running/queued tasks whose heartbeat is older than `staleMs` dead.
+ * Exported so the locked dispatcher body stays unit-testable without a
+ * harness (repo seam pattern; see state-helpers-cas-contention.test.ts).
+ * Predicate is byte-identical to the previous inline map.
+ */
+export function markStaleWorkerHeartbeatsDead(
+	tasks: readonly TeamTaskState[],
+	currentMs: number,
+	staleMs: number = KILL_STALE_HEARTBEAT_MS,
+): { tasks: TeamTaskState[]; count: number } {
+	const now = new Date(currentMs).toISOString();
+	let count = 0;
+	const updated = tasks.map((task) => {
+		if ((task.status !== "running" && task.status !== "queued") || !task.heartbeat || task.heartbeat.alive === false) return task;
+		const lastSeenMs = Date.parse(task.heartbeat.lastSeenAt);
+		if (!Number.isFinite(lastSeenMs) || currentMs - lastSeenMs <= staleMs) return task;
+		count += 1;
+		return {
+			...task,
+			heartbeat: { ...task.heartbeat, alive: false, lastSeenAt: now },
+		};
+	});
+	return { tasks: updated, count };
+}
+
 export async function dispatchKillStaleWorkers(ctx: ExtensionContext, runId: string): Promise<RunActionResult> {
 	try {
-		const loaded = loadRunManifestById(ctx.cwd, runId); // NOTE: no withRunLock - best-effort only; concurrent writes may cause inconsistency;
+		const loaded = loadRunManifestById(ctx.cwd, runId);
 		if (!loaded) return { ok: false, message: `Run '${runId}' not found.` };
-		const currentMs = Date.now();
-		const staleMs = 60_000;
-		const now = new Date(currentMs).toISOString();
-		let count = 0;
-		const tasks = loaded.tasks.map((task) => {
-			if ((task.status !== "running" && task.status !== "queued") || !task.heartbeat || task.heartbeat.alive === false) return task;
-			const lastSeenMs = Date.parse(task.heartbeat.lastSeenAt);
-			if (!Number.isFinite(lastSeenMs) || currentMs - lastSeenMs <= staleMs) return task;
-			count += 1;
-			return {
-				...task,
-				heartbeat: { ...task.heartbeat, alive: false, lastSeenAt: now },
-			};
-		});
-		saveRunTasks(loaded.manifest, tasks);
+		// R4-6 (DR-02 Wave 2 Cluster C): this sweep used to be an UNLOCKED
+		// load→map→save (":125 no withRunLock - best-effort") — a cross-process
+		// writer holding the run lock (leader heartbeats, task claims, delegate
+		// flushes) could land a fresh tasks.json between our read and write and
+		// get clobbered by the STALE array. Now a run-locked RMW with the fresh
+		// re-read INSIDE the lock (R13-S1 canonical pattern, team-tool/api/heartbeat.ts).
+		// Best-effort semantics are preserved on contention: the UI never blocks —
+		// the sweep is skipped with a warn, never a stale write.
+		let applied: { tasks: TeamTaskState[]; count: number } | undefined;
+		try {
+			applied = withRunLockSync(loaded.manifest, () => {
+				const fresh = loadRunManifestById(loaded.manifest.cwd, loaded.manifest.runId);
+				if (!fresh) return undefined;
+				const result = markStaleWorkerHeartbeatsDead(fresh.tasks, Date.now());
+				// count=0 → nothing changed; skip the identical-content rewrite.
+				if (result.count > 0) saveRunTasks(fresh.manifest, result.tasks);
+				return result;
+			});
+		} catch (error) {
+			if (isRunLockBusyError(error)) {
+				logInternalError("run-action-dispatcher.killStale", error, `runId=${runId} skipped: run lock busy`, "warn");
+				return {
+					ok: false,
+					message: `Skipped kill-stale for run '${runId}': another operation holds the run lock. Try again in a moment.`,
+				};
+			}
+			throw error;
+		}
+		if (!applied) return { ok: false, message: `Run '${runId}' not found.` };
+		const message = `Marked ${applied.count} stale worker heartbeat(s) dead.`;
 		appendEventBuffered(loaded.manifest.eventsPath, {
 			type: "worker.kill_stale",
 			runId,
-			message: `Marked ${count} stale worker heartbeat(s) dead.`,
-			data: { count },
+			message,
+			data: { count: applied.count },
 		}).catch((e) => logInternalError("run_action_dispatcher.buffered", e, "type=worker.kill_stale"));
 		return {
 			ok: true,
-			message: `Marked ${count} stale worker heartbeat(s) dead.`,
-			data: { count },
+			message,
+			data: { count: applied.count },
 		};
 	} catch (error) {
 		return err(error);

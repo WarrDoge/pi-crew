@@ -1,7 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readCrewAgents, saveCrewAgents } from "../runtime/crew-agent-records.ts";
 import { checkProcessLiveness, isActiveRunStatus } from "../runtime/process-status.ts";
-import { withRunLock } from "../state/coordination/locks.ts";
+import { withRunLock, withRunLockSync } from "../state/coordination/locks.ts";
 import { appendEventAsync, readEventsCursor, type TeamEvent } from "../state/event-log/event-log.ts";
 import { loadRunManifestById, saveRunTasks, updateRunStatus } from "../state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../state/types.ts";
@@ -70,24 +70,49 @@ function isTaskActive(task: TeamTaskState): boolean {
 	return task.status === "running" || task.status === "queued" || task.status === "waiting";
 }
 
+/**
+ * R4-7 (DR-02 Wave 2 Cluster C): pure RMW core of the async-died sweep —
+ * flip ONLY still-active tasks to failed. Exported so the locked sweep body
+ * stays unit-testable without the notifier interval harness (repo seam
+ * pattern). Predicate is byte-identical to the previous inline map.
+ */
+export function failStillActiveTasks(tasks: readonly TeamTaskState[], failedAt: string, message: string): TeamTaskState[] {
+	return tasks.map((task) =>
+		isTaskActive(task)
+			? {
+					...task,
+					status: "failed",
+					finishedAt: failedAt,
+					error: message,
+				}
+			: task,
+	);
+}
+
 function markActiveTasksAndAgentsFailed(run: TeamRunManifest, message: string): void {
-	const loaded = loadRunManifestById(run.cwd, run.runId); // NOTE: no withRunLock - best-effort only; concurrent writes may cause inconsistency;
-	const tasks = loaded?.tasks ?? [];
 	const failedAt = new Date().toISOString();
-	if (tasks.some(isTaskActive)) {
-		saveRunTasks(
-			run,
-			tasks.map((task) =>
-				isTaskActive(task)
-					? {
-							...task,
-							status: "failed",
-							finishedAt: failedAt,
-							error: message,
-						}
-					: task,
-			),
-		);
+	// R4-7 (DR-02 Wave 2 Cluster C): the task flip used to be an UNLOCKED
+	// load→map→save on tasks.json (":74 no withRunLock - best-effort"). It is
+	// now a run-locked RMW with the fresh re-read INSIDE the lock (R13-S1
+	// canonical pattern): only tasks that are STILL active in the fresh read
+	// are flipped, so a task that completed (or was cancelled) by a concurrent
+	// writer is never overwritten with failed. Lock re-entrance: the sole
+	// caller (markDeadAsyncRunIfNeeded) already holds the ASYNC run lock for
+	// this run in the same async context, so this sync acquisition bypasses
+	// via lockCtx — no self-deadlock, no double file acquire; an unlocked
+	// future caller gets real mutual exclusion.
+	try {
+		withRunLockSync(run, () => {
+			const fresh = loadRunManifestById(run.cwd, run.runId);
+			if (!fresh) return;
+			if (!fresh.tasks.some(isTaskActive)) return;
+			saveRunTasks(fresh.manifest, failStillActiveTasks(fresh.tasks, failedAt, message));
+		});
+	} catch (error) {
+		// Best-effort sweep: lock contention or a store failure must not break
+		// the notifier tick (the run-status flip above already happened) — warn
+		// and keep going; whatever remains active is retried by the next pass.
+		logInternalError("async-notifier.markActiveTasksFailed", error, `runId=${run.runId}`, "warn");
 	}
 	const agents = readCrewAgents(run);
 	if (agents.some((agent) => agent.status === "running" || agent.status === "queued" || agent.status === "waiting")) {
