@@ -127,6 +127,18 @@ export function resolveRpcTurnTimeoutMs(read: (name: string) => number | undefin
 interface SettleTracking {
 	lastAssistantText: string | undefined;
 	settled: boolean;
+	/** DR-01 P0 completeness: an assistant `message_end` was observed at all
+	 *  (guards the empty-settle stamp when a session produced no assistant
+	 *  turn — spawn-level failures have their own error channels). */
+	sawAssistantMessageEnd: boolean;
+	/** DR-01 P0 completeness: true when the LAST assistant `message_end` had
+	 *  non-empty text — mirrors ParsedPiJsonOutput.settledWithoutAnswer for
+	 *  the RPC transport, which has NO transcript file (stdio-only per README
+	 *  "Limitations"), so the attemptErrorFor settledWithoutAnswer branch
+	 *  cannot see this path. Upstream 429 exhaustion ends the turn with EMPTY
+	 *  assistant messages while lastAssistantText keeps an early pre-outage
+	 *  sentence — the same "finalText lies" shape as the stdio false-green. */
+	lastAssistantMessageEndHadText: boolean;
 	/**
 	 * DR5 double-execution guard: true once ANY session event other than
 	 * `agent_settled` (message_start / message_end / extension_error / …)
@@ -165,7 +177,13 @@ function extractAssistantText(message: unknown): string | undefined {
  * (error field), never a throw from the transport itself.
  */
 export async function runRpcWorker(input: RpcWorkerInput): Promise<ChildPiRunResult> {
-	const tracking: SettleTracking = { lastAssistantText: undefined, settled: false, agentStarted: false };
+	const tracking: SettleTracking = {
+		lastAssistantText: undefined,
+		settled: false,
+		sawAssistantMessageEnd: false,
+		lastAssistantMessageEndHadText: false,
+		agentStarted: false,
+	};
 	let settleResolve: (() => void) | undefined;
 	const settledPromise = new Promise<void>((resolve) => {
 		settleResolve = resolve;
@@ -185,6 +203,14 @@ export async function runRpcWorker(input: RpcWorkerInput): Promise<ChildPiRunRes
 			const record = event as { type?: unknown; message?: unknown };
 			if (record?.type === "message_end") {
 				const text = extractAssistantText(record.message);
+				const isAssistant =
+					typeof record.message === "object" &&
+					record.message !== null &&
+					(record.message as { role?: unknown }).role === "assistant";
+				if (isAssistant) {
+					tracking.sawAssistantMessageEnd = true;
+					tracking.lastAssistantMessageEndHadText = text !== undefined;
+				}
 				if (text !== undefined) tracking.lastAssistantText = text;
 			} else if (record?.type === "agent_settled") {
 				tracking.settled = true;
@@ -262,6 +288,23 @@ export async function runRpcWorker(input: RpcWorkerInput): Promise<ChildPiRunRes
 	if (runError) result.error = runError;
 	else if (abortError && !tracking.settled) result.error = `rpc abort failed: ${abortError.message}`;
 	if (tracking.lastAssistantText !== undefined) result.rawFinalText = tracking.lastAssistantText;
+	// DR-01 P0 completeness: empty-settle on the RPC transport. No transcript
+	// file exists here, so the attemptErrorFor settledWithoutAnswer branch
+	// cannot see this path — stamp the same retryable error from live
+	// tracking. Gates: no prior error (spawn/abort precedence), the turn
+	// actually settled, an assistant message_end was observed with EMPTY
+	// text, and the caller did not abort (an aborted turn must not burn a
+	// fallback model). rpcAgentStarted (set below) keeps
+	// isEarlyRpcTransportFailure from falling back to stdio for this error.
+	if (
+		!result.error &&
+		tracking.settled &&
+		tracking.sawAssistantMessageEnd &&
+		!tracking.lastAssistantMessageEndHadText &&
+		!input.signal?.aborted
+	) {
+		result.error = "Model settled without a final answer (rpc: empty final assistant message; upstream rate-limit/429 exhaustion)";
+	}
 	// DR5 bridge: explicit result field (NOT an error-string marker) so the
 	// non-retryable contract is testable and greppable — isEarlyRpcTransportFailure
 	// consults it (run-worker.ts). Set whenever the agent turn had begun.

@@ -20,6 +20,14 @@ export interface ParsedPiJsonOutput {
 	 * "429 ... overloaded"). Used to detect runs that exited 0 but produced
 	 * nothing because the model was rate-limited — see task-runner 429 fix. */
 	errorMessages?: string[];
+	/** DR-01 (deep review 2026-10-14): true when the LAST assistant
+	 * `message_end` event in the stream carried no non-empty text — the
+	 * session settled without a final answer. Upstream 429 exhaustion
+	 * manifests as a chain of EMPTY assistant message_end events (content [],
+	 * usage 0) between auto-retry cycles — never as stopReason:"error" — so
+	 * `errorMessages` stays empty and `finalText` keeps an early pre-outage
+	 * sentence. undefined when no assistant message_end was parsed at all. */
+	settledWithoutAnswer?: boolean;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -82,12 +90,23 @@ export function extractText(value: unknown): string[] {
 	return text.filter((entry) => entry.trim().length > 0);
 }
 
+/** True for `message_end` events whose message is assistant-role. Feeds the
+ *  settledWithoutAnswer flag (DR-01): see ParsedPiJsonOutput.settledWithoutAnswer. */
+function isAssistantMessageEnd(event: unknown): boolean {
+	const obj = asRecord(event);
+	if (!obj || obj.type !== "message_end") return false;
+	const message = asRecord(obj.message);
+	return message?.role === "assistant";
+}
+
 export function parsePiJsonOutput(stdout: string): ParsedPiJsonOutput {
 	let jsonEvents = 0;
 	const textEvents: string[] = [];
 	const patches: string[] = [];
 	const errorMessages: string[] = [];
 	let usage: ParsedPiUsage | undefined;
+	let sawAssistantMessageEnd = false;
+	let lastAssistantMessageHadText = false;
 	for (const line of stdout.split("\n")) {
 		const trimmed = line.trim();
 		if (!trimmed) continue;
@@ -98,7 +117,12 @@ export function parsePiJsonOutput(stdout: string): ParsedPiJsonOutput {
 			continue;
 		}
 		jsonEvents++;
-		textEvents.push(...extractText(event));
+		const eventTexts = extractText(event);
+		textEvents.push(...eventTexts);
+		if (isAssistantMessageEnd(event)) {
+			sawAssistantMessageEnd = true;
+			lastAssistantMessageHadText = eventTexts.length > 0;
+		}
 		// Extract unified patches from tool_result events
 		extractPatch(event, patches);
 		// Extract provider/model error messages from message_end events (429 fix).
@@ -114,6 +138,7 @@ export function parsePiJsonOutput(stdout: string): ParsedPiJsonOutput {
 		usage,
 		patches: patches.length > 0 ? patches : undefined,
 		errorMessages: errorMessages.length > 0 ? errorMessages : undefined,
+		settledWithoutAnswer: sawAssistantMessageEnd ? !lastAssistantMessageHadText : undefined,
 	};
 }
 

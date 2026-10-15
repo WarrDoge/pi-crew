@@ -490,18 +490,29 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 					runId: manifest.runId,
 					role: call.role ?? call.agent,
 				});
-				if (childResult.exitCode !== 0 || childResult.error) {
+				const parsed = parsePiJsonOutput(childResult.stdout);
+				// DR-01 P0 completeness (DWF): the attemptErrorFor empty-settle branch
+				// lives in the task-runner attempt loop, which ctx.agent() bypasses
+				// (runWorker is called directly here). Without this gate a
+				// 429-exhausted worker (exit 0, empty final assistant message) passes
+				// the exitCode/error check and its rawFinalText/finalText — an early
+				// opening sentence — becomes the step's "result": a false-green DWF
+				// step. See run team_20261014082741 for the live stdio shape.
+				if (childResult.exitCode !== 0 || childResult.error || parsed.settledWithoutAnswer === true) {
 					// BDG-2: un-reserve the estimate on spawn failure.
 					wfState.spent -= estimate;
 					reserved = false;
 					return {
 						ok: false,
 						text: "",
-						error: childResult.error ?? `exit ${childResult.exitCode}`,
+						error:
+							childResult.error ??
+							(parsed.settledWithoutAnswer === true
+								? "Model settled without a final answer (empty final assistant message; upstream rate-limit/429 exhaustion)"
+								: `exit ${childResult.exitCode}`),
 						durationMs: Date.now() - started,
 					};
 				}
-				const parsed = parsePiJsonOutput(childResult.stdout);
 				// round-14 P1-2: accumulate this run's token usage into the workflow budget.
 				// BDG-2: adjust the reserve — subtract the estimate, add the actual usage.
 				// This correctly reduces spent when actualUsage < estimate.

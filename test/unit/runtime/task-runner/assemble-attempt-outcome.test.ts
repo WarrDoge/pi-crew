@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ChildPiRunResult } from "../../../../src/runtime/child-pi/child-pi.ts";
+import { isRetryableModelFailure } from "../../../../src/runtime/model/model-fallback.ts";
+import type { ParsedPiJsonOutput } from "../../../../src/runtime/output/pi-json-output.ts";
 import { attemptErrorFor, evidenceStatusFor } from "../../../../src/runtime/task-runner/child-executor.ts";
 
 // Quick Win 11 (Pattern 11 — error-as-data contract): pin the per-attempt
@@ -82,4 +84,42 @@ test("QW11 attemptErrorFor: no error + benign parsedOutput → undefined", () =>
 	const parsed = { textEvents: ["real output"], finalText: "done", errorMessages: [] } as any;
 	const err = attemptErrorFor(mkResult({ exitCode: 0 }), parsed, "t1");
 	assert.equal(err, undefined, "clean run with real output has no error");
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// DR-01 (deep review 2026-10-14, P0 false-green): empty-settle detection.
+// A 429-exhausted child exits 0 with NO stopReason error; the only signal is
+// parsedOutput.settledWithoutAnswer (empty FINAL assistant message_end).
+// attemptErrorFor must surface it as a RETRYABLE error so the model-fallback
+// chain advances instead of the attempt counting as success (the exact bug
+// that marked 7/7 tasks of run team_20261014082741 "completed" with zero
+// findings).
+// ───────────────────────────────────────────────────────────────────────────
+test("DR-01 attemptErrorFor: settled-without-answer (exit 0, no error) → retryable empty-settle error", () => {
+	const parsed = { settledWithoutAnswer: true } as ParsedPiJsonOutput;
+	const err = attemptErrorFor(mkResult({ exitCode: 0 }), parsed, "t1");
+	assert.ok(err, "empty settle must surface an error");
+	assert.match(err!, /settled without a final answer/i);
+	assert.equal(isRetryableModelFailure(err), true, "must match retryable patterns so the fallback chain advances");
+});
+
+test("DR-01 attemptErrorFor: cancelled attempt with settledWithoutAnswer → undefined (abort must not burn fallback)", () => {
+	const parsed = { settledWithoutAnswer: true } as ParsedPiJsonOutput;
+	const err = attemptErrorFor(mkResult({ exitCode: 0, exitStatus: { cancelled: true } as any }), parsed, "t1");
+	assert.equal(err, undefined);
+});
+
+test("DR-01 attemptErrorFor: settledWithoutAnswer but patches exist (patch-only recovery) → undefined", () => {
+	const parsed = { settledWithoutAnswer: true, patches: ["--- a/x\n+++ b/x\n@@ -1 +1 @@"] } as ParsedPiJsonOutput;
+	assert.equal(attemptErrorFor(mkResult({ exitCode: 0 }), parsed, "t1"), undefined);
+});
+
+test("DR-01 attemptErrorFor: healthy settle (settledWithoutAnswer false) → undefined", () => {
+	const parsed = { settledWithoutAnswer: false, finalText: "answer" } as ParsedPiJsonOutput;
+	assert.equal(attemptErrorFor(mkResult({ exitCode: 0 }), parsed, "t1"), undefined);
+});
+
+test("DR-01 attemptErrorFor: hard error takes precedence over empty-settle", () => {
+	const parsed = { settledWithoutAnswer: true } as ParsedPiJsonOutput;
+	assert.equal(attemptErrorFor(mkResult({ error: "hard fail" }), parsed, "t1"), "hard fail");
 });

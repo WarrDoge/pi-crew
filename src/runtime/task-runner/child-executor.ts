@@ -414,6 +414,21 @@ export function attemptErrorFor(
 		const rateLimitErr = detectRetryableModelFailureFromOutput(parsedOutput);
 		if (rateLimitErr) err = rateLimitErr;
 	}
+	// DR-01 (deep review 2026-10-14, P0 false-green): upstream rate-limit
+	// exhaustion can end a session WITHOUT stopReason:"error" — the transcript
+	// is a chain of EMPTY assistant message_end events (content [], usage 0)
+	// between auto-retry cycles, ending in agent_settled. The detector above
+	// misses that shape (no errorMessage is ever emitted), and finalText lies
+	// (it keeps the LAST NON-EMPTY text — an early opening sentence from
+	// before the outage, which is exactly what made failed audits look
+	// green). settledWithoutAnswer tracks the actual FINAL assistant message;
+	// patches still count as real work (coder roles may legitimately end
+	// patch-only); cancelled attempts are excluded so an abort never burns a
+	// fallback model. Message includes rate-limit/429 keywords so
+	// isRetryableModelFailure lets the model-fallback chain advance.
+	if (!err && !childResult.exitStatus?.cancelled && parsedOutput?.settledWithoutAnswer === true && !(parsedOutput.patches?.length ?? 0)) {
+		err = "Model settled without a final answer (empty final assistant message; upstream rate-limit/429 exhaustion)";
+	}
 	return err;
 }
 

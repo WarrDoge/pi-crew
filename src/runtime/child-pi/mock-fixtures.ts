@@ -68,6 +68,29 @@ export async function runMockChildPi(
 		return { exitCode: 0, stdout, stderr: "" };
 	}
 
+	if (mock === "json-429-empty-settle") {
+		// DR-01 P0 test seam: reproduces the live 429-exhaustion shape (runs
+		// team_20261014082741 / team_20261014093334): opening assistant text +
+		// tool results, then EMPTY assistant message_end events between
+		// auto-retry cycles, ending agent_settled — exit 0, NO stopReason error,
+		// and finalText keeps the early opening sentence ("finalText lies").
+		const opening = JSON.stringify({
+			type: "message_end",
+			message: { role: "assistant", content: [{ type: "text", text: `[MOCK] Starting work for ${input.agent.name}` }] },
+		});
+		const toolResult = JSON.stringify({
+			type: "message_end",
+			message: { role: "toolResult", content: [{ type: "text", text: "[MOCK] tool output" }] },
+		});
+		const emptyAssistant = JSON.stringify({
+			type: "message_end",
+			message: { role: "assistant", content: [], usage: { input: 0, output: 0 } },
+		});
+		const stdout = [opening, toolResult, emptyAssistant, emptyAssistant, JSON.stringify({ type: "agent_settled" })].join("\n") + "\n";
+		await observe(input, stdout);
+		return { exitCode: 0, stdout, stderr: "" };
+	}
+
 	if (mock === "json-success" || mock === "adaptive-plan") {
 		const text =
 			mock === "adaptive-plan" && effectiveTask.includes("ADAPTIVE_PLAN_JSON_START")

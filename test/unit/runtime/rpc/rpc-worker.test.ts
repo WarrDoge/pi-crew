@@ -238,3 +238,78 @@ test("resolvers: live env wiring (getCrewEnv-backed default reader)", () => {
 		else process.env[RPC_TURN_TIMEOUT_ENV] = savedTurnTimeout;
 	}
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// DR-01 P0 completeness (empty-settle on the RPC transport): the RPC path has
+// NO transcript file, so attemptErrorFor's settledWithoutAnswer branch cannot
+// see it — runRpcWorker must stamp the retryable error itself from live
+// tracking. Shape mirrors run team_20261014082741: opening assistant text,
+// then EMPTY assistant message_end events, then agent_settled.
+// ───────────────────────────────────────────────────────────────────────────
+function scriptEmptySettle(fake: FakeRpcServer) {
+	fake.onLine = (line) => {
+		const record = JSON.parse(line) as { id?: string; type?: string };
+		if (record.type === "prompt") {
+			fake.emit({ id: record.id, type: "response", command: "prompt", success: true, data: { disposition: "appended" } });
+			fake.emit({
+				type: "message_end",
+				message: { role: "assistant", content: [{ type: "text", text: "I'll start by exploring the shard." }] },
+			});
+			fake.emit({
+				type: "message_end",
+				message: { role: "toolResult", content: [{ type: "text", text: "tool output" }] },
+			});
+			fake.emit({ type: "message_end", message: { role: "assistant", content: [], usage: { input: 0, output: 0 } } });
+			fake.emit({ type: "message_end", message: { role: "assistant", content: [], usage: { input: 0, output: 0 } } });
+			fake.emit({ type: "agent_settled" });
+		}
+	};
+	fake.onStdinEnd = () => {
+		setTimeout(() => fake.exitWith(0), 5);
+	};
+}
+
+test("DR-01 empty-settle: 429-exhausted RPC turn stamps a retryable error (no false-green)", async () => {
+	const fake = createFakeRpcServer();
+	scriptEmptySettle(fake);
+	const result = await runWith(fake);
+	assert.equal(result.exitCode, 0);
+	assert.ok(result.error, "empty settle must surface an error on the RPC path");
+	assert.match(result.error!, /settled without a final answer/i);
+	assert.match(result.error!, /rate-limit\/429/i, "must carry retryable keywords for the model-fallback chain");
+	assert.equal(
+		result.rawFinalText,
+		"I'll start by exploring the shard.",
+		"rawFinalText keeps the pre-outage sentence — the exact lie the stamp corrects",
+	);
+});
+
+test("DR-01 empty-settle: healthy settle (final assistant text) still maps with NO error", async () => {
+	const fake = createFakeRpcServer();
+	scriptHappyPath(fake, "real final answer");
+	const result = await runWith(fake);
+	assert.equal(result.error, undefined, "healthy settle must not be flagged");
+	assert.equal(result.rawFinalText, "real final answer");
+});
+
+test("DR-01 empty-settle: aborted turn with empty settle does NOT stamp (abort must not burn fallback)", async () => {
+	const fake = createFakeRpcServer();
+	scriptEmptySettle(fake);
+	const controller = new AbortController();
+	const result = await runWith(fake, {}).then(async (r) => r); // warm-up guard
+	assert.ok(result);
+	// Abort BEFORE the settle lands: run again, abort immediately after start.
+	const fake2 = createFakeRpcServer();
+	scriptEmptySettle(fake2);
+	controller.abort();
+	const aborted = await runRpcWorker({
+		task: "do the thing",
+		signal: controller.signal,
+		rpc: { spawnFn: () => fake2.handle, commandTimeoutMs: 400, stopTimeoutMs: 300 },
+	});
+	assert.notEqual(
+		aborted.error,
+		"Model settled without a final answer (rpc: empty final assistant message; upstream rate-limit/429 exhaustion)",
+		"aborted turn must not carry the settled error",
+	);
+});
