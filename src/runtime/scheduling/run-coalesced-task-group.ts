@@ -5,9 +5,11 @@ import { writeArtifact } from "../../state/stores/artifact-store.ts";
 import { loadRunManifestById, saveRunTasksAsync, updateRunStatus } from "../../state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../state/types.ts";
 import type { WorkflowStep } from "../../workflows/workflow-config.ts";
+import type { ChildPiRunResult } from "../child-pi/child-pi.ts";
 import { appendDeadletter } from "../deadletter.ts";
 import { createWorkerHeartbeat, touchWorkerHeartbeat } from "../heartbeat/worker-heartbeat.ts";
 import type { CrewRuntimeMode } from "../model/runtime-resolver.ts";
+import { parsePiJsonOutput } from "../output/pi-json-output.ts";
 import type { RetryPolicy } from "../recovery/retry-executor.ts";
 import { DEFAULT_RETRY_POLICY, executeWithRetry } from "../recovery/retry-executor.ts";
 import { permissionForRole } from "../role-permission.ts";
@@ -191,7 +193,7 @@ export async function runCoalescedTaskGroup(input: CoalescedTaskGroupInput): Pro
 				timeoutHandle.unref?.();
 			}
 			try {
-				return await runWorker({
+				const workerResult = await runWorker({
 					cwd: firstTask.cwd,
 					task: combinedPrompt,
 					agent,
@@ -209,6 +211,12 @@ export async function runCoalescedTaskGroup(input: CoalescedTaskGroupInput): Pro
 						workerPid = pid;
 					},
 				});
+				// DR-02 WI-1 (R4-1 audit): gate the 429-empty-settle false-green
+				// PER ATTEMPT (inside runOnce, before the result escapes to the
+				// retry wrapper) so the existing retry machinery applies — see
+				// throwIfSettledWithoutAnswer for why this must throw, not flip.
+				throwIfSettledWithoutAnswer(workerResult);
+				return workerResult;
 			} finally {
 				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (externalAbortListener && signal) {
@@ -460,6 +468,49 @@ async function repairGroupTerminalWrite(manifest: TeamRunManifest, taskIds: stri
 export const __test__persistGroupHeartbeats = persistGroupHeartbeats;
 /** @internal 3.5 R15-3 test export — exercise the terminal repair write directly. */
 export const __test__repairGroupTerminalWrite = repairGroupTerminalWrite;
+
+/**
+ * DR-02 WI-1 (R4-1 audit, 2026-10-15): coalesced dispatch must not
+ * false-green on upstream rate-limit exhaustion.
+ *
+ * Bug: this path calls runWorker directly and never parsed the pi-json event
+ * stream — a 429-exhausted worker (exit 0, NO stopReason error, a chain of
+ * EMPTY assistant message_end events ending agent_settled) sailed through
+ * the legacy success gate (`exitCode === 0 && !error`), while `rawFinalText`
+ * kept a stale opening sentence from BEFORE the outage, so EVERY task in the
+ * group was marked completed with garbage text. The singleton path fixed
+ * this in DR-01 (attemptErrorFor's settledWithoutAnswer branch,
+ * child-executor.ts) and the DWF ctx.agent() path mirrors it
+ * (dynamic-workflow-context.ts) — the coalesced path was the remaining hole.
+ *
+ * Gate (mirrors the DR-01 attemptErrorFor branch): parse the stdout event
+ * stream and THROW when the session settled without a final answer.
+ * parsePiJsonOutput is line-safe on non-JSON output (non-JSON lines are
+ * skipped), so plain-text and json-success outputs leave settledWithoutAnswer
+ * undefined and the healthy path is byte-identical to before. Patches still
+ * count as real work (coder roles may legitimately end patch-only) and
+ * cancelled attempts are excluded, exactly like the DR-01 gate. The message
+ * keeps the DR-01 rate-limit/429 keywords so configured retryableErrors globs
+ * can match it.
+ *
+ * WHY A THROW (not a post-retry success=false flip): executeWithRetry retries
+ * THROWN errors — a returned-but-errored result is never retried — so throwing
+ * per attempt inside runOnce lets the transient 429 burn the existing retry
+ * budget, and exhaustion fires onRetryGivenUp → the US-003 group deadletter.
+ * The final throw lands in the dispatch catch path: success=false, rawOutput
+ * carries this message, and every group task maps to "failed".
+ */
+function throwIfSettledWithoutAnswer(result: ChildPiRunResult): void {
+	if (result.error) return; // a hard error already failed the attempt.
+	if (result.exitStatus?.cancelled) return; // an abort never fails the gate.
+	const parsed = parsePiJsonOutput(result.stdout);
+	if (parsed.settledWithoutAnswer !== true) return; // healthy/undefined: unchanged.
+	if ((parsed.patches?.length ?? 0) > 0) return; // patch-only work is real work.
+	throw new Error("Model settled without a final answer (coalesced: empty final assistant message; upstream rate-limit/429 exhaustion)");
+}
+
+/** @internal DR-02 WI-1 test export — exercise the gate directly. */
+export const __test__throwIfSettledWithoutAnswer = throwIfSettledWithoutAnswer;
 
 async function buildCoalescedPrompt(
 	manifest: TeamRunManifest,
