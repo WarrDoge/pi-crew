@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { logInternalError } from "../../utils/internal-error.ts";
 import { atomicWriteFile } from "../atomic-write.ts";
-import { type TeamEvent, withEventLogLockSync } from "./event-log.ts";
+import { type TeamEvent, withEventLogAppendLockSync, withEventLogLockSync } from "./event-log.ts";
 import { poisonMarkerPath } from "./poison-marker.ts";
 
 /**
@@ -169,7 +169,11 @@ export interface CompactionResult {
  * 5. If events were lost, append them
  * 6. Return compaction stats
  */
-export function compactEventLog(eventsPath: string, config?: Partial<RotationConfig>): CompactionResult | undefined {
+export function compactEventLog(
+	eventsPath: string,
+	config?: Partial<RotationConfig>,
+	options?: CompactionLockOptions,
+): CompactionResult | undefined {
 	// US-001 (2026-09-22): lock-scope reduction. The expensive part is the READ +
 	// parse of the whole log (prepareCompaction). It is read-only, so it does NOT
 	// need the append lock: hold the lock ONLY for the write+recover phase
@@ -196,7 +200,15 @@ export function compactEventLog(eventsPath: string, config?: Partial<RotationCon
 	// log grew unbounded until events were silently dropped past 50MB).
 	const prepared = prepareCompaction(eventsPath, config);
 	if (!prepared) return undefined;
-	return compactPreparedEventLog(eventsPath, prepared);
+	return compactPreparedEventLog(eventsPath, prepared, options);
+}
+
+/** Options for the locked write phase of compaction. `lock` is forwarded to
+ * `withEventLogAppendLockSync` (and transitively `withEventLogLockSync`) so
+ * callers/tests can bound the wait — the defaults (5s timeout / 10s stale)
+ * mirror both existing lock families. */
+export interface CompactionLockOptions {
+	lock?: { timeoutMs?: number; staleMs?: number };
 }
 
 /**
@@ -212,15 +224,40 @@ export function compactEventLog(eventsPath: string, config?: Partial<RotationCon
  * ones it never saw. So under the lock we read the bytes appended after the
  * snapshot offset and append them to the write. Appenders hold the same lock,
  * so this read is a complete tail snapshot.
+ *
+ * R4-2 (DR-02 Wave 2, 2026-10-15): the write phase now ADDITIONALLY acquires the
+ * async family's `.alock` (sync-mode, via `withEventLogAppendLockSync`) BEFORE
+ * `readTailSince`/the `atomicWriteFile` rename, releasing it only after the C2
+ * recovery check completes. Rationale: async-family appends hold `.alock`
+ * ACROSS await gaps (`open(eventsPath, "a")` → `appendFile`); running the rename
+ * under `.mkdirlock` alone let it interleave with that gap, orphaning the
+ * appender's fd — its event landed on the old inode and was silently lost (C2
+ * only re-splices the `kept` window). Holding `.alock` across the whole write
+ * phase excludes in-flight async appends cross-process (same on-disk lock dir
+ * + pid-file protocol). Lock order stays strictly `.mkdirlock` → `.alock` (the
+ * async family never takes `.mkdirlock`), so no deadlock. NOT archive-style by
+ * lead decision: rotation's rename-to-archive already preserves in-flight fds
+ * (ST-8), so only compaction's inode-replacing write needed the guard.
  */
 export function compactPreparedEventLog(
 	eventsPath: string,
 	prepared: { lines: string; originalSize: number; originalCount: number; kept: TeamEvent[] },
+	options?: CompactionLockOptions,
 ): CompactionResult | undefined {
-	return withEventLogLockSync(eventsPath, () => {
-		const merged = { ...prepared, lines: prepared.lines + readTailSince(eventsPath, prepared.originalSize) };
-		return applyCompactionUnlocked(eventsPath, merged);
-	});
+	return withEventLogLockSync(
+		eventsPath,
+		() => {
+			return withEventLogAppendLockSync(
+				eventsPath,
+				() => {
+					const merged = { ...prepared, lines: prepared.lines + readTailSince(eventsPath, prepared.originalSize) };
+					return applyCompactionUnlocked(eventsPath, merged);
+				},
+				options?.lock,
+			);
+		},
+		options?.lock,
+	);
 }
 
 /**

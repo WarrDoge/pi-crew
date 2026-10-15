@@ -219,6 +219,125 @@ export function withEventLogLockSync<T>(eventsPath: string, fn: () => T, options
 	}
 }
 
+/**
+ * R4-2 (DR-02 Wave 2, 2026-10-15): SYNC-mode acquisition of the ASYNC family's
+ * `.alock` lock dir (`${eventsPath}.alock`). Mirrors the `withEventLogLockSync`
+ * protocol exactly — `fs.mkdirSync` (O_EXCL semantics on POSIX), pid file via
+ * `openSync(pidFile, "wx")` + plain write, mtime-stale reclaim checked FIRST for
+ * every holder (Round 26 BUG 4 pattern), dead-pid secondary fast-path that only
+ * WAITS (never steals a fresh lock), `sleepSync(50)` bounded retry loop, and a
+ * PID-guarded release that never deletes a stealer's dir (Round 26 BUG 5).
+ *
+ * WHY this exists: the async append family (`withEventLogLockAsync` →
+ * `appendEventAsync`) holds `.alock` ACROSS await gaps — notably between
+ * `fs.promises.open(eventsPath, "a")` and `fd.appendFile(...)`. Compaction's
+ * `applyCompactionUnlocked` replaces the events file via `atomicWriteFile`
+ * (temp+rename → new inode). When compaction ran under `.mkdirlock` only, an
+ * fd opened by a mid-gap async append kept pointing at the OLD inode, which the
+ * rename orphaned → the append was silently lost (C2 recovery only re-splices
+ * events in the `kept` window). Acquiring `.alock` around the compaction write
+ * phase closes that window: the rename can no longer interleave with an
+ * in-flight async-family append, cross-process included (same on-disk dir +
+ * pid-file protocol as the async acquirer).
+ *
+ * LOCK ORDER: strictly `.mkdirlock` → `.alock`. The async family NEVER takes
+ * `.mkdirlock` (its bodies call the unlocked compaction/rotation variants and
+ * the short `.seqlock` only), so a sync caller holding `.mkdirlock` may safely
+ * acquire this — but NEVER the reverse, and never call this from INSIDE
+ * `withEventLogLockAsync` (the dir would be our own — the retry loop would
+ * sleepSync-starve the very holder that must release it → guaranteed timeout).
+ *
+ * IN-PROCESS HAZARD (same rationale as the two-family split): if a SAME-PROCESS
+ * async-family holder is mid-await-gap on this `.alock`, this sync acquirer's
+ * `sleepSync` retry blocks the event loop the async holder needs to finish —
+ * the acquire can only end in the bounded timeout (throw), never in a steal.
+ * That is why the only in-tree caller is `compactPreparedEventLog`
+ * (event-log-rotation.ts), whose callers are cross-process / maintenance / test
+ * entry points, NOT the in-process append paths (those already hold `.alock`
+ * or call the unlocked variants directly).
+ */
+export function withEventLogAppendLockSync<T>(eventsPath: string, fn: () => T, options?: { timeoutMs?: number; staleMs?: number }): T {
+	// Ensure parent directory exists before attempting lock (mirrors the sync family).
+	fs.mkdirSync(path.dirname(eventsPath), { recursive: true });
+	const lockDir = `${eventsPath}.alock`;
+	const pidFile = path.join(lockDir, "pid");
+	const start = Date.now();
+	const timeout = options?.timeoutMs ?? 5000;
+	const staleMs = options?.staleMs ?? 10000;
+	let acquired = false;
+	while (true) {
+		try {
+			fs.mkdirSync(lockDir);
+			try {
+				// Same disposable pid file as both existing families: "wx" open +
+				// plain write — the lock dir itself is the mutex; the pid file only
+				// feeds the stale/dead detection and the guarded release.
+				const pidFd = fs.openSync(pidFile, "wx");
+				try {
+					fs.writeSync(pidFd, String(process.pid));
+				} finally {
+					fs.closeSync(pidFd);
+				}
+			} catch {
+				/* best-effort — e.g. EEXIST under a re-taken dir; stale pid is mtime-detected */
+			}
+			acquired = true;
+			break;
+		} catch {
+			if (Date.now() - start > timeout) {
+				throw errors.eventLogLockTimeout(eventsPath, timeout);
+			}
+			// Mtime-stale reclaim FIRST, independent of the pid file (Round 26 BUG 3
+			// pattern): a holder that crashed between mkdir and the pid write has no
+			// pid file — only an aged mtime can reclaim its dir.
+			try {
+				const dirStat = fs.statSync(lockDir);
+				if (Date.now() - dirStat.mtimeMs > staleMs) {
+					fs.rmSync(lockDir, { recursive: true, force: true });
+					continue;
+				}
+			} catch {
+				/* dir vanished — let loop retry */
+			}
+			// Dead-pid secondary fast-path (Round 26 BUG 4 pattern): mtime already
+			// handled above for ALL holders; a provably-dead pid that is not stale
+			// yet only makes us keep waiting — never steal a fresh lock on a pid
+			// lookup race.
+			try {
+				const raw = fs.readFileSync(pidFile, "utf-8").trim();
+				const ownerPid = Number.parseInt(raw, 10);
+				if (!Number.isNaN(ownerPid) && ownerPid !== process.pid) {
+					try {
+						process.kill(ownerPid, 0);
+					} catch {
+						/* dead — but mtime not stale yet, keep waiting */
+					}
+				}
+			} catch {
+				/* no pid file — mtime check above already handles it */
+			}
+			sleepSync(50);
+		}
+	}
+	try {
+		return fn();
+	} finally {
+		if (acquired) {
+			// PID-guarded release (Round 26 BUG 5 pattern): only remove the dir if
+			// the pid file still records OUR pid — if our fn outlived staleMs and a
+			// stealer re-took the dir, the stealer owns it now.
+			try {
+				const currentPid = fs.readFileSync(pidFile, "utf-8").trim();
+				if (currentPid === String(process.pid)) {
+					fs.rmSync(lockDir, { recursive: true, force: true });
+				}
+			} catch {
+				/* lock stolen or already gone — do not touch */
+			}
+		}
+	}
+}
+
 export function computeEventFingerprint(event: Pick<TeamEvent, "type" | "runId" | "taskId" | "data">): string {
 	return createHash("sha256")
 		.update(
@@ -306,8 +425,12 @@ async function drainAsyncQueues(): Promise<void> {
  *
  *  NOT re-entrant: callers inside this lock must use unlocked compaction
  *  variants (prepareCompaction + applyCompactionUnlocked, rotateEventLogUnlocked)
- *  to avoid self-deadlock. */
-async function withEventLogLockAsync<T>(
+ *  to avoid self-deadlock.
+ *
+ *  R4-2 note (2026-10-15): exported so tests (and future async callers) can pin
+ *  the `.alock` family's mutual exclusion against the sync-mode acquirer
+ *  `withEventLogAppendLockSync` used by the compaction path. */
+export async function withEventLogLockAsync<T>(
 	eventsPath: string,
 	fn: () => Promise<T>,
 	options?: { timeoutMs?: number; staleMs?: number },
