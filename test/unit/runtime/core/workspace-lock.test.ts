@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import {
 	acquireWorkspaceLock,
 	reclaimStaleLocks,
+	refreshWorkspaceLockHeartbeat,
 	type StartTimeResolver,
 	workspaceLockPath,
 } from "../../../../src/runtime/workspace-lock.ts";
@@ -243,6 +244,178 @@ describe("workspace-lock contention policy", () => {
 			/workspace busy/,
 			"failOnWorkspaceBusy must throw when the workspace is held",
 		);
+	});
+});
+
+describe("refreshWorkspaceLockHeartbeat (WI-2 / DR-02 R4-3)", () => {
+	let cwd: string;
+	beforeEach(() => {
+		cwd = makeTmpCwd();
+	});
+	afterEach(() => {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	});
+
+	it("re-stamps ONLY the heartbeat of a lock still owned by goalId+pid, preserving every other field", async () => {
+		const { resolver, set } = mockStartTimes();
+		set(FIXED_PID, 1000);
+		let now = 1_000_000;
+		const handle = await acquireWorkspaceLock(cwd, "goal_a", {
+			startTimeResolver: resolver,
+			pid: FIXED_PID,
+			now: () => now,
+			pollMs: 5,
+		});
+		const lockPath = workspaceLockPath(cwd);
+		const before = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
+
+		now += 15_000; // one refresh interval later
+		const refreshed = refreshWorkspaceLockHeartbeat(lockPath, "goal_a", { pid: FIXED_PID, now: () => now });
+		assert.equal(refreshed, true, "refresh must succeed while goal_a owns the lock");
+
+		const after = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
+		assert.equal(after.heartbeat, 1_015_000, "heartbeat must be re-stamped at the injected now");
+		assert.equal(after.pid, before.pid, "pid preserved");
+		assert.equal(after.startTime, before.startTime, "startTime preserved");
+		assert.equal(after.goalId, before.goalId, "goalId preserved");
+		assert.equal(after.acquiredAt, before.acquiredAt, "acquiredAt preserved");
+		assert.deepEqual(
+			Object.keys(after).sort(),
+			["acquiredAt", "goalId", "heartbeat", "pid", "startTime"],
+			"file format (field set) identical",
+		);
+		handle.release();
+	});
+
+	it("does NOT clobber a lock reclaimed by another goal (goalId mismatch → false, file untouched)", async () => {
+		const { resolver, set } = mockStartTimes();
+		set(FIXED_PID, 1000);
+		await acquireWorkspaceLock(cwd, "goal_a", {
+			startTimeResolver: resolver,
+			pid: FIXED_PID,
+			pollMs: 5,
+		});
+		const lockPath = workspaceLockPath(cwd);
+		// Simulate the lock being force-reclaimed + re-acquired by goal_other (same pid — the
+		// goalId guard alone must refuse the refresh, mirroring safeRelease's ownership check).
+		const reclaimedContents = {
+			pid: FIXED_PID,
+			startTime: 1000,
+			heartbeat: 9_999_999,
+			goalId: "goal_other",
+			acquiredAt: new Date(9_999_999).toISOString(),
+		};
+		fs.writeFileSync(lockPath, JSON.stringify(reclaimedContents));
+
+		const refreshed = refreshWorkspaceLockHeartbeat(lockPath, "goal_a", { pid: FIXED_PID, now: () => 5_000_000 });
+		assert.equal(refreshed, false, "refresh must refuse a lock owned by another goal");
+		assert.deepEqual(
+			JSON.parse(fs.readFileSync(lockPath, "utf-8")),
+			reclaimedContents,
+			"the new owner's lockfile must be byte-for-byte untouched",
+		);
+	});
+
+	it("does NOT refresh a lock whose pid differs (pid mismatch → false)", async () => {
+		const { resolver, set } = mockStartTimes();
+		set(FIXED_PID, 1000);
+		await acquireWorkspaceLock(cwd, "goal_a", {
+			startTimeResolver: resolver,
+			pid: FIXED_PID,
+			pollMs: 5,
+		});
+		const lockPath = workspaceLockPath(cwd);
+		const before = fs.readFileSync(lockPath, "utf-8");
+		const refreshed = refreshWorkspaceLockHeartbeat(lockPath, "goal_a", { pid: 77777, now: () => 5_000_000 });
+		assert.equal(refreshed, false, "refresh must refuse a lock owned by a different pid");
+		assert.equal(fs.readFileSync(lockPath, "utf-8"), before, "lockfile untouched");
+	});
+
+	it("returns false for a missing lockfile and creates nothing", () => {
+		const missing = path.join(cwd, ".crew", "state", "workspace-locks", "missing.lock");
+		assert.equal(refreshWorkspaceLockHeartbeat(missing, "goal_x"), false);
+		assert.ok(!fs.existsSync(missing), "refresh must never create a lockfile");
+	});
+});
+
+describe("heartbeat refresh vs staleness (WI-2 regression: live goal must not be force-stolen)", () => {
+	let cwd: string;
+	beforeEach(() => {
+		cwd = makeTmpCwd();
+	});
+	afterEach(() => {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	});
+
+	it("WITHOUT refresh: a held lock goes stale after 60s and a second acquire force-steals it (existing behavior pinned)", async () => {
+		const { resolver, set } = mockStartTimes();
+		set(FIXED_PID, 1000); // pid stays ALIVE with matching startTime the whole test —
+		// the steal below must be attributable to the heartbeat clause alone.
+		let now = 1_000_000;
+		const handleA = await acquireWorkspaceLock(cwd, "goal_a", {
+			startTimeResolver: resolver,
+			pid: FIXED_PID,
+			now: () => now,
+			heartbeatStaleMs: 60_000,
+			pollMs: 5,
+		});
+
+		// Goal runs >60s WITHOUT any heartbeat refresh (the WI-2 bug).
+		now += 120_000;
+
+		const handleB = await acquireWorkspaceLock(cwd, "goal_b", {
+			startTimeResolver: resolver,
+			pid: FIXED_PID,
+			now: () => now,
+			heartbeatStaleMs: 60_000,
+			pollMs: 5,
+		});
+		const contents = JSON.parse(fs.readFileSync(workspaceLockPath(cwd), "utf-8"));
+		assert.equal(contents.goalId, "goal_b", "stale-heartbeat lock is force-stolen even though the pid is alive (pinned)");
+		handleB.release();
+		handleA.release(); // no-op — its lock was reclaimed
+		assert.ok(!fs.existsSync(workspaceLockPath(cwd)));
+	});
+
+	it("WITH periodic refresh: a goal running >60s keeps its lock — second acquire does NOT steal", async () => {
+		const { resolver, set } = mockStartTimes();
+		set(FIXED_PID, 1000);
+		let now = 1_000_000;
+		const handleA = await acquireWorkspaceLock(cwd, "goal_a", {
+			startTimeResolver: resolver,
+			pid: FIXED_PID,
+			now: () => now,
+			heartbeatStaleMs: 60_000,
+			pollMs: 5,
+		});
+
+		// Simulate the goal loop's 15s refresh cadence over 3 minutes of goal time
+		// (12 refreshes — heartbeat never older than 15s ≪ 60s threshold).
+		for (let tick = 0; tick < 12; tick++) {
+			now += 15_000;
+			const refreshed = refreshWorkspaceLockHeartbeat(workspaceLockPath(cwd), "goal_a", { pid: FIXED_PID, now: () => now });
+			assert.equal(refreshed, true, `refresh #${tick + 1} must succeed while goal_a owns the lock`);
+		}
+		// now = 1_180_000: the goal has "run" 180s, but its heartbeat is 15s old.
+
+		// A second goal on the same cwd must see a LIVE lock: with failOnWorkspaceBusy it
+		// throws "workspace busy" instead of force-stealing (queue mode would just wait).
+		await assert.rejects(
+			acquireWorkspaceLock(cwd, "goal_b", {
+				startTimeResolver: resolver,
+				pid: FIXED_PID,
+				now: () => now,
+				heartbeatStaleMs: 60_000,
+				failOnWorkspaceBusy: true,
+				pollMs: 5,
+			}),
+			/workspace busy/,
+			"a live refreshed lock must NOT be reclaimed as stale",
+		);
+		const contents = JSON.parse(fs.readFileSync(workspaceLockPath(cwd), "utf-8"));
+		assert.equal(contents.goalId, "goal_a", "goal_a still owns the lock after running >60s with refresh");
+		handleA.release();
+		assert.ok(!fs.existsSync(workspaceLockPath(cwd)));
 	});
 });
 

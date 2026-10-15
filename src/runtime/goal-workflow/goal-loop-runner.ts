@@ -32,7 +32,7 @@ import { resolveCrewRuntime } from "../model/runtime-resolver.ts";
 import { registryFromModelContext } from "../model/session-model.ts";
 import { executeTeamRun } from "../team-runner.ts";
 import { compareSnapshot, snapshotManifests } from "../verification/verification-integrity.ts";
-import { acquireWorkspaceLock, type WorkspaceLockHandle } from "../workspace-lock.ts";
+import { acquireWorkspaceLock, refreshWorkspaceLockHeartbeat, type WorkspaceLockHandle } from "../workspace-lock.ts";
 import { bundleEvidence, evaluateGoal } from "./goal-evaluator.ts";
 import { GoalStore } from "./goal-state-store.ts";
 
@@ -538,6 +538,48 @@ export function deriveTranscriptPath(artifactsRoot: string, tasks: import("../..
 	return undefined;
 }
 
+/** Interval (ms) between workspace-lock heartbeat refreshes while a goal loop runs (WI-2 / DR-02 R4-3). 15s = 4x margin under the 60s staleness threshold. */
+export const WORKSPACE_LOCK_HEARTBEAT_REFRESH_MS = 15_000;
+
+export interface StartWorkspaceLockHeartbeatRefreshOptions {
+	/** Test injection: override the refresh interval (ms). */
+	refreshMs?: number;
+	/** Test injection: override the refresh implementation (default: refreshWorkspaceLockHeartbeat). */
+	refresh?: (lockPath: string, goalId: string) => boolean;
+}
+
+/**
+ * Start the periodic workspace-lock heartbeat refresh for a lock acquired by
+ * runGoalLoop (WI-2 / DR-02 R4-3).
+ *
+ * Without refresh, workspace-lock isLockStale clause (b) marks the lock stale
+ * after 60s REGARDLESS of holder pid liveness — a goal whose turn takes >60s
+ * gets its workspace lock force-stolen by a second goal on the same cwd
+ * (multi-goal clobber). This timer keeps the heartbeat young for the whole
+ * loop lifetime. It is unref()-ed (must not keep the background process
+ * alive) and the returned stop() MUST be called in the same finally that
+ * releases the lock. Refresh failures are logged as warn and swallowed — a
+ * heartbeat miss must never throw into the goal loop.
+ */
+export function startWorkspaceLockHeartbeatRefresh(
+	handle: Pick<WorkspaceLockHandle, "lockPath" | "goalId">,
+	opts: StartWorkspaceLockHeartbeatRefreshOptions = {},
+): { stop: () => void } {
+	const refreshMs = opts.refreshMs ?? WORKSPACE_LOCK_HEARTBEAT_REFRESH_MS;
+	const refresh = opts.refresh ?? refreshWorkspaceLockHeartbeat;
+	const timer = setInterval(() => {
+		try {
+			refresh(handle.lockPath, handle.goalId);
+		} catch (error) {
+			// Never throw into the loop (interval callbacks crashing node:test aside,
+			// an escaping throw here would kill the background goal process).
+			logInternalError("goal-loop.workspaceLockHeartbeat", error, `goalId=${handle.goalId} lockPath=${handle.lockPath}`, "warn");
+		}
+	}, refreshMs);
+	timer.unref(); // the refresh timer must not keep the detached goal-loop process alive
+	return { stop: () => clearInterval(timer) };
+}
+
 /**
  * Run the autonomous goal loop. Returns {manifest, tasks, goalState} — the OUTER
  * manifest is the synthetic goal-loop manifest (runKind:"goal-loop"); per-turn
@@ -575,10 +617,18 @@ export async function runGoalLoop(input: RunGoalLoopInput): Promise<RunGoalLoopR
 	// the background-process boundary. `goal start` / `goal resume` pre-check via isWorkspaceBusy
 	// for a good error message; this acquisition is the authoritative claim.
 	let workspaceLock: WorkspaceLockHandle | undefined;
+	// WI-2 (DR-02 R4-3): periodic heartbeat refresh for the lock above — stopped
+	// in the same finally that releases it (see startWorkspaceLockHeartbeatRefresh).
+	let lockHeartbeat: { stop: () => void } | undefined;
 	try {
 		workspaceLock = await acquireWorkspaceLock(goal.cwd, goal.goalId, {
 			signal,
 		});
+		// WI-2 (DR-02 R4-3): keep the heartbeat young for the whole loop lifetime —
+		// without this, isLockStale clause (b) force-steals the lock after 60s even
+		// though this pid is alive (multi-goal clobber). Started immediately after
+		// acquire; the timer is unref()-ed and never throws into the loop.
+		lockHeartbeat = startWorkspaceLockHeartbeatRefresh(workspaceLock);
 	} catch (error) {
 		logInternalError("goal-loop.workspaceLock", error, `goalId=${goal.goalId} cwd=${goal.cwd}`);
 		goal = safeSetStatus(store, goal.goalId, "blocked", goal, eventsPath);
@@ -908,6 +958,12 @@ export async function runGoalLoop(input: RunGoalLoopInput): Promise<RunGoalLoopR
 		}).catch((e) => logInternalError("goal-loop.buffered", e, "type=goal.loop_error"));
 		goal = safeSetStatus(store, goal.goalId, "blocked", goal, eventsPath);
 	} finally {
+		// WI-2: stop the heartbeat refresh BEFORE releasing the lock it was keeping alive.
+		try {
+			lockHeartbeat?.stop();
+		} catch {
+			/* best-effort */
+		}
 		// P1g: release the workspace lock (held since loop start).
 		try {
 			workspaceLock?.release();

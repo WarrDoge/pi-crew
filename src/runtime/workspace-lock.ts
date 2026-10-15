@@ -28,6 +28,22 @@
  * Granularity: per-goal, held for the goal's lifetime (release() on goal end).
  * Contention: default QUEUE (poll until released or stale);
  *             opts.failOnWorkspaceBusy:true → THROW instead of queue.
+ *
+ * ─── HEARTBEAT REFRESH CONTRACT (WI-2 / DR-02 R4-3, 2026-10-15) ───
+ * The heartbeat is written ONCE at acquire. Clause (b) above marks a lock
+ * stale after HEARTBEAT_STALE_MS REGARDLESS of holder pid liveness — so a
+ * live goal whose loop runs longer than 60s would be force-stolen by a
+ * second goal on the same cwd (multi-goal clobber, audit R4-3). Holders that
+ * stay in a long-running loop MUST keep the heartbeat fresh via
+ * refreshWorkspaceLockHeartbeat(lockPath, goalId) — the goal-loop runner does
+ * this on a 15s unref-ed timer (startWorkspaceLockHeartbeatRefresh in
+ * goal-loop-runner.ts), stopped in the same finally that releases the lock.
+ * The refresh re-stamps ONLY `heartbeat` (all other fields + file format
+ * preserved) and ONLY while the lock still belongs to (goalId, pid) — a lock
+ * reclaimed by another goal is never clobbered. Decision note: the interval
+ * refresh was chosen over "drop clause (b) / PID-liveness-only staleness"
+ * because clause (b) is the only crash signal for kill -9'd holders on
+ * non-Linux platforms where /proc startTime is unavailable.
  */
 
 import { createHash } from "node:crypto";
@@ -147,6 +163,43 @@ function readLock(lockPath: string): WorkspaceLockContents | undefined {
 function writeLock(lockPath: string, contents: WorkspaceLockContents): void {
 	mkdirSync(path.dirname(lockPath), { recursive: true });
 	atomicWriteJson(lockPath, contents);
+}
+
+export interface RefreshWorkspaceLockHeartbeatOptions {
+	/** Test injection: override current time (ms). Default Date.now(). */
+	now?: () => number;
+	/** Test injection: override the current pid. Default process.pid. */
+	pid?: number;
+}
+
+/**
+ * Refresh the heartbeat of a lock this goal still owns (WI-2 / DR-02 R4-3).
+ *
+ * Reads the lockfile and rewrites it with `heartbeat: now()` — preserving
+ * every other field (pid, startTime, goalId, acquiredAt) and the file format
+ * — ONLY when the lock still belongs to (goalId, pid). Returns false —
+ * leaving the file untouched — when the lockfile is missing, was reclaimed /
+ * re-acquired by another goal, or the write failed: refreshing must NEVER
+ * clobber a lock that someone else owns (same ownership guard philosophy as
+ * safeRelease). This is what keeps a >60s-running goal's lock from being
+ * force-stolen via isLockStale clause (b) despite a live pid.
+ *
+ * Non-throwing by contract: failures surface as false, never as an exception
+ * into the caller's loop (the goal-loop still wraps calls in try/catch →
+ * logInternalError warn as belt-and-braces, see goal-loop-runner.ts).
+ */
+export function refreshWorkspaceLockHeartbeat(lockPath: string, goalId: string, opts: RefreshWorkspaceLockHeartbeatOptions = {}): boolean {
+	try {
+		const current = readLock(lockPath);
+		if (!current) return false;
+		const pid = opts.pid ?? process.pid;
+		if (current.goalId !== goalId || current.pid !== pid) return false;
+		const now = opts.now ?? Date.now;
+		writeLock(lockPath, { ...current, heartbeat: now() });
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /**
