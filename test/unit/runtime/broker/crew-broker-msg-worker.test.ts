@@ -25,6 +25,7 @@ import * as path from "node:path";
 import test from "node:test";
 
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
+import { computeMessageRequestId } from "../../../../src/prompt/message-tool.ts";
 import { CrewBroker } from "../../../../src/runtime/broker/crew-broker.ts";
 import { readMailbox } from "../../../../src/state/coordination/mailbox.ts";
 import { loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
@@ -437,6 +438,49 @@ test("U5: msg.send without a client requestId gets a broker-generated unique one
 				[id1, id2],
 				"every durable row carries its send's requestId",
 			);
+		} finally {
+			client.close();
+		}
+	} finally {
+		await broker.stop();
+		fs.rmSync(s.cwd, { recursive: true, force: true });
+	}
+});
+
+test("R6-6: message-tool-derived requestId threads through msg.send and dedupes the resend end-to-end", async () => {
+	const s = await scaffoldRunningTask("r66id");
+	const { broker, socketPath } = await startBroker({ cwd: s.cwd });
+	try {
+		const token = broker.issueRunToken(s.runId, s.taskId);
+		const client = await rawConnect(socketPath);
+		try {
+			await hello(client, s.runId, s.taskId, token);
+			// Same derivation the message tool uses (computeMessageRequestId):
+			// pins that its charset/shape passes parseMsgSendParams validation
+			// AND rides the U5 idempotent append.
+			const requestId = computeMessageRequestId({
+				runId: s.runId,
+				taskId: s.taskId,
+				to: s.siblingTaskId,
+				kind: "message",
+				body: "retry-dedup body",
+			});
+			const first = await sendMsg(client, { to: s.siblingTaskId, body: "retry-dedup body", kind: "message", requestId }, "msg-r66-1");
+			assert.ok(first.result, `first send must succeed: ${JSON.stringify(first)}`);
+			assert.equal(first.result!.requestId, requestId);
+			assert.equal(first.result!.dedupedRecipients, 0);
+			// The retransmit after a lost ack (same requestId, e.g. a DIFFERENT
+			// body — the broker keys dedup on requestId, not content).
+			const retry = await sendMsg(
+				client,
+				{ to: s.siblingTaskId, body: "retry-dedup body (resend)", kind: "message", requestId },
+				"msg-r66-2",
+			);
+			assert.ok(retry.result, `resend must succeed: ${JSON.stringify(retry)}`);
+			assert.equal(retry.result!.dedupedRecipients, 1, "the resend dedupes via the message-tool requestId");
+			const loaded = loadRunManifestById(s.cwd, s.runId)!;
+			const rows = readMailbox(loaded.manifest, "inbox", s.siblingTaskId).filter((m) => m.kind === "message");
+			assert.equal(rows.length, 1, "exactly one durable row — no duplicate from the retry");
 		} finally {
 			client.close();
 		}

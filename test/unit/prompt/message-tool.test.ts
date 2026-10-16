@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createMessageTool, type MessageToolDeps, shouldRegisterMessageTool } from "../../../src/prompt/message-tool.ts";
+import {
+	computeMessageRequestId,
+	createMessageTool,
+	type MessageToolDeps,
+	MSG_SEND_TIMEOUT_MS,
+	shouldRegisterMessageTool,
+} from "../../../src/prompt/message-tool.ts";
 
 type MessageClient = ReturnType<NonNullable<MessageToolDeps["makeBrokerClient"]>>;
 
@@ -88,4 +94,81 @@ test("dormant without env + production-like no broker env → structured notice,
 	const r = await clientless.execute({ to: "parent", kind: "notify", body: "x" });
 	assert.equal(r.status, "unavailable");
 	assert.match(r.text, /broker unavailable/);
+});
+
+// ----------------------------------------------------------------------------
+// R6-6 (DR-03 round-6 2026-10-16): msg.send idempotency + explicit timeout
+// ----------------------------------------------------------------------------
+
+/** R6-6 harness: records params AND the per-request opts (timeoutMs). */
+function r66Harness(responses: Array<{ ok: true; value: unknown } | { ok: false; fallback: true; errorCode: string }>) {
+	const sent: Array<{ method: string; params: Record<string, unknown>; opts?: { timeoutMs?: number } }> = [];
+	let call = 0;
+	const tool = createMessageTool({
+		env: {
+			PI_CREW_MSG_ENABLED: "1",
+			PI_CREW_BROKER_RUN_ID: "run-r66",
+			PI_CREW_TASK_ID: "task-r66",
+			PI_CREW_BROKER_SOCKET: "/tmp/r66.sock",
+			PI_CREW_BROKER_TOKEN: "tok-r66",
+		},
+		makeBrokerClient: () => ({
+			request: async (method: string, params: Record<string, unknown>, opts?: { timeoutMs?: number }) => {
+				sent.push({ method, params, opts });
+				const r = responses[Math.min(call, responses.length - 1)]!;
+				call += 1;
+				return r;
+			},
+		}),
+	});
+	return { tool, sent };
+}
+
+test("R6-6: msg.send carries a stable requestId derived from message identity + explicit 60s timeoutMs", async () => {
+	const { tool, sent } = r66Harness([{ ok: true, value: {} }]);
+	const r = await tool.execute({ to: "parent", kind: "notify", body: "milestone: parser done" });
+	assert.equal(r.status, "sent");
+	assert.equal(sent.length, 1);
+	assert.equal(sent[0]!.method, "msg.send");
+	// Explicit timeout: the client's 15s default turned slow durable sends into
+	// false "NOT sent" reports.
+	assert.equal(sent[0]!.opts?.timeoutMs, MSG_SEND_TIMEOUT_MS);
+	assert.equal(MSG_SEND_TIMEOUT_MS, 60_000);
+	// Stable idempotency key: valid per the broker request-parsers charset.
+	const requestId = sent[0]!.params.requestId;
+	assert.equal(typeof requestId, "string");
+	assert.match(requestId as string, /^[\w:.-]{1,256}$/);
+});
+
+test("R6-6: retry after a lost/slow ack reuses the SAME requestId (model-visible retry dedupes server-side)", async () => {
+	// First call: broker client reports a request-timeout (the pre-fix false
+	// negative). The model retries the tool -> second call succeeds. Both calls
+	// must carry the SAME requestId so the broker's U5 idempotent append makes
+	// the resend a no-op instead of a duplicate delivery.
+	const { tool, sent } = r66Harness([
+		{ ok: false, fallback: true, errorCode: "request-timeout" },
+		{ ok: true, value: {} },
+	]);
+	const params = { to: "parent", kind: "notify", body: "risk: schema drift on /v2" } as const;
+	const first = await tool.execute(params);
+	assert.equal(first.status, "unavailable", "timeout surfaces as the structured unavailable notice");
+	const retry = await tool.execute(params);
+	assert.equal(retry.status, "sent");
+	assert.equal(sent.length, 2);
+	assert.equal(sent[0]!.params.requestId, sent[1]!.params.requestId, "stable requestId across retries");
+	assert.equal(sent[1]!.opts?.timeoutMs, MSG_SEND_TIMEOUT_MS);
+});
+
+test("R6-6: computeMessageRequestId — distinct identities get distinct keys; equal identities are equal", () => {
+	const base = { runId: "run-1", taskId: "task-1", to: "parent", kind: "notify", body: "b" };
+	const a = computeMessageRequestId(base);
+	assert.equal(a, computeMessageRequestId({ ...base }));
+	assert.match(a, /^msgtool-[0-9a-f]{32}$/);
+	assert.notEqual(a, computeMessageRequestId({ ...base, body: "different" }));
+	assert.notEqual(a, computeMessageRequestId({ ...base, to: "group" }));
+	assert.notEqual(a, computeMessageRequestId({ ...base, kind: "message" }));
+	assert.notEqual(a, computeMessageRequestId({ ...base, subject: "s" }));
+	assert.notEqual(a, computeMessageRequestId({ ...base, priority: "urgent" }));
+	assert.notEqual(a, computeMessageRequestId({ ...base, runId: "run-2" }));
+	assert.notEqual(a, computeMessageRequestId({ ...base, taskId: "task-2" }));
 });

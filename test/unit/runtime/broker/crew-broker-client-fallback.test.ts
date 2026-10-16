@@ -528,3 +528,209 @@ test("client: F5 request-timeout cleared on normal settle — happy path unaffec
 	assert.equal(client.pendingCount, 0, "pending map empty after settle (timer cleared, entry consumed)");
 	await client.close();
 });
+
+// ----------------------------------------------------------------------------
+// H7 / H8 (DR-03 round-6 2026-10-16): single-flight connect, stranded
+// pending rejection on teardown, subscribe() no-op removal
+// ----------------------------------------------------------------------------
+
+test("H7: concurrent requests on a fresh client share ONE connect flow (single-flight)", async () => {
+	const fake = makeFakeNet();
+	fake.defaultSetup = (sock) => {
+		// Connect fires, but no hello ack ever arrives — every attempt times
+		// out, so the full bounded retry schedule runs for the SHARED flow.
+		setImmediate(() => sock.fireConnect());
+	};
+	const client = makeClient(fake);
+	// Fire both requests before any await settles: pre-fix each request ran
+	// its own connectAndHello() (two parallel sockets per attempt — up to 8
+	// createConnection calls); post-fix both await the same in-flight promise.
+	const p1 = client.request("ping", null);
+	const p2 = client.request("ping", null);
+	const [r1, r2] = await Promise.all([p1, p2]);
+	assert.equal(r1.ok, false);
+	assert.equal(r2.ok, false);
+	if (r1.ok === false && r2.ok === false) {
+		assert.equal(r1.fallback, true);
+		assert.equal(r2.fallback, true);
+	}
+	// ONE shared retry flow = exactly MAX_ATTEMPTS (4) sockets, not 8.
+	assert.equal(fake.connectCount, 4, "single-flight: 4 attempts total, not one flow per request");
+	await client.close();
+});
+
+test("H8: teardownSocket (via reconnect) rejects stranded pending IMMEDIATELY with typed connection-closed", async () => {
+	const fake = makeFakeNet();
+	fake.defaultSetup = (sock) => {
+		setImmediate(() => sock.fireConnect());
+	};
+	const client = makeClient(fake);
+	const helloPromise = client.request("ping", null);
+	// Drive hello to completion (same pattern as the happy-path test).
+	let helloFrame: string | undefined;
+	for (let i = 0; i < 1000; i++) {
+		const sock = fake.lastSocket;
+		if (sock) {
+			helloFrame = sock.text.split("\n").find((l) => l.includes('"method":"hello"'));
+			if (helloFrame) break;
+		}
+		await new Promise<void>((r) => setImmediate(r));
+	}
+	assert.ok(fake.lastSocket && helloFrame, "expected a hello frame");
+	const helloId = (JSON.parse(helloFrame!) as { id: string }).id;
+	fake.lastSocket!.fireFrame({ id: helloId, result: { protocol: 1, ok: true } });
+	let pingFrame: string | undefined;
+	for (let i = 0; i < 1000; i++) {
+		pingFrame = fake
+			.lastSocket!.text.split("\n")
+			.reverse()
+			.find((l) => l.includes('"method":"ping"'));
+		if (pingFrame) break;
+		await new Promise<void>((r) => setImmediate(r));
+	}
+	assert.ok(pingFrame, "expected the ping frame to be written (pending entry exists)");
+	for (let i = 0; i < 50; i++) await new Promise<void>((r) => setImmediate(r));
+	// reconnect() tears the current socket down. The stranded ping must be
+	// rejected NOW with the typed code — not left to its request timer (which
+	// would surface as errorCode "request-timeout" ~100ms later here, 15s in
+	// production).
+	const reconnectDone = client.reconnect(); // resolves after its own ping flow fails
+	const pingResult = await helloPromise;
+	assert.equal(pingResult.ok, false);
+	if (pingResult.ok === false) {
+		assert.equal(pingResult.errorCode, "connection-closed", "stranded pending rejected by teardown, not by its timer");
+	}
+	await reconnectDone; // bounded (~compressed backoff); ignore its boolean
+	await client.close();
+});
+
+test("H8: subscribe() throws 'not supported' instead of returning a silent no-op unsubscribe", () => {
+	const fake = makeFakeNet();
+	const client = makeClient(fake);
+	assert.throws(
+		() =>
+			client.subscribe({
+				runId: "run-x",
+				sinceSeq: 0,
+				onEvent: () => {
+					/* never reached — subscribe throws */
+				},
+			}),
+		/not supported/,
+		"subscribe must fail loudly (0 production callers)",
+	);
+});
+
+test("R6-6: request() arms the REQUEST timer at opts.timeoutMs (60s for msg.send), not the 15s default", async () => {
+	const fake = makeFakeNet();
+	fake.defaultSetup = (sock) => {
+		setImmediate(() => sock.fireConnect());
+	};
+	// A timer seam that RECORDS the requested ms (and compresses wall-clock).
+	const armed: number[] = [];
+	const recClient = new CrewBrokerClient({
+		runId: "run-r66",
+		taskId: "task-r66",
+		socketPath: "/tmp/pi-crew-test.sock",
+		token: "secret-token-1234",
+		netModule: fake.netModule as never,
+		setTimeoutFn: ((cb: () => void, ms: number) => {
+			armed.push(ms);
+			const t = setTimeout(cb, 5);
+			return new Proxy(t, {
+				get(target, prop) {
+					if (prop === "unref" || prop === "ref" || prop === "hasRef") return undefined;
+					return Reflect.get(target, prop);
+				},
+			}) as unknown as NodeJS.Timeout;
+		}) as typeof setTimeout,
+	});
+	let ackedHello = false;
+	let replied = false;
+	const p = recClient.request("msg.send", { to: "parent", kind: "notify", body: "slow durable send" }, { timeoutMs: 60_000 });
+	// Drain: hello completes, request armed, then the slow ack is fired.
+	for (let i = 0; i < 200; i++) {
+		await new Promise<void>((r) => setImmediate(r));
+		const sock = fake.lastSocket;
+		if (!sock) continue;
+		if (!ackedHello) {
+			const helloFrame = sock.text.split("\n").find((l) => l.includes('"method":"hello"'));
+			if (helloFrame) {
+				ackedHello = true;
+				const helloId = (JSON.parse(helloFrame) as { id: string }).id;
+				sock.fireFrame({ id: helloId, result: { protocol: 1, ok: true } });
+			}
+		}
+		if (ackedHello && !replied) {
+			const reqFrame = sock.text.split("\n").find((l) => l.includes('"method":"msg.send"'));
+			if (reqFrame) {
+				replied = true;
+				const reqId = (JSON.parse(reqFrame) as { id: string }).id;
+				// The slow durable ack — arrives only AFTER the arm; with the
+				// 15s default it would race the timer, with 60s it always wins.
+				sock.fireFrame({ id: reqId, result: { ok: true, recipientCount: 1 } });
+			}
+		}
+	}
+	const result = await p;
+	assert.equal(result.ok, true, "slow durable ack resolves — no false negative");
+	assert.ok(
+		armed.some((ms) => ms === 60_000),
+		`the request timer must be armed at 60_000ms (armed: ${JSON.stringify(armed)})`,
+	);
+	// Control: with no opts, the 15s default arms (never a shorter one).
+	const armedDefault: number[] = [];
+	const defClient = new CrewBrokerClient({
+		runId: "run-r66",
+		taskId: "task-r66",
+		socketPath: "/tmp/pi-crew-test.sock",
+		token: "secret-token-1234",
+		netModule: fake.netModule as never,
+		setTimeoutFn: ((cb: () => void, ms: number) => {
+			armedDefault.push(ms);
+			const t = setTimeout(cb, 5);
+			return new Proxy(t, {
+				get(target, prop) {
+					if (prop === "unref" || prop === "ref" || prop === "hasRef") return undefined;
+					return Reflect.get(target, prop);
+				},
+			}) as unknown as NodeJS.Timeout;
+		}) as typeof setTimeout,
+	});
+	const p2 = defClient.request("ping", null);
+	for (let i = 0; i < 200; i++) {
+		await new Promise<void>((r) => setImmediate(r));
+		const sock = fake.lastSocket;
+		if (!sock) continue;
+		const helloFrame = sock.text
+			.split("\n")
+			.reverse()
+			.find((l) => l.includes('"method":"hello"'));
+		if (helloFrame) {
+			const helloId = (JSON.parse(helloFrame) as { id: string }).id;
+			sock.fireFrame({ id: helloId, result: { protocol: 1, ok: true } });
+			break;
+		}
+	}
+	for (let i = 0; i < 200; i++) {
+		await new Promise<void>((r) => setImmediate(r));
+		const sock = fake.lastSocket;
+		if (!sock) continue;
+		const pingFrame = sock.text
+			.split("\n")
+			.reverse()
+			.find((l) => l.includes('"method":"ping"'));
+		if (pingFrame) {
+			const pingId = (JSON.parse(pingFrame) as { id: string }).id;
+			sock.fireFrame({ id: pingId, result: { pong: true } });
+			break;
+		}
+	}
+	await p2;
+	assert.ok(
+		armedDefault.some((ms) => ms === 15_000),
+		`default request timer stays 15_000ms (armed: ${JSON.stringify(armedDefault)})`,
+	);
+	await recClient.close();
+	await defClient.close();
+});

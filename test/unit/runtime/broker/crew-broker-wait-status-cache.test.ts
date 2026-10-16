@@ -24,7 +24,7 @@ import test from "node:test";
 
 import { CrewBroker } from "../../../../src/runtime/broker/crew-broker.ts";
 import { WaitStatusCache } from "../../../../src/runtime/broker/wait-status-cache.ts";
-import { createRunManifest, loadRunManifestById, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
+import { createRunManifest, createRunPaths, loadRunManifestById, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import { encodeBrokerFrame, NdjsonDecoder } from "../../../../src/utils/ndjson.ts";
 
 // ----------------------------------------------------------------------------
@@ -315,5 +315,50 @@ test("R10-3 (c): run's cache entry is evicted when its last connection closes", 
 		assert.equal(fx.cache.size, 0, "entry must be evicted after the run's last connection closes");
 	} finally {
 		await fx.cleanup();
+	}
+});
+
+// ----------------------------------------------------------------------------
+// H5 (DR-03 round-6 2026-10-16): pre-load stamp kills the parse→stat TOCTOU
+// ----------------------------------------------------------------------------
+
+test("H5: writer landing between the pre-stat and the parse → next tick sees the stamp change and reloads (no stale-under-fresh pinning)", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-wsc-toctou-"));
+	try {
+		const created = createRunManifest({ cwd, team, workflow, goal: "toctou self-heal" });
+		const runId = created.manifest.runId;
+		const paths = createRunPaths(cwd, runId);
+		// The loader simulates the race window: by the time the (expensive)
+		// parse runs, a concurrent writer has ALREADY landed on disk (the
+		// pre-load stat captured the OLDER stamp). The parsed value is stale
+		// by construction — the loader returns a sentinel regardless of disk.
+		let mutated = false;
+		const cache = new WaitStatusCache({
+			loader: () => {
+				if (!mutated) {
+					mutated = true;
+					// Writer lands between our pre-load stat and the parse.
+					fs.appendFileSync(paths.manifestPath, "\n");
+					return { mark: "stale-parse" } as never;
+				}
+				return { mark: "fresh-parse" } as never;
+			},
+		});
+		const first = cache.load(cwd, runId) as unknown as { mark: string };
+		assert.equal(first.mark, "stale-parse");
+		assert.equal(cache.reloads, 1);
+		// Pre-fix (post-load stamp): the entry was keyed on the FRESH stamp
+		// while holding the STALE value, so this second load matched the stamp
+		// and served the stale parse forever (loader never re-invoked).
+		// Post-fix (pre-load stamp): the disk stamp changed → reload.
+		const second = cache.load(cwd, runId) as unknown as { mark: string };
+		assert.equal(cache.reloads, 2, "stamp change must force a reload");
+		assert.equal(second.mark, "fresh-parse", "the reload observes the writer's state");
+		// And it settles: a third load with no further writes is a cache hit.
+		const third = cache.load(cwd, runId) as unknown as { mark: string };
+		assert.equal(cache.reloads, 2);
+		assert.equal(third.mark, "fresh-parse");
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
 	}
 });

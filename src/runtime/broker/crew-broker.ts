@@ -6,8 +6,12 @@
  *  - Bound to a `node:net` Unix domain socket or Windows named pipe.
  *  - One broker per root session; per-run token auth on first `hello`.
  *  - NDJSON framing, 256 KiB UTF-8 cap, 1s hello deadline.
- *  - Per-connection outbound queue cap (default 256) with drop-newest +
- *    `needsResync` marker.
+ *  - Per-connection outbound queue cap (default 256). Fanout/event frames
+ *    are drop-newest at cap, and the drop now CLOSES the connection with a
+ *    typed `protocol.close` reason ("outbound-overflow-resync") so the
+ *    client reconnects and replays (R6-5). Request RESPONSE frames
+ *    (sendResult/sendError acks) bypass the cap — bounded by in-flight
+ *    request count, never the fanout storm.
  *  - Dispatches 12 methods post-hello: `ping`, `hello`, `msg.send`,
  *    `msg.inbox`, `events.since`, `events.subscribe`, `task.waitStatus`,
  *    `steer.push`, `escalate`, `wait.request`/`wait.resolve`
@@ -64,6 +68,7 @@ import { handleEventsSince } from "./protocol/events-replay.ts";
 import { DEFAULT_LOCK_BUSY_RETRY_DELAYS_MS, type LockBusyOutcome, withRunLockBusyRetry } from "./protocol/lock-busy.ts";
 import { loadRunForHello } from "./protocol/manifest-loader.ts";
 import { handleMsgInbox } from "./protocol/msg-inbox.ts";
+import { resolveMsgSendTargets } from "./protocol/msg-send-targets.ts";
 import {
 	BROKER_PROTOCOL,
 	isHelloParams,
@@ -103,6 +108,26 @@ const STALE_RUN_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", 
 
 /** Default per-connection outbound queue cap (events). */
 const DEFAULT_OUTBOUND_QUEUE_CAP = 256;
+
+/** R6-5 (2026-10-16): typed protocol close-reason sent as a best-effort
+ *  `protocol.close` event frame (direct write, jumps the saturated queue)
+ *  before the connection is closed after a fanout/event frame was dropped
+ *  at the queue cap. Clients observe the reason, reconnect, and replay via
+ *  `events.since` (Phase 1.5). */
+export const OUTBOUND_OVERFLOW_RESYNC_CLOSE_REASON = "outbound-overflow-resync";
+
+/** R6-5: admission class for an outbound frame.
+ *  - `false`  — fanout/event class: drop-newest at cap → resync close.
+ *  - `true`   — close-reason class: bypass the cap, attempt an immediate
+ *    direct write (existing `sendErrorAndClose` behavior).
+ *  - `"response"` — request-response class (sendResult/sendError acks):
+ *    bypass the drop-newest cap but stay IN the queue (ordering preserved,
+ *    backpressure honored). Bounded by the client's in-flight request count
+ *    — one response frame per request — so it can never storm the way a
+ *    fanout burst can. Kept a `boolean | "response"` union (not a fresh
+ *  enum) so the external FanoutWriters interface (mailbox-fanout.ts) keeps
+ *  its `(conn, buf, force: boolean)` shape. */
+type OutboundAdmission = boolean | "response";
 
 export class CrewBroker {
 	private readonly options: Required<Pick<CrewBrokerOptions, "sessionId" | "enabled" | "waitMethodsEnabled" | "nestingEnabled">> &
@@ -761,7 +786,7 @@ export class CrewBroker {
 	 *  truth for authentication). */
 	// loadRunForHello: inlined at the 2 call sites (was a 5-line method; M4/WI-4.1).
 
-	// Outbound queue + drop-newest + needsResync
+	// Outbound queue + drop-newest + resync-close (R6-5)
 
 	private sendResult(conn: ServerConnection, id: string, result: unknown): void {
 		this.enqueueFrame(conn, { id, result });
@@ -798,13 +823,27 @@ export class CrewBroker {
 			);
 			return;
 		}
-		this.writeOrQueue(conn, buf, /*force*/ false);
+		// R6-5: request responses (the acks for ping/msg.send/wait.request/…)
+		// are response-class — they bypass the drop-newest cap so a saturated
+		// fanout queue can no longer swallow an ack and leave the caller to its
+		// request-timeout (a delivered send reported "NOT sent").
+		this.writeOrQueue(conn, buf, "response");
 	}
 
-	private writeOrQueue(conn: ServerConnection, buf: Buffer, force: boolean): void {
+	private writeOrQueue(conn: ServerConnection, buf: Buffer, force: OutboundAdmission): void {
 		if (conn.closed) return;
 		const cap = this.options.outboundQueueCap ?? DEFAULT_OUTBOUND_QUEUE_CAP;
 		if (conn.outbound.length >= cap) {
+			if (force === "response") {
+				// R6-5(a): response frames queue PAST the cap instead of being
+				// drop-newest'd. Bounded: at most one response per in-flight
+				// request, and the client's request pipeline is serial — this can
+				// never grow unbounded the way a fanout burst can. Ordering is
+				// preserved (pushed at the tail; drainOutbound honors backpressure).
+				conn.outbound.push(buf);
+				this.drainOutbound(conn);
+				return;
+			}
 			if (force) {
 				// Forced sends (e.g. close-reason) bypass the cap and attempt
 				// to flush directly; if the socket is busy they may still drop.
@@ -815,13 +854,13 @@ export class CrewBroker {
 				}
 				return;
 			}
-			// Drop-newest: do NOT add the new frame, mark needsResync, and stop
-			// further live fanout for this connection. The client must reconnect
-			// and replay (Phase 1: via events.since; Phase 0: protocol error).
-			conn.needsResync = true;
-			// We do NOT revoke auth — the connection is still authenticated; we
-			// simply pause live frame production. The client is expected to
-			// notice the queue-depth and resync.
+			// R6-5(b): fanout/event frame dropped at cap (drop-newest). The old
+			// `needsResync` marker was write-only (set, never read) — the claimed
+			// "pause + client notices" recovery did not exist, so live frames
+			// were silently dropped for the connection's remaining lifetime.
+			// Now the drop CLOSES the connection with a typed close-reason so
+			// the client reconnects and replays (events.since / msg.inbox).
+			this.handleOutboundOverflow(conn);
 			return;
 		}
 		conn.outbound.push(buf);
@@ -850,6 +889,33 @@ export class CrewBroker {
 			conn.outbound.shift();
 			conn.outboundSeq += 1;
 		}
+	}
+
+	/** R6-5(b): a fanout/event frame was dropped at the outbound queue cap.
+	 *  Close the connection with a typed protocol close-reason so the client
+	 *  can reconnect + replay instead of silently missing live frames
+	 *  forever. The reason frame is written DIRECTLY (jumps the saturated
+	 *  queue — those frames are already doomed once we close) and delivery
+	 *  is best-effort, exactly like `sendErrorAndClose`. */
+	private handleOutboundOverflow(conn: ServerConnection): void {
+		// Single-flight: fanoutMailboxMessage iterates a snapshot of the run's
+		// connections, so one burst can re-enter here for an already-overflowing
+		// conn before `closeConnection`'s `closed` guard becomes visible. The
+		// flag is the "close already initiated" bit (its only read).
+		if (conn.needsResync) return;
+		conn.needsResync = true;
+		logInternalError(
+			"crew-broker.outbound.overflow",
+			new Error("outbound queue overflow — closing connection for resync"),
+			`sessionId=${this.options.sessionId} runId=${conn.runId ?? "?"} queued=${conn.outbound.length} seq=${conn.outboundSeq}`,
+		);
+		try {
+			const buf = encodeBrokerFrame({ event: "protocol.close", data: { reason: OUTBOUND_OVERFLOW_RESYNC_CLOSE_REASON } });
+			conn.socket.write(buf);
+		} catch {
+			/* socket may be dead; closeConnection below sweeps regardless */
+		}
+		this.closeConnection(conn);
 	}
 
 	// Phase 1: msg.send + msg.inbox handlers
@@ -905,67 +971,25 @@ export class CrewBroker {
 			this.sendError(conn, id, "no-manifest", (err as Error).message);
 			return;
 		}
-		// ── Recipient resolution ──────────────────────────────────────────────
-		// Each target is {label, mailboxTaskId}: `label` is echoed in the ack
-		// and message id, `mailboxTaskId` is the mailbox file the append lands
-		// in (undefined = run-level inbox, which the orchestrator consumes).
-		let targets: Array<{ label: string; mailboxTaskId: string | undefined }>;
-		// Task 5b (spec §15.2 wake): set when a worker addresses the parent —
-		// the durable write alone would sit unread in the run-level inbox.
-		let sentToParent = false;
-		if (isWorker) {
-			// Worker constraint (1): from is ALWAYS the authenticated taskId.
-			// Worker constraint (2): to is limited to parent | valid sibling
-			// taskId | group.
-			if (!conn.taskId) {
-				this.sendError(conn, id, "forbidden", "msg.send worker requires a task-scoped identity");
-				return;
-			}
-			const to = typeof parsed.to === "string" ? parsed.to : undefined;
-			if (to === "parent") {
-				// Run-level inbox (taskId undefined) → the orchestrator session.
-				targets = [{ label: "parent", mailboxTaskId: undefined }];
-				sentToParent = true;
-			} else if (to === "group") {
-				targets = taskIds.map((t) => ({ label: t, mailboxTaskId: t }));
-			} else if (to !== undefined && taskIds.includes(to)) {
-				targets = [{ label: to, mailboxTaskId: to }];
-			} else {
-				this.sendError(conn, id, "forbidden", `msg.send: worker cannot target '${to}'`);
-				return;
-			}
-			if (targets.length === 0 || targets.length > 64) {
-				this.sendError(conn, id, "bad-params", "msg.send: recipient count out of range");
-				return;
-			}
-		} else {
-			const recipients: string[] = Array.isArray(parsed.to)
-				? (parsed.to as string[])
-				: parsed.to === "all"
-					? taskIds
-					: [parsed.to as string];
-			if (recipients.length === 0 || recipients.length > 64) {
-				this.sendError(conn, id, "bad-params", "msg.send: recipient count out of range");
-				return;
-			}
-			targets = recipients.map((recipient) => ({ label: recipient, mailboxTaskId: recipient }));
+		// ── Recipient resolution: pure D9/§15.2 matrix in protocol/msg-send-targets.ts (wc-gate).
+		const resolved = resolveMsgSendTargets({ isWorker, connTaskId: conn.taskId, to: parsed.to, taskIds });
+		if (!resolved.ok) {
+			this.sendError(conn, id, resolved.code, resolved.message);
+			return;
 		}
+		const { targets, sentToParent } = resolved;
 		const messageId = `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 		const fromField = isWorker ? conn.taskId! : (conn.taskId ?? conn.runId);
-		// U5 (2026-10-10): every send carries a unique requestId — client-supplied
-		// (idempotent retries reuse the SAME one) or broker-generated
-		// `{runId}:{sender}:{uuid}`. The durable (direction, requestId) index in
-		// delivery.json + the idempotent append below make resend-after-resume a
-		// no-op instead of a duplicate delivery.
+		// U5: every send carries a unique requestId — client-supplied (idempotent
+		// retries reuse the SAME one) or broker-generated. The durable
+		// (direction, requestId) index makes resend-after-resume a no-op.
 		const requestId = parsed.requestId ?? `${manifest.runId}:${fromField}:${randomUUID()}`;
 		let dedupedRecipients = 0;
 		let durable = false;
 		try {
-			// PERF (2026-08-24): to:"all" with 50 tasks used to run 50 sequential
-			// awaited locked appends (~70 syscalls + 2 fsync each) while the
-			// connection's frames queued behind it. Chunked fan-out — independent
-			// mailbox files append concurrently; delivery.json stays serialized by
-			// its own lock.
+			// PERF: to:"all" with 50 tasks used to run 50 sequential awaited locked
+			// appends while the connection's frames queued behind it. Chunked
+			// fan-out — independent mailbox files append concurrently.
 			const CHUNK = 8;
 			for (let i = 0; i < targets.length; i += CHUNK) {
 				const results = await Promise.allSettled(
@@ -996,10 +1020,9 @@ export class CrewBroker {
 			this.sendError(conn, id, "durable-failed", (err as Error).message);
 			return;
 		}
-		// U5: one bounded audit event per send — requestId + dedup count make the
-		// exactly-once chain auditable end-to-end (mailbox.send → worker
-		// mailbox.pickup → mailbox.pickup_deduped). Never the body. Failure is
-		// non-fatal: the mailbox rows are the source of truth.
+		// U5: one bounded audit event per send — requestId + dedup count make
+		// the exactly-once chain auditable. Never the body; mailbox rows are
+		// the source of truth.
 		try {
 			await appendEventAsync(manifest.eventsPath, {
 				type: "mailbox.send",

@@ -2,16 +2,25 @@
  * crew-broker-client.ts — Child-side connector for the local broker.
  *                       PHASE 0 skeleton (sub-task 0.3).
  *
- *  - Connects only on the first request/subscribe.
+ *  - Connects only on the first request/subscribe. The connect is
+ *    SINGLE-FLIGHT (H7, DR-03 round-6 2026-10-16): concurrent request()s
+ *    on a fresh client share one in-flight connectAndHello() instead of
+ *    racing N sockets into existence.
  *  - Sends `hello` first; any other method before ack is a protocol error.
  *  - Bounded backoff (50/100/200/400/800 ms + jitter, max 4 attempts).
  *    After exhaustion, no hot reconnect loop is scheduled. The only way back
  *    to the live path is an explicit `reconnect()` (or a new worker lifecycle).
  *  - On ANY connect/auth/timeout/close error, transitions to `fallback` mode
- *    and never lets an exception escape `request()` / `subscribe()`. The
- *    caller can read `client.mode` or the `{ok:false, fallback:true}` result
- *    and continue using today's file-based paths.
- *  - `close()` removes all listeners and pending requests.
+ *    and never lets an exception escape `request()`. The caller can read
+ *    `client.mode` or the `{ok:false, fallback:true}` result and continue
+ *    using today's file-based paths. (`subscribe()` is the ONE deliberate
+ *    exception — it throws "not supported" (H8) because a silent no-op
+ *    unsubscribe let callers believe they were subscribed; it has zero
+ *    production callers.)
+ *  - `close()` removes all listeners and pending requests. Any teardown of
+ *    the current socket (close/reconnect) rejects stranded pending entries
+ *    IMMEDIATELY with a typed `connection-closed` error (H8) instead of
+ *    leaving them to their request timers.
  *  - All diagnostic strings pass through `redactSecretString` from
  *    `src/utils/redaction.ts`. Token and payload bytes are never logged.
  *
@@ -112,6 +121,13 @@ export class CrewBrokerClient {
 	}> = [];
 	/** Set in close(); gates reconnect attempts and backoff loops. */
 	private closed = false;
+	/** H7: in-flight connect (single-flight). Concurrent request()s on an
+	 *  unstarted client await the SAME connectAndHello() promise instead of
+	 *  each opening its own socket (previously two concurrent first-requests
+	 *  raced two sockets; the loser's socket leaked until its hello deadline).
+	 *  Cleared on settle — success moves `mode` to "connected" and failure to
+	 *  "fallback", so a null value never masks a needed reconnect. */
+	private connecting: Promise<BrokerClientResult<true>> | null = null;
 	/** Handle to the in-flight backoff timer so close() can cancel it. */
 	private backoffTimer: NodeJS.Timeout | null = null;
 	/** Resolver for the in-flight backoff await so close() can unblock it.
@@ -171,9 +187,10 @@ export class CrewBrokerClient {
 			return { ok: false, fallback: true, errorCode: "bad-method" };
 		}
 
-		// Lazy connect + hello on first use.
+		// Lazy connect + hello on first use. H7: single-flight — concurrent
+		// requests share one connectAndHello() (one socket), not N.
 		if (this._mode === "unstarted" || !this.socket) {
-			const connectResult = await this.connectAndHello();
+			const connectResult = await this.ensureConnected();
 			if (!connectResult.ok) {
 				return connectResult;
 			}
@@ -246,18 +263,17 @@ export class CrewBrokerClient {
 	}
 
 	/**
-	 * Subscribe to a per-run event stream. Phase 0 does not implement
-	 * events.since — the subscription returns a no-op unsubscribe and
-	 * transitions to fallback if the connection is lost. The caller can
-	 * continue using the file poll path.
+	 * Subscribe to a per-run event stream. NOT SUPPORTED (H8, DR-03
+	 * round-6 2026-10-16): Phase 0 never implemented the event stream, and
+	 * the old silent no-op unsubscribe let a caller believe it was
+	 * subscribed while frames went nowhere. Zero production callers exist,
+	 * so this now throws instead of silently misbehaving. Live frames are
+	 * available via the `onEvent` constructor option; durable resync via
+	 * `msg.inbox` / `events.since` polling.
 	 */
 	subscribe(options: { runId: string; sinceSeq: number; onEvent: (event: unknown) => void }): () => void {
-		// Phase 0: subscription is a typed not-implemented. We register a
-		// no-op unsubscribe so the caller can call it without errors.
 		void options;
-		return () => {
-			/* no-op */
-		};
+		throw new BrokerError("not-implemented", "subscribe is not supported; use onEvent / events.since polling");
 	}
 
 	/**
@@ -330,6 +346,19 @@ export class CrewBrokerClient {
 	// ------------------------------------------------------------------------
 	// Connect + hello with bounded backoff
 	// ------------------------------------------------------------------------
+
+	/** H7: single-flight wrapper around connectAndHello. The first caller
+	 *  creates the in-flight promise; concurrent callers await the same one.
+	 *  Settled promises are dropped so a later reconnect() (explicit
+	 *  `unstarted` reset) starts a genuinely fresh connect. */
+	private ensureConnected(): Promise<BrokerClientResult<true>> {
+		if (!this.connecting) {
+			this.connecting = this.connectAndHello().finally(() => {
+				this.connecting = null;
+			});
+		}
+		return this.connecting;
+	}
 
 	private async connectAndHello(): Promise<BrokerClientResult<true>> {
 		if (!this.options.socketPath || !this.options.token) {
@@ -642,6 +671,35 @@ export class CrewBrokerClient {
 	}
 
 	private teardownSocket(): void {
+		// H8: reject stranded pending entries IMMEDIATELY. A teardown means
+		// the socket they were written to is going away (close() semantics, a
+		// reconnect() replacing it, or the closed-race in connectAndHello) —
+		// their responses can never arrive on it. Leaving them to their
+		// request timers kept callers (e.g. an await inside reconnect())
+		// hanging for up to the full request timeout on a dead connection.
+		// The typed `connection-closed` error funnels into request()'s catch →
+		// {ok:false, fallback:true, errorCode:"connection-closed"}.
+		if (this.pending.size > 0) {
+			const clearTimeoutFn = this.options.clearTimeoutFn ?? ((t: NodeJS.Timeout) => clearTimeout(t));
+			for (const [, p] of this.pending) {
+				if (p.timer) {
+					try {
+						clearTimeoutFn(p.timer);
+					} catch {
+						/* best-effort */
+					}
+				}
+				p.reject(
+					// Code outside the closed BrokerErrorCode union (which lives in
+					// ndjson.ts and gates protocol responses); same cast precedent as
+					// the wire-error path in attemptHello. Surfaces to callers as
+					// errorCode "connection-closed" (BrokerClientResult.errorCode is a
+					// plain string).
+					new BrokerError("connection-closed" as never, "connection torn down before response"),
+				);
+			}
+			this.pending.clear();
+		}
 		if (!this.socket) {
 			this.socket = null;
 			this.decoder = null;

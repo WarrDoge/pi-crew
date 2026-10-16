@@ -24,6 +24,7 @@
  * sending, so two workers cannot loop message each other to death.
  */
 
+import { createHash } from "node:crypto";
 import { type Static, Type } from "@sinclair/typebox";
 import { getCrewEnv } from "../config/env-vars.ts";
 import { CrewBrokerClient } from "../runtime/broker/crew-broker-client.ts";
@@ -38,6 +39,14 @@ const MSG_TO_MAX_CHARS = 256;
 /** §15.2 rate-limit: 10 messages/min/task, sliding window. */
 const MSG_RATE_LIMIT_MAX = 10;
 const MSG_RATE_LIMIT_WINDOW_MS = 60_000;
+/** R6-6 (DR-03 round-6 2026-10-16): explicit per-request timeout for
+ *  msg.send. The client's 15s default (REQUEST_TIMEOUT_DEFAULT_MS) turns a
+ *  merely-slow durable send (multi-recipient chunked appends + fsync + audit
+ *  event) into a reported "NOT sent" — and the model's natural retry into a
+ *  duplicate delivery. 60s matches the worst bounded fanout (64 recipients,
+ *  8-wide chunks) with headroom while staying below the tool's own "never a
+ *  hang" budget (the request still resolves via this timeout, never hangs). */
+export const MSG_SEND_TIMEOUT_MS = 60_000;
 
 export const MessageToolParamsSchema = Type.Object({
 	to: Type.Union([Type.Literal("parent"), Type.Literal("group"), Type.String({ minLength: 1, maxLength: MSG_TO_MAX_CHARS })]),
@@ -49,10 +58,44 @@ export const MessageToolParamsSchema = Type.Object({
 export type MessageToolParams = Static<typeof MessageToolParamsSchema>;
 
 /** Minimal broker-client surface the message tool needs (structural subset of
- *  CrewBrokerClient — tests substitute a recorder). */
+ *  CrewBrokerClient — tests substitute a recorder). R6-6: the optional third
+ *  argument carries the per-request timeout; existing 2-arg recorders remain
+ *  structurally assignable. */
 export interface MessageBrokerClientSurface {
-	request(method: string, params: unknown): Promise<{ ok: true; value: unknown } | { ok: false; fallback?: boolean; errorCode?: string }>;
+	request(
+		method: string,
+		params: unknown,
+		opts?: { timeoutMs?: number },
+	): Promise<{ ok: true; value: unknown } | { ok: false; fallback?: boolean; errorCode?: string }>;
 	close?(): Promise<void>;
+}
+
+/** R6-6: stable idempotency key derived from message identity. A retry of
+ *  the same logical message (same sender, target, kind, content — e.g. the
+ *  model re-invoking `message` after a lost/slow ack) computes the SAME
+ *  requestId, and the broker's U5 durable (direction, requestId) index in
+ *  delivery.json + appendMailboxMessageIdempotentAsync turn the resend into
+ *  a no-op instead of a duplicate row. Pure content hash: matches the
+ *  request-parsers `^[\\w:.-]{1,256}$` requestId charset (hex + `-`). */
+export function computeMessageRequestId(identity: {
+	runId: string;
+	taskId: string;
+	to: string;
+	kind: string;
+	body: string;
+	subject?: string;
+	priority?: string;
+}): string {
+	const material = JSON.stringify([
+		identity.runId,
+		identity.taskId,
+		identity.to,
+		identity.kind,
+		identity.body,
+		identity.subject ?? null,
+		identity.priority ?? null,
+	]);
+	return `msgtool-${createHash("sha256").update(material).digest("hex").slice(0, 32)}`;
 }
 
 export interface MessageToolDeps {
@@ -137,11 +180,26 @@ export function createMessageTool(deps: MessageToolDeps = {}): MessageTool {
 						return new CrewBrokerClient({ runId, taskId, socketPath, token });
 					})();
 			if (!client) return brokerUnavailable();
-			const requestParams: Record<string, unknown> = { to: params.to, kind: params.kind, body: params.body };
+			// R6-6: stable requestId (idempotency across retries) + explicit
+			// timeoutMs (a slow durable ack is NOT a failure).
+			const requestParams: Record<string, unknown> = {
+				to: params.to,
+				kind: params.kind,
+				body: params.body,
+				requestId: computeMessageRequestId({
+					runId,
+					taskId,
+					to: params.to,
+					kind: params.kind,
+					body: params.body,
+					subject: params.subject,
+					priority: params.priority,
+				}),
+			};
 			if (params.subject) requestParams.subject = params.subject;
 			if (params.priority) requestParams.priority = params.priority;
 			try {
-				const sent = await client.request("msg.send", requestParams);
+				const sent = await client.request("msg.send", requestParams, { timeoutMs: MSG_SEND_TIMEOUT_MS });
 				if (!sent.ok) {
 					// Broker rejection (role gate / policy / auth / fallback) — all
 					// fast-fail, non-blocking.

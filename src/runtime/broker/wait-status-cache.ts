@@ -119,9 +119,18 @@ export class WaitStatusCache {
 	/**
 	 * Stat-gated load. Fast path (stamp unchanged): 2 statSync calls, zero
 	 * parses. Slow path (first sight or changed mtime/size): delegate to the
-	 * loader, then record the POST-load stamp so a concurrent writer that
-	 * landed between our pre-load stat and the parse forces the next tick to
-	 * reload instead of serving a stale entry.
+	 * loader, then record the PRE-load stamp (H5, DR-03 round-6 2026-10-16).
+	 *
+	 * Why PRE-load: keying the entry on the POST-load stamp had a
+	 * parse→stat TOCTOU bug — a writer landing between the parse and the
+	 * after-stat produced an entry whose stamp was FRESH while its cached
+	 * value was STALE, and every later tick with an unchanged disk served
+	 * the stale value forever (stale-under-fresh pinning). With the PRE-load
+	 * stamp, a writer that lands anywhere between the pre-stat and the parse
+	 * leaves the entry keyed on the OLDER stamp, so the very next tick sees
+	 * the stamp change and reloads. Worst case is one spurious reload
+	 * (writer landed before the parse — the loaded value was already fresh),
+	 * never a missed one.
 	 */
 	load(cwd: string, runId: string): LoadedRun {
 		// Same path derivation as resolveRunStateRoot inside
@@ -135,13 +144,13 @@ export class WaitStatusCache {
 		}
 		const loaded = this.loader(cwd, runId);
 		this.reloadsValue += 1;
-		const after = statStamp(paths.manifestPath, paths.tasksPath);
 		if (this.entries.size >= WAIT_STATUS_CACHE_MAX && !this.entries.has(runId)) {
 			// Map preserves insertion order — evict the oldest entry.
 			const oldest = this.entries.keys().next().value;
 			if (oldest !== undefined) this.entries.delete(oldest);
 		}
-		this.entries.set(runId, { ...after, loaded });
+		// H5: key on the PRE-load stamp (`before`), NOT a post-load re-stat.
+		this.entries.set(runId, { ...before, loaded });
 		return loaded;
 	}
 
