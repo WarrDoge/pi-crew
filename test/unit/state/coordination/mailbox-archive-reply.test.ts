@@ -46,7 +46,11 @@ const workflow: WorkflowConfig = {
 };
 
 function setupCwd(): string {
-	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-archive-reply-"));
+	// CI platform parity (2026-10-16, caught by the 0.11.22 matrix): validateMailbox
+	// reports issue paths built from the manifest's canonicalized state root while
+	// the fixture compared against the LEXICAL mkdtemp path — mismatch on macOS
+	// (symlinked $TMPDIR) / Windows (8.3 short names). Canonicalize the fixture.
+	const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-archive-reply-")));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	return cwd;
 }

@@ -31,7 +31,14 @@ const MARKER = `[message truncated at ${STEER_LIMIT} chars]`;
 const tmpDirs: string[] = [];
 
 function makeRun(status: TeamTaskState["status"]): string {
-	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-steer-clamp-"));
+	// CI platform parity (2026-10-16, caught by the 0.11.22 matrix): mkdtemp
+	// returns the LEXICAL tmpdir path — on macOS $TMPDIR is a /var symlink
+	// (canonical /private/var/…) and on Windows it can be the 8.3 short form.
+	// locateRunCwd's stateRoot comparison works on canonicalized paths, so a
+	// lexical fixture path makes handleSteer answer "Run not found" on those
+	// OSes while linux (/tmp is a real dir) stays green. Canonicalize the
+	// fixture root so lexical == canonical on every platform.
+	const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-steer-clamp-")));
 	tmpDirs.push(cwd);
 	const crewRoot = path.join(cwd, ".crew");
 	const stateRoot = path.join(crewRoot, "state", "runs", RUN_ID);
