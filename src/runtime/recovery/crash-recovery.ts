@@ -213,7 +213,18 @@ export async function applyRecoveryPlan(plan: RecoveryPlan, ctx: Pick<ExtensionC
 			return;
 		}
 
-		const reset = new Set(plan.resumableTasks);
+		// M-4 (2026-10-16): the plan was computed from a pre-hook (stale) snapshot.
+		// Filter the reset set to tasks whose FRESH status is still non-terminal — a
+		// task that completed/failed/... during the run_recovery hook gap must keep
+		// its terminal status and result (mirror of the requeue-eligibility filter
+		// in applyReconcileAtOpenFastPath). Terminal tasks pass through untouched
+		// below, so a stale plan can never requeue finished work.
+		const reset = new Set(
+			plan.resumableTasks.filter((id) => {
+				const task = fresh.tasks.find((t) => t.id === id);
+				return task !== undefined && !isTerminalTask(task);
+			}),
+		);
 		const tasks = fresh.tasks.map((task) =>
 			reset.has(task.id)
 				? {
@@ -238,10 +249,12 @@ export async function applyRecoveryPlan(plan: RecoveryPlan, ctx: Pick<ExtensionC
 			event: {
 				type: "crew.run.resumed",
 				runId: plan.runId,
-				message: `Recovered ${plan.resumableTasks.length} interrupted task(s).`,
+				message: `Recovered ${reset.size} interrupted task(s).`,
 				data: {
 					recoveredFromSeq: plan.lastEventSeq,
-					resumableTasks: plan.resumableTasks,
+					// M-4: report what was ACTUALLY reset from the fresh snapshot
+					// (terminal tasks filtered out), not what the stale plan asked for.
+					resumableTasks: [...reset],
 				},
 			},
 		};
@@ -349,15 +362,10 @@ export function cancelOrphanedRuns(
 		const loaded = loadRunManifestById(cwd, manifest.runId); // NOTE: no withRunLock - best-effort only; concurrent writes may cause inconsistency
 		if (!loaded) continue;
 
-		const hasRecentActivity = loaded.tasks.some((task) => {
-			if (task.status !== "running" && task.status !== "waiting") return false;
-			const heartbeatAt = task.heartbeat?.lastSeenAt ? new Date(task.heartbeat.lastSeenAt).getTime() : Number.NaN;
-			if (task.heartbeat?.alive !== false && Number.isFinite(heartbeatAt) && now - heartbeatAt <= staleThresholdMs) return true;
-			const activityAt = task.agentProgress?.lastActivityAt ? new Date(task.agentProgress.lastActivityAt).getTime() : Number.NaN;
-			return Number.isFinite(activityAt) && now - activityAt <= staleThresholdMs;
-		});
-
-		if (hasRecentActivity) {
+		// R7-1 (2026-10-16): the inline predicate moved to the shared
+		// `hasRecentTaskActivity` helper so purgeStaleActiveRunIndex step 6 can
+		// honor the same task-level life evidence this path has always honored.
+		if (hasRecentTaskActivity(loaded.tasks, now, staleThresholdMs)) {
 			skipped.push(manifest.runId);
 			continue;
 		}
@@ -382,6 +390,27 @@ export function cancelOrphanedRuns(
 					message: `Skipped orphan cancellation: status is '${fresh.manifest.status}' (was 'running'/'blocked' at initial scan)`,
 					data: { currentStatus: fresh.manifest.status },
 				});
+				return;
+			}
+
+			// R7-6 (2026-10-16): status is still "running", but that alone is not
+			// revalidation — re-derive EVERY liveness input the cancel decision was
+			// built on from this FRESH snapshot (manifest.updatedAt / heartbeat.json
+			// mtime / async pid / task heartbeats). A `team resume` that adopted the
+			// run between the pre-lock scan and this lock rewrote exactly those inputs;
+			// cancelling here would false-cancel a run that is alive again (and then
+			// terminate its live agents).
+			if (hasFreshLivenessEvidence(fresh, now, staleThresholdMs)) {
+				// U2 (2026-10-10): SYNC append — cancelOrphanedRuns is a sync API with no
+				// await boundary to flush an async append.
+				appendEvent(loaded.manifest.eventsPath, {
+					type: "crew.run.orphan_skip",
+					runId: manifest.runId,
+					message:
+						"Skipped orphan cancellation: fresh liveness evidence observed under the run lock (run re-adopted or still active)",
+					data: { reason: "fresh_liveness_under_lock" },
+				});
+				skipped.push(manifest.runId);
 				return;
 			}
 
@@ -517,6 +546,48 @@ function hasRecentLifeEvidence(
 }
 
 /**
+ * R7-1 (2026-10-16): TASK-level life evidence — true when any running/waiting
+ * task has a live heartbeat or agent progress within `staleThresholdMs`.
+ * A DWF-foreground run (run.ts → runDynamicWorkflow) writes NO team-level
+ * heartbeat.json and never touches manifest.updatedAt while a long subagent
+ * step executes, so a fresh task heartbeat can be the ONLY signal proving the
+ * run is alive. Extracted from cancelOrphanedRuns so the purge path
+ * (purgeStaleActiveRunIndex step 6) honors exactly the same evidence.
+ */
+function hasRecentTaskActivity(tasks: TeamTaskState[], now: number, staleThresholdMs: number): boolean {
+	return tasks.some((task) => {
+		if (task.status !== "running" && task.status !== "waiting") return false;
+		const heartbeatAt = task.heartbeat?.lastSeenAt ? new Date(task.heartbeat.lastSeenAt).getTime() : Number.NaN;
+		if (task.heartbeat?.alive !== false && Number.isFinite(heartbeatAt) && now - heartbeatAt <= staleThresholdMs) return true;
+		const activityAt = task.agentProgress?.lastActivityAt ? new Date(task.agentProgress.lastActivityAt).getTime() : Number.NaN;
+		return Number.isFinite(activityAt) && now - activityAt <= staleThresholdMs;
+	});
+}
+
+/**
+ * R7-6 (2026-10-16): under-lock liveness revalidation. Proving
+ * `status === "running"` on the in-lock re-read is NOT enough: a concurrent
+ * `team resume` that adopted the run between the pre-lock scan and lock
+ * acquisition rewrote the very liveness inputs the cancel decision was built
+ * on. Re-derive them from the FRESH snapshot — any ONE of these is sufficient
+ * evidence the run came back to life and the cancel must abort:
+ *   - fresh on-disk `manifest.updatedAt` and/or team `heartbeat.json` mtime
+ *     (the same corroboration `hasRecentLifeEvidence` applies pre-lock),
+ *   - a fresh/repopulated async worker PID that is ALIVE (re-dispatch),
+ *   - fresh task heartbeats / agent progress (DWF-foreground evidence).
+ */
+function hasFreshLivenessEvidence(
+	fresh: { manifest: TeamRunManifest; tasks: TeamTaskState[] },
+	now: number,
+	staleThresholdMs: number,
+): boolean {
+	if (hasRecentLifeEvidence(fresh.manifest, fresh.manifest.updatedAt, now, staleThresholdMs)) return true;
+	const pid = fresh.manifest.async?.pid;
+	if (pid !== undefined && checkProcessLiveness(pid).alive) return true;
+	return hasRecentTaskActivity(fresh.tasks, now, staleThresholdMs);
+}
+
+/**
  * Purge the global active-run-index of entries whose manifest is no longer active.
  *
  * Note: This function only cleans user-level active run entries.
@@ -628,6 +699,7 @@ export function purgeStaleActiveRunIndex(
 				// repaired-tasks write and the manifest-status flip. terminateLiveAgentsForRun
 				// is fire-and-forget so it stays OUTSIDE the lock to avoid blocking the
 				// critical section on async IPC.
+				let abortedFreshLiveness = false;
 				try {
 					const fullLoaded = loadRunManifestById(entry.cwd, entry.runId);
 					if (fullLoaded) {
@@ -637,6 +709,23 @@ export function purgeStaleActiveRunIndex(
 							const fresh = loadRunManifestById(entry.cwd, entry.runId);
 							if (!fresh) return;
 							if (fresh.manifest.status !== "running") return;
+							// R7-6 (2026-10-16): under-lock liveness revalidation — the pre-lock
+							// gate used inputs read BEFORE the lock; a concurrent `team resume`
+							// adoption may have rewritten them in that window (fresh
+							// manifest.updatedAt / re-populated live pid / fresh task heartbeats).
+							// Fresh evidence → abort WITHOUT cancelling and KEEP the registry
+							// entry (it is the live-claim signal G12 relies on).
+							if (hasFreshLivenessEvidence(fresh, now, staleThresholdMs)) {
+								abortedFreshLiveness = true;
+								appendEvent(fresh.manifest.eventsPath, {
+									type: "crew.run.orphan_skip",
+									runId: entry.runId,
+									message:
+										"Skipped purge cancellation: fresh liveness evidence observed under the run lock (run re-adopted or still active)",
+									data: { reason: "fresh_liveness_under_lock" },
+								});
+								return;
+							}
 							const now_iso = new Date(now).toISOString();
 							const repairedTasks = fresh.tasks.map((task) => {
 								if (task.status === "running" || task.status === "queued" || task.status === "waiting") {
@@ -659,17 +748,28 @@ export function purgeStaleActiveRunIndex(
 							}
 							updateRunStatus(fresh.manifest, "cancelled", "Orphaned run: worker process dead and no recent activity");
 						});
-						void terminateLiveAgentsForRun(
-							fullLoaded.manifest.runId,
-							"cancelled",
-							appendEvent,
-							fullLoaded.manifest.eventsPath,
-						).catch((error) =>
-							logInternalError("crash-recovery.pid-dead.terminate", error, `runId=${fullLoaded.manifest.runId}`, "warn"),
-						);
+						// R7-6: only terminate live agents when the cancel actually landed —
+						// an aborted (fresh-evidence) run is alive; terminating it would kill
+						// the run we just decided to keep.
+						if (!abortedFreshLiveness) {
+							void terminateLiveAgentsForRun(
+								fullLoaded.manifest.runId,
+								"cancelled",
+								appendEvent,
+								fullLoaded.manifest.eventsPath,
+							).catch((error) =>
+								logInternalError("crash-recovery.pid-dead.terminate", error, `runId=${fullLoaded.manifest.runId}`, "warn"),
+							);
+						}
 					}
 				} catch {
 					// Best-effort manifest cleanup
+				}
+				// R7-6: a fresh-evidence abort means the run is alive again — KEEP the
+				// registry entry (live-claim signal) instead of unregistering it.
+				if (abortedFreshLiveness) {
+					kept.push(entry.runId);
+					continue;
 				}
 				unregisterActiveRun(entry.runId);
 				purged.push(entry.runId);
@@ -681,14 +781,44 @@ export function purgeStaleActiveRunIndex(
 		// manifest was never updated to a terminal status after the worker exited.
 		// Uses the same life-evidence corroboration as condition 5; the stateRoot is
 		// kept on cancel so the run stays queryable/resumable with diagnostics.
+		// R7-1 (2026-10-16): step 6 now also honors TASK-level life evidence
+		// (hasRecentTaskActivity), making it symmetric with cancelOrphanedRuns.
+		// A DWF-foreground run (run.ts → runDynamicWorkflow) writes neither
+		// heartbeat.json nor manifest.updatedAt while a long subagent step
+		// executes — only its task heartbeats prove liveness. Without this check
+		// a subagent step longer than staleThresholdMs was false-cancelled
+		// (tasks cancelled + run flipped terminal + registry entry dropped)
+		// while the worker was still running; a later `team resume` then
+		// double-dispatched the live run.
 		if (manifest?.status === "running" && manifest.async === undefined) {
 			if (!hasRecentLifeEvidence(entry, manifest.updatedAt, now, staleThresholdMs)) {
+				let cancelledUnderLock = false;
+				let abortedFreshLiveness = false;
 				try {
 					const fullLoaded = loadRunManifestById(entry.cwd, entry.runId);
 					if (fullLoaded && fullLoaded.manifest.status === "running") {
 						withRunLockSync(fullLoaded.manifest, () => {
 							const fresh = loadRunManifestById(entry.cwd, entry.runId);
 							if (fresh?.manifest.status !== "running") return;
+							// R7-6 (2026-10-16): under-lock liveness revalidation — the pre-lock
+							// gate used inputs read BEFORE the lock; a concurrent `team resume`
+							// adoption may have rewritten them in that window (fresh
+							// manifest.updatedAt / re-populated live pid / fresh task heartbeats).
+							// Fresh evidence → abort WITHOUT cancelling and KEEP the registry
+							// entry (it is the live-claim signal G12 relies on). This ALSO covers
+							// R7-1’s task-heartbeat evidence: hasFreshLivenessEvidence consults
+							// hasRecentTaskActivity on this FRESH in-lock snapshot.
+							if (hasFreshLivenessEvidence(fresh, now, staleThresholdMs)) {
+								abortedFreshLiveness = true;
+								appendEvent(fresh.manifest.eventsPath, {
+									type: "crew.run.orphan_skip",
+									runId: entry.runId,
+									message:
+										"Skipped purge cancellation: fresh liveness evidence observed under the run lock (run re-adopted or still active)",
+									data: { reason: "fresh_liveness_under_lock" },
+								});
+								return;
+							}
 							const now_iso = new Date(now).toISOString();
 							const repairedTasks = fresh.tasks.map((task) => {
 								if (task.status === "running" || task.status === "queued" || task.status === "waiting") {
@@ -716,18 +846,30 @@ export function purgeStaleActiveRunIndex(
 									Math.round(staleThresholdMs / 60000) +
 									" minutes",
 							);
+							cancelledUnderLock = true;
 						});
-						void terminateLiveAgentsForRun(
-							fullLoaded.manifest.runId,
-							"cancelled",
-							appendEvent,
-							fullLoaded.manifest.eventsPath,
-						).catch((error) =>
-							logInternalError("crash-recovery.pid-dead.terminate", error, `runId=${fullLoaded.manifest.runId}`, "warn"),
-						);
+						// R7-1/R7-6: only terminate live agents when the cancel actually landed
+						// under the lock — an aborted (fresh-evidence) run is alive; terminating
+						// it would kill the run we just decided to keep.
+						if (cancelledUnderLock) {
+							void terminateLiveAgentsForRun(
+								fullLoaded.manifest.runId,
+								"cancelled",
+								appendEvent,
+								fullLoaded.manifest.eventsPath,
+							).catch((error) =>
+								logInternalError("crash-recovery.pid-dead.terminate", error, `runId=${fullLoaded.manifest.runId}`, "warn"),
+							);
+						}
 					}
 				} catch {
 					// Best-effort
+				}
+				// R7-1/R7-6: a fresh-evidence abort means the run is alive again — KEEP
+				// the registry entry (live-claim signal) instead of unregistering it.
+				if (abortedFreshLiveness) {
+					kept.push(entry.runId);
+					continue;
 				}
 				unregisterActiveRun(entry.runId);
 				purged.push(entry.runId);
