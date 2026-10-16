@@ -606,7 +606,29 @@ export function resolveModelFallbackPolicy(
 	} else {
 		maxAutoFallbacks = config?.maxAutoFallbacks;
 	}
-	const order = (env.PI_CREW_MODEL_FALLBACK_ORDER as "parentFirst" | "asIs" | undefined) ?? config?.order;
+	// J5 (DR-03 round-6): validate the order env against the two legal values.
+	// The previous unvalidated cast let arbitrary strings flow into
+	// orderAutoFallbacks' `order === "asIs"` checks — any typo (e.g.
+	// "parent-first") silently behaved as parentFirst. Invalid → warn + fall
+	// back to config/default, mirroring the PI_CREW_MAX_AUTO_FALLBACKS
+	// clamp-warn sibling pattern above.
+	const envOrder = env.PI_CREW_MODEL_FALLBACK_ORDER;
+	let order: "parentFirst" | "asIs" | undefined;
+	if (envOrder) {
+		if (envOrder === "parentFirst" || envOrder === "asIs") {
+			order = envOrder;
+		} else {
+			logInternalError(
+				"model-fallback.model-fallback-order-invalid",
+				undefined,
+				`PI_CREW_MODEL_FALLBACK_ORDER="${envOrder}" is invalid (expected "parentFirst" or "asIs"), falling back to config`,
+				"warn",
+			);
+			order = config?.order;
+		}
+	} else {
+		order = config?.order;
+	}
 	const requireCredentials =
 		env.PI_CREW_MODEL_REQUIRE_CREDENTIALS === "1"
 			? true

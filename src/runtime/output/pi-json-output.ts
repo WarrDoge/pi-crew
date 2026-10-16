@@ -94,7 +94,7 @@ export function extractText(value: unknown): string[] {
  *  settledWithoutAnswer flag (DR-01): see ParsedPiJsonOutput.settledWithoutAnswer. */
 function isAssistantMessageEnd(event: unknown): boolean {
 	const obj = asRecord(event);
-	if (!obj || obj.type !== "message_end") return false;
+	if (obj?.type !== "message_end") return false;
 	const message = asRecord(obj.message);
 	return message?.role === "assistant";
 }

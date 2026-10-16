@@ -892,6 +892,25 @@ class BoundedSeenControlRequestIdSet extends Set<string> {
 /** @internal — test seam for the C1 cap (see live-agent-control-dedupe tests). */
 export const __test__BoundedSeenControlRequestIdSet = BoundedSeenControlRequestIdSet;
 
+/**
+ * R6-9 (DR-03 round-6): best-effort usage extraction for the fault/watchdog
+ * escape returns. The success return reports usageFromSessionStats(session),
+ * but the fault/watchdog catch paths previously carried NO usage — whenever
+ * embeddedWorkers routed work to the embedded tier and the task faulted, the
+ * burned turns vanished from the budget (under-count). The session may be
+ * disposed or partially unusable after the fault, so stats collection is
+ * guarded — it can never turn a fault into a crash. Returns undefined when no
+ * usable stats surface exists.
+ */
+function faultPathUsage(session: LiveSessionLike | undefined): UsageState | undefined {
+	try {
+		return usageFromSessionStats(session);
+	} catch (error) {
+		logInternalError("live-session.fault-usage-stats", error, "session stats unavailable on fault path");
+		return undefined;
+	}
+}
+
 export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<LiveSessionRunResult> {
 	// Cold-start race fix: ensure the hot module graph is warm before touching
 	// any module. Under tsx, concurrent first-imports race module-record
@@ -1817,12 +1836,16 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 				},
 			});
 			updateLiveAgentStatus(agentId, "failed");
+			// R6-9: turns burned before the watchdog fired still count — capture the
+			// partial usage (guarded; session was disposed by the watchdog timer).
+			const watchdogUsage = faultPathUsage(session);
 			return {
 				available: true,
 				exitCode: 1,
 				stdout: stdoutTail.value().trim(),
 				stderr: error.message,
 				jsonEvents,
+				usage: watchdogUsage,
 				error: error.message,
 				...(embedded ? { fault: { kind: "turn-watchdog" as const, detail: error.message, countAsFault: true } } : {}),
 			};
@@ -1844,12 +1867,15 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 			// drop-reference (synchronous — never awaits the stuck abort): drain +
 			// terminate + dispose + UNREGISTER, so the hung session holds no slot.
 			dropLiveAgentReference(agentId);
+			// R6-9: partial usage from the turns completed before the tool hung.
+			const hungUsage = faultPathUsage(session);
 			return {
 				available: true,
 				exitCode: 1,
 				stdout: stdoutTail.value().trim(),
 				stderr: error.message,
 				jsonEvents,
+				usage: hungUsage,
 				error: error.message,
 				...(embedded ? { fault: { kind: "hung-tool" as const, timeoutMs: error.timeoutMs, countAsFault: true } } : {}),
 			};
@@ -1885,6 +1911,9 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 			stdout: stdoutTail.value().trim(),
 			stderr: message,
 			jsonEvents,
+			// R6-9: generic fault path — partial usage from completed turns so the
+			// budget sees the real spend even when the task failed.
+			usage: faultPathUsage(session),
 			error: message,
 			...(embeddedCatchFault ? { fault: embeddedCatchFault } : {}),
 		};

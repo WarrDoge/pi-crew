@@ -60,6 +60,14 @@ export function providerEnvKeys(modelId: string | undefined): string[] {
  * Build a scoped allowlist that includes system vars + only the provider keys
  * relevant to the assigned model (and its fallback chain).
  *
+ * R6-8 (DR-03 round-6) contract note: callers SHOULD pass the task's full
+ * candidate chain (primary + fallbacks) — child-pi-spawn.ts threads it from
+ * the executor's attempt chain. Bare model ids (no "provider/" prefix)
+ * contribute ZERO keys here (providerEnvKeys returns [] for them); scoping is
+ * never widened to all-providers to compensate — instead the spawn layer warns
+ * when a truly-bare single model resolves zero provider keys (see
+ * child-pi-spawn.ts R6-8 warn; auth.json users are unaffected).
+ *
  * @param baseAllowList - Non-provider system vars to always include
  * @param models - Model IDs to include provider keys for (primary + fallbacks)
  * @returns Combined allowlist with scoped provider keys

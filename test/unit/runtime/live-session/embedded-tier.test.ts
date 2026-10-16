@@ -77,10 +77,14 @@ interface U11Scenario {
 	agentDir: string;
 	faux: FauxHandle;
 	events: Array<Record<string, unknown>>;
-	run: (options?: {
-		runtimeConfig?: Record<string, unknown>;
-		embeddedMitigations?: Record<string, unknown>;
-	}) => Promise<{ exitCode: number | null; error?: string; stderr: string; fault?: LiveSessionFault }>;
+	run: (options?: { runtimeConfig?: Record<string, unknown>; embeddedMitigations?: Record<string, unknown> }) => Promise<{
+		exitCode: number | null;
+		error?: string;
+		stderr: string;
+		fault?: LiveSessionFault;
+		/** R6-9: usage must also be present on FAULT returns (budget under-count fix). */
+		usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; cost?: number; turns?: number };
+	}>;
 	manifest: { runId: string; stateRoot: string; eventsPath: string };
 	taskId: string;
 	agentId: string;
@@ -219,7 +223,7 @@ test("U11 guard: installs a process listener only while embedded sessions are in
 		taskId: "guard-task",
 		role: "executor",
 		agent: "executor",
-		session: { dispose: () => {} },
+		session: { dispose: () => undefined },
 		status: "running",
 		workspaceId: "ws-u11",
 	});
@@ -341,7 +345,7 @@ test("U11 (a): enforcement prunes MCP/extension/recursive tools and verifies, fa
 	const drift: string[] = ["read", "mcp__leak"];
 	const stubborn = {
 		getActiveToolNames: () => drift,
-		setActiveToolsByName: () => {},
+		setActiveToolsByName: () => undefined,
 	};
 	const verify = enforceEmbeddedBuiltinTools(stubborn as never, u11Agent, "executor");
 	assert.equal(verify.ok, false, "a surviving non-builtin name must fail the task");
@@ -741,7 +745,43 @@ test("U11 E2E: process-level uncaughtException quarantines the embedded session 
 		assert.ok(String(blast?.data?.errorMessage).includes("U11-E2E-BLAST"));
 		assert.equal(getLiveAgent(scenario.agentId), undefined, "quarantined handle dropped");
 		assert.deepEqual(embeddedTierCapacityState().active, [], "slot released despite the fault");
-		// The host is still alive — this assertion line itself proves it.
+	} finally {
+		restoreEnv("PI_CODING_AGENT_DIR", previousAgentDir);
+		removeTrackedTempDir(scenario.cwd);
+	}
+});
+
+test("R6-9: faulted embedded run still reports usage > 0 for burned turns", async () => {
+	// DR-03 round-6 R6-9: the embedded-tier usage was only reported on the
+	// SUCCESS return — fault/watchdog catch paths carried none, so any faulted
+	// embedded run under-counted the budget. Turn 1 burns real usage (the faux
+	// provider estimates tokens per assistant message), turn 2's provider call
+	// hangs, and the uncaught-exception guard quarantines the session; the FAULT
+	// return must still carry the partial usage (guarded stats extraction).
+	const scenario = setupU11Scenario([
+		fauxAssistantMessage([fauxToolCall("read", { path: "/nonexistent-r69" })]),
+		() =>
+			new Promise(() => {
+				/* never settles — provider hangs so the fault path fires */
+			}),
+	]);
+	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+	try {
+		activateRealSessionEnv(scenario.agentDir);
+		const runPromise = scenario.run({
+			runtimeConfig: { liveSession: { responseTimeoutMs: 60_000, hungToolGraceMs: 60_000 } },
+			embeddedMitigations: { maxConcurrentEmbedded: 2 },
+		});
+		// Let turn 1 complete (assistant message + tool round-trip) before the blast.
+		await new Promise((resolve) => setTimeout(resolve, 1_500));
+		handleEmbeddedUncaughtException(new Error("R6-9-BLAST"), "uncaughtException");
+		const result = await runPromise;
+		assert.equal(result.exitCode, 1, "quarantined task must fail");
+		assert.equal(result.fault?.kind, "session-error");
+		assert.ok(result.usage, "fault return must carry usage (R6-9)");
+		const tokens =
+			(result.usage.input ?? 0) + (result.usage.output ?? 0) + (result.usage.cacheRead ?? 0) + (result.usage.cacheWrite ?? 0);
+		assert.ok(tokens > 0, `usage must be > 0 after burned turns (got ${JSON.stringify(result.usage)})`);
 	} finally {
 		restoreEnv("PI_CODING_AGENT_DIR", previousAgentDir);
 		removeTrackedTempDir(scenario.cwd);

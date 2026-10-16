@@ -552,6 +552,73 @@ test("resolveModelFallbackPolicy: env PI_CREW_MAX_AUTO_FALLBACKS negative clampe
 	assert.equal(policy?.maxAutoFallbacks, 0);
 });
 
+// ── J5 (DR-03 round-6): PI_CREW_MODEL_FALLBACK_ORDER validation ─────────────
+// The order env was previously cast unchecked — any typo ("parent-first")
+// silently flowed into orderAutoFallbacks as parentFirst semantics. It is now
+// validated against {"parentFirst","asIs"}; invalid → warn + config/default.
+
+test("resolveModelFallbackPolicy: invalid order env warns and falls back to config order (J5)", () => {
+	const original = console.error;
+	const calls: string[] = [];
+	console.error = (msg: string) => {
+		calls.push(msg);
+	};
+	try {
+		const env = { PI_CREW_MODEL_FALLBACK_ORDER: "parent-first" };
+		const policy = resolveModelFallbackPolicy({ order: "parentFirst" }, env as NodeJS.ProcessEnv);
+		assert.equal(policy?.order, "parentFirst", "config order must win after the invalid env is rejected");
+		const warns = calls.filter((line) => line.includes("model-fallback.model-fallback-order-invalid"));
+		assert.equal(warns.length, 1, "structured warn must fire exactly once");
+		assert.match(warns[0]!, /parent-first/);
+		assert.match(warns[0]!, /falling back to config/);
+	} finally {
+		console.error = original;
+	}
+});
+
+test("resolveModelFallbackPolicy: invalid order env with no config drops the order (J5)", () => {
+	const original = console.error;
+	const calls: string[] = [];
+	console.error = (msg: string) => {
+		calls.push(msg);
+	};
+	try {
+		const env = { PI_CREW_MODEL_FALLBACK_ORDER: "bogus-value", PI_CREW_MAX_AUTO_FALLBACKS: "2" };
+		const policy = resolveModelFallbackPolicy(undefined, env as NodeJS.ProcessEnv);
+		assert.equal(policy?.order, undefined, "invalid env order must not leak into the policy");
+		assert.equal(policy?.maxAutoFallbacks, 2, "unrelated fields are unaffected");
+		assert.ok(
+			calls.some((line) => line.includes("model-fallback.model-fallback-order-invalid")),
+			"structured warn must fire",
+		);
+	} finally {
+		console.error = original;
+	}
+});
+
+test("resolveModelFallbackPolicy: valid order env values still override config without warning (J5)", () => {
+	const original = console.error;
+	const calls: string[] = [];
+	console.error = (msg: string) => {
+		calls.push(msg);
+	};
+	try {
+		for (const valid of ["parentFirst", "asIs"] as const) {
+			const policy = resolveModelFallbackPolicy({ order: valid === "parentFirst" ? "asIs" : "parentFirst" }, {
+				PI_CREW_MODEL_FALLBACK_ORDER: valid,
+			} as NodeJS.ProcessEnv);
+			assert.equal(policy?.order, valid, `valid env value ${valid} must win over config`);
+		}
+		assert.equal(
+			calls.filter((line) => line.includes("model-fallback.model-fallback-order-invalid")).length,
+			0,
+			"no warn for legal values",
+		);
+	} finally {
+		console.error = original;
+	}
+});
+
 // ── Sec-M1: scope gate attribution tests ─────────────────────────────────────
 // Verifies the source attribution chain: override/step/teamRole -> "caller"
 // (hard-error when out-of-scope); agentModel -> "frontmatter" (soft warn);

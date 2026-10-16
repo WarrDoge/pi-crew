@@ -812,6 +812,13 @@ export async function runChildProcessTask(ctx: TaskExecutionContext): Promise<Ta
 				workerTransport: input.runtimeConfig?.workerTransport,
 				agent: input.agent,
 				model,
+				// R6-8 (DR-03 round-6): thread the full candidate chain (primary +
+				// fallbacks) so buildChildPiSpawnOptions scopes provider env keys to
+				// the UNION of the chain's providers — a bare-id primary would
+				// otherwise spawn with ZERO provider keys and break the chain on a
+				// non-retryable auth failure while qualified fallbacks sat queued.
+				// Parameter threading only — the attempt loop logic is untouched.
+				modelChain: attemptModels,
 				signal: timeoutController.signal,
 				transcriptPath,
 				maxDepth: input.limits?.maxTaskDepth,
@@ -1280,9 +1287,14 @@ export async function runChildProcessTask(ctx: TaskExecutionContext): Promise<Ta
 	if (error && modelAttempts.length > 1) {
 		// E2/E1 (Round 15): structured CrewError (E008). Build via the factory so
 		// the error carries a code + help hint; keep its .message as the task error.
+		// J4 (DR-03 round-6): attemptModels may still hold UNTRIED candidates when
+		// the loop broke early (non-retryable failure, classifier veto, or
+		// spawn-budget stop) — pass the planned chain length so E008 distinguishes
+		// "Model chain failed early (tried X of N)" from genuine exhaustion.
 		error = errors.modelExhausted(
 			modelAttempts.map((a) => a.model),
 			error,
+			attemptModels.length,
 		).message;
 	}
 	// bug-026 sub-issue B: reclassify after the E008 modelExhausted rewrite —

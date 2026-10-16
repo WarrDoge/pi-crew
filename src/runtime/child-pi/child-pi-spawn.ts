@@ -21,7 +21,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { childPiBaseAllowlist } from "../../config/env-allowlist-registry.ts";
 import { isScratchpadEnabledForRole } from "../../config/role-tools.ts";
-import { buildScopedAllowList, sanitizeEnvSecrets } from "../../utils/env-filter.ts";
+import { buildScopedAllowList, providerEnvKeys, sanitizeEnvSecrets } from "../../utils/env-filter.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
 import { resolveRealContainedPath } from "../../utils/safe-paths.ts";
 import { buildPiWorkerArgs, createSafeTempDir, getPiTempBase } from "../model/pi-args.ts";
@@ -48,8 +48,23 @@ export const BASE_ALLOWLIST: string[] = childPiBaseAllowlist();
  *   4. Add PI_CREW_PARENT_PID for the child-side parent-guard (consumed by the
  *      reactive zombie-scanner + background-runner parent-guard; unused only by
  *      the pi dist binary — see note at the PI_CREW_PARENT_PID assignment below).
+ *
+ * R6-8 (DR-03 round-6): `modelChain` threads the task's model CANDIDATE CHAIN
+ * (primary + fallbacks, e.g. modelRouting.candidates) so the allowlist is
+ * scoped to the UNION of the chain's providers. Previously only the single
+ * current model was passed: a bare-id primary (no "provider/" prefix)
+ * resolved to ZERO provider env keys → the child failed auth with a
+ * non-retryable /api key/i error → the loop broke even though qualified
+ * fallbacks were queued (the env-filter.ts doc contract already promised
+ * "primary + fallbacks"). Scoping is NEVER weakened by this: keys stay
+ * limited to the chain's providers ONLY — never all-providers.
  */
-export function buildChildPiSpawnOptions(cwd: string, env: NodeJS.ProcessEnv, model?: string): SpawnOptions {
+export function buildChildPiSpawnOptions(
+	cwd: string,
+	env: NodeJS.ProcessEnv,
+	model?: string,
+	modelChain?: (string | undefined)[],
+): SpawnOptions {
 	// SECURITY FIX (Issue #1): Validate cwd before passing to spawn.
 	// If cwd comes from an untrusted source (user input, workspace config), a malicious cwd
 	// could cause the child process to operate in an attacker-controlled directory,
@@ -81,9 +96,33 @@ export function buildChildPiSpawnOptions(cwd: string, env: NodeJS.ProcessEnv, mo
 	// Bug #12 fix: essential env vars (PATH, HOME, etc.) are always preserved so child can find npm/node.
 	//
 	// PER-TASK KEY SCOPING: when a model is provided, only the env keys for that
-	// provider are injected (via buildScopedAllowList). When no model is given,
-	// only BASE_ALLOWLIST system vars pass through — no provider keys leak.
-	const allowList = model ? buildScopedAllowList(BASE_ALLOWLIST, [model]) : BASE_ALLOWLIST;
+	// provider are injected (via buildScopedAllowList). R6-8: when the caller
+	// threads the model CANDIDATE CHAIN (primary + fallbacks), keys are scoped
+	// to the UNION of the chain's providers so a fallback attempt on a second
+	// provider does not spawn keyless. When no model is given, only
+	// BASE_ALLOWLIST system vars pass through — no provider keys leak.
+	const scopeModels: (string | undefined)[] = modelChain && modelChain.length > 0 ? modelChain : model !== undefined ? [model] : [];
+	const allowList = scopeModels.length > 0 ? buildScopedAllowList(BASE_ALLOWLIST, scopeModels) : BASE_ALLOWLIST;
+	// R6-8: warn when the scoped models resolve to ZERO provider env keys AND at
+	// least one is a truly-bare id (no "provider/" prefix) — env-key auth + bare
+	// id means the child worker will very likely fail authentication (observed as
+	// the R6-8 stall: bare id → zero keys → /api key/i non-retryable → chain break
+	// even though qualified fallbacks were queued). NOT an error, and it never
+	// widens the allowlist: users authenticating via auth.json (or custom
+	// providers with non-env credentials) are unaffected — the child reads
+	// auth.json credentials exactly like the parent process does. Qualified
+	// unknown providers ("custom/foo") do not warn: that is a deliberate
+	// custom-provider choice, not a likely misconfiguration.
+	const anyProviderKeys = scopeModels.some((scoped) => providerEnvKeys(scoped).length > 0);
+	const anyBareId = scopeModels.some((scoped) => typeof scoped === "string" && !scoped.includes("/"));
+	if (scopeModels.length > 0 && anyBareId && !anyProviderKeys) {
+		logInternalError(
+			"child-pi-spawn.bare-model-no-provider-keys",
+			undefined,
+			`model "${model ?? scopeModels.find((scoped) => typeof scoped === "string")}" is a bare id (no provider prefix) and resolved zero provider env keys — the child worker gets no provider API key via env; env-key users should qualify the model id (e.g. "openai/<id>") or configure a fallback chain (auth.json users are unaffected)`,
+			"warn",
+		);
+	}
 	const filteredEnv = sanitizeEnvSecrets(env, { allowList });
 	// FIX: Removed delete workarounds — with explicit allowlist, these vars
 	// are no longer auto-leaked. The wildcard approach was fragile.
@@ -192,12 +231,14 @@ export function buildFinalChildPiSpawnOptions(
 	mergedEnv: NodeJS.ProcessEnv,
 	builtEnv: Record<string, string | undefined>,
 	model?: string,
+	modelChain?: (string | undefined)[],
 ): SpawnOptions {
 	// (a) Canary: builtEnv must contain ONLY PI_CREW_*/PI_TEAMS_* keys.
 	assertOnlyControlEnvKeys(builtEnv);
 	// (b) Build the allowlist-filtered base SpawnOptions (cwd validation, env
 	//     filtering, provider-key scoping when model is set, NODE_PATH guard).
-	const spawnOptions = buildChildPiSpawnOptions(cwd, mergedEnv, model);
+	//     R6-8: modelChain threads the candidate chain for provider-key scoping.
+	const spawnOptions = buildChildPiSpawnOptions(cwd, mergedEnv, model, modelChain);
 	// (c) Spread builtEnv back on top — the allowlist in step (b) intentionally
 	//     strips PI_CREW_*/PI_TEAMS_* keys, so without this spread the child
 	//     process would never see steering file, kind, role, or broker creds.
@@ -395,6 +436,3 @@ export function prepareSpawnContext(
 		},
 	};
 }
-
-// Silence unused-import warning for logInternalError if not consumed by future helpers.
-void logInternalError;

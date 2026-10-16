@@ -908,7 +908,9 @@ export function admitEmbeddedSession(input: {
 	});
 	// Raced against the prompt; a pre-race rejection must not surface as an
 	// unhandled rejection (which would trip our own process guard).
-	escapeSignal.catch(() => {});
+	escapeSignal.catch(() => {
+		/* intentional UR-guard — see comment above */
+	});
 	let tornDown = false;
 	registerEmbeddedSessionGuard(
 		input.agentId,

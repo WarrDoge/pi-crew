@@ -72,6 +72,29 @@ test("errors.modelExhausted builds E008 with the full chain tried", () => {
 	assert.match(err.toString(), /context: model fallback chain/);
 });
 
+// J4 (DR-03 round-6): the loop can break EARLY (non-retryable failure,
+// classifier veto, spawn-budget stop) while queued fallbacks remain — "All N
+// exhausted" overstated that case. Both shapes must be distinguishable.
+test("errors.modelExhausted distinguishes early break from genuine exhaustion (J4)", () => {
+	const early = errors.modelExhausted(["claude-a", "claude-b"], "api key missing", 3);
+	assert.equal(early.code, ErrorCode.ModelExhausted);
+	assert.match(early.message, /Model chain failed early/);
+	assert.match(early.message, /claude-a → claude-b/);
+	assert.match(early.message, /2 of 3/);
+	assert.match(early.message, /1 queued fallback not tried/);
+	assert.match(early.message, /Last failure: api key missing/);
+	assert.doesNotMatch(early.message, /exhausted/);
+	assert.match(early.toString(), /context: model fallback chain/);
+
+	// plannedChainLength equal to the tried chain = genuine exhaustion — keep
+	// the all-exhausted wording.
+	const exhausted = errors.modelExhausted(["claude-a", "claude-b", "sonnet"], "rate_limit_error", 3);
+	assert.equal(exhausted.code, ErrorCode.ModelExhausted);
+	assert.match(exhausted.message, /All 3 model candidates exhausted/);
+	assert.match(exhausted.message, /claude-a → claude-b → sonnet/);
+	assert.doesNotMatch(exhausted.message, /failed early/);
+});
+
 test("errors.preStepFailed builds E009 with script + exit code + stderr", () => {
 	const err = errors.preStepFailed("./hooks/build.sh", 2, "syntax error near fi");
 	assert.equal(err.code, ErrorCode.PreStepFailed);

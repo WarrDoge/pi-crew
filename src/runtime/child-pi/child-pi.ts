@@ -170,6 +170,18 @@ export interface ChildPiRunInput {
 	task: string;
 	agent: AgentConfig;
 	model?: string;
+	/**
+	 * R6-8 (DR-03 round-6): the task's model CANDIDATE CHAIN (primary +
+	 * fallbacks, e.g. modelRouting.candidates / the executor's attemptModels)
+	 * for provider env-key scoping in buildChildPiSpawnOptions. Scopes the
+	 * allowlist to the UNION of the chain's providers — never all-providers —
+	 * so a fallback attempt on a second provider does not spawn keyless, and
+	 * a bare-id primary no longer means zero provider keys when a qualified
+	 * fallback exists. Absent/empty → single-model scoping (previous
+	 * behavior); a truly-bare single model then warns (env-key auth + bare id
+	 * is a likely misconfiguration; auth.json users are unaffected).
+	 */
+	modelChain?: (string | undefined)[];
 	skillPaths?: string[];
 	signal?: AbortSignal;
 	transcriptPath?: string;
@@ -474,7 +486,12 @@ async function trySurfaceBranch(
 			// child's built env whose PI_CREW_DEPTH is parentDepth+1 — layer-1
 			// guard would misfire on our own tier-1 workers.
 			env: depthEnv ?? process.env,
-			workerEnv: buildFinalChildPiSpawnOptions(input.cwd, mergedEnv, builtEnv, input.model).env as Record<string, string>,
+			// R6-8: thread the model candidate chain so the surface pane's worker env
+			// is provider-key scoped to primary + fallbacks (same as the headless path).
+			workerEnv: buildFinalChildPiSpawnOptions(input.cwd, mergedEnv, builtEnv, input.model, input.modelChain).env as Record<
+				string,
+				string
+			>,
 			config: surfaceConfig,
 			role: input.role ?? input.agent.name,
 			livePaneCount: degradeController ? degradeController.livePaneCount() : (surfaceOpts?.livePaneCount ?? 0),
@@ -801,7 +818,8 @@ export async function runChildPi(input: ChildPiRunInput): Promise<ChildPiRunResu
 		return await new Promise<ChildPiRunResult>((resolve) => {
 			// Compose the final SpawnOptions: canary + filter + spread are now
 			// owned by buildFinalChildPiSpawnOptions (see child-pi-spawn.ts, BLOCKER 2 / S5).
-			const spawnOptions = buildFinalChildPiSpawnOptions(input.cwd, mergedEnv, builtEnv, input.model);
+			// R6-8: modelChain threads the candidate chain for provider-key scoping.
+			const spawnOptions = buildFinalChildPiSpawnOptions(input.cwd, mergedEnv, builtEnv, input.model, input.modelChain);
 			const child = spawn(spawnSpec.command, spawnSpec.args, spawnOptions);
 			if (child.pid) {
 				registerActiveChild(child.pid, child);

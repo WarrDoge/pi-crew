@@ -147,9 +147,22 @@ export const errors = {
 		);
 	},
 
-	modelExhausted(chain: string[], lastFailure?: string): CrewError {
+	modelExhausted(chain: string[], lastFailure?: string, plannedChainLength?: number): CrewError {
 		const tried = chain.join(" → ");
 		const last = lastFailure ? ` Last failure: ${lastFailure}` : "";
+		// J4 (DR-03 round-6): a chain that broke EARLY (non-retryable failure,
+		// classifier veto, or spawn-budget stop while queued fallbacks remained)
+		// is not exhaustion — the old "All N candidates exhausted" wording
+		// overstated what happened and hid that fallbacks were never tried.
+		// plannedChainLength (the full candidate chain length) lets the message
+		// distinguish the two shapes; omit it for the legacy exhaustion wording.
+		if (plannedChainLength !== undefined && chain.length < plannedChainLength) {
+			const untried = plannedChainLength - chain.length;
+			return new CrewError(
+				ErrorCode.ModelExhausted,
+				`Model chain failed early (tried ${tried} — ${chain.length} of ${plannedChainLength} candidates; ${untried} queued fallback${untried === 1 ? "" : "s"} not tried).${last}`,
+			).withContext("model fallback chain");
+		}
 		return new CrewError(
 			ErrorCode.ModelExhausted,
 			`All ${chain.length} model candidates exhausted (tried: ${tried}).${last}`,
