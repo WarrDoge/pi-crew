@@ -120,6 +120,19 @@ interface SourceInternals {
 	forceDispose(): void;
 }
 
+/** O-7 (0.11.22): a scan result of "empty" only counts as a committed compaction
+ *  when the path is a genuine regular file. A directory (or any non-regular
+ *  object) that some readers tolerate into an empty cursor must be treated as a
+ *  FAILED scan so the guard behaves identically on POSIX and Windows. Returns
+ *  false when statSync throws (missing file shares the same transient policy). */
+function isRegularFile(eventsPath: string): boolean {
+	try {
+		return fs.statSync(eventsPath).isFile();
+	} catch {
+		return false;
+	}
+}
+
 function createEventsStateSource(
 	runId: string,
 	eventsPath: string,
@@ -174,14 +187,23 @@ function createEventsStateSource(
 			scanned.length === 0 &&
 			scannedSeq === 0 &&
 			(seq > 0 || events.length > 0) &&
-			!fs.existsSync(eventsPath)
+			!isRegularFile(eventsPath)
 		) {
 			// readEventsCursor reports a MISSING log as an empty cursor — but a
-			// log that carried committed events a beat ago and now does not exist
-			// is a transient disappearance (run dir moving / the rename→wx-create
-			// window of rotation), NOT a compaction to empty. Keep the committed
-			// state — same policy as poll()'s miss-file branch — and keep the inode
-			// stamp so the next poll re-detects the rewrite and retries the resync.
+			// log that carried committed events a beat ago and now is not a
+			// readable regular file is a transient disappearance (run dir moving /
+			// the rename→wx-create window of rotation) OR an unreadable anomaly
+			// (a directory/torn state some readers tolerate into an empty result),
+			// NOT a compaction to empty. Keep the committed state — same policy as
+			// poll()'s miss-file branch — and keep the inode stamp so the next poll
+			// re-detects the rewrite and retries the resync.
+			//
+			// O-7 platform parity (0.11.22 CI): this guard used `!fs.existsSync`,
+			// which is TRUE for a directory — Windows' reader tolerates an EISDIR
+			// open into an empty cursor while POSIX throws, so the same replacement
+			// committed an empty root on Windows and returned false on Linux.
+			// Requiring a regular file makes the failed-scan verdict OS-uniform
+			// while a genuine compaction-to-empty (regular empty file) still commits.
 			scanned = undefined;
 		}
 		// Stamp the inode/size the root was built from so the FIRST poll after
