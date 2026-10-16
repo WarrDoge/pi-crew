@@ -35,8 +35,9 @@ import { logInternalError } from "../../utils/internal-error.ts";
 import { safeAbort } from "../../utils/safe-abort.ts";
 import { countTokens } from "../../utils/token-counter.ts";
 import { cleanupAgentWorktreeAsync, prepareAgentWorktreeAsync } from "../../worktree/worktree-manager.ts";
-import type { DwfCheckpointState } from "../dwf-state-store.ts";
-import { parsePiJsonOutput } from "../output/pi-json-output.ts";
+import type { ChildPiRunResult } from "../child-pi/child-pi.ts";
+import { DWF_CHECKPOINT_VERSION, type DwfCheckpointState } from "../dwf-state-store.ts";
+import { type ParsedPiJsonOutput, parsePiJsonOutput } from "../output/pi-json-output.ts";
 import { extractStructuredResult } from "../output/result-extractor.ts";
 import { executeWithRetry } from "../recovery/retry-executor.ts";
 import { runWorker } from "../run-worker.ts";
@@ -130,6 +131,45 @@ export class DwfAgentCallCapError extends Error {
 		this.limit = limit;
 		this.used = used;
 	}
+}
+
+/** R6-10 (DR-03 round-6, 2026-10-16): typed bridge error thrown INSIDE ctx.retry()
+ *  when ctx.agent() resolves ok:false. executeWithRetry retries THROWN errors
+ *  only, so an ok:false result previously flowed straight out of ctx.retry —
+ *  a 1-attempt "retry" for every failure class except DwfAgentCallCapError.
+ *  Throwing this wrapper makes the failure retryable; ctx.retry catches it after
+ *  exhaustion and returns the CARRIED AgentResult, so ctx.retry's public return
+ *  type/shape is unchanged. DwfAgentCallCapError keeps its passthrough semantics
+ *  (the cap must terminate the workflow, never be retried into silence). */
+export class DwfRetryFailure extends Error {
+	/** The ok:false AgentResult the failed attempt produced. */
+	readonly result: AgentResult;
+	constructor(result: AgentResult) {
+		super(result.error ?? "dynamic workflow retry: agent call returned ok:false");
+		this.name = "DwfRetryFailure";
+		this.result = result;
+	}
+}
+
+/** R6-7 (DR-03 round-6, 2026-10-16): DWF empty-settle gate WITH the sibling
+ *  exemptions the task-runner's attemptErrorFor (child-executor.ts:428-431) has
+ *  but ctx.agent()'s inline gate lacked. Returns the structured 429-style error
+ *  string when the worker settled without a final answer AND the exemptions do
+ *  NOT apply, else undefined (gate passes):
+ *  - patches are real work: coder roles may legitimately end patch-only
+ *    (empty final assistant message is fine when the diff already landed);
+ *  - cancelled/aborted attempts are excluded so an abort never surfaces as an
+ *    upstream-rate-limit failure (and never burns fallback/retry budget on it).
+ *  Mirrors child-executor.ts exactly — extracted so the exemptions are unit-testable
+ *  at this seam (the mock-fixture layer cannot synthesise patch/cancelled shapes). */
+export function dwfSettledWithoutAnswerFailure(
+	childResult: Pick<ChildPiRunResult, "exitStatus">,
+	parsed: Pick<ParsedPiJsonOutput, "settledWithoutAnswer" | "patches">,
+): string | undefined {
+	if (parsed.settledWithoutAnswer !== true) return undefined;
+	if ((parsed.patches?.length ?? 0) > 0) return undefined;
+	if (childResult.exitStatus?.cancelled) return undefined;
+	return "Model settled without a final answer (empty final assistant message; upstream rate-limit/429 exhaustion)";
 }
 
 export interface WorkflowCtx {
@@ -313,6 +353,14 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 			}
 		: { currentPhase: undefined, phases: [] };
 	let phaseCapWarned = false;
+	// R6-12 (DR-03 round-6): phases already recorded in the hydrated checkpoint.
+	// ctx.phase() does NOT re-emit phase_started/phase_completed for these on a
+	// resumed run — the script re-executes from the top and re-walks its phase
+	// history; without this guard every replayed phase title re-emitted its events
+	// (duplicated phase boundaries in events.jsonl). Empty on a fresh run, so the
+	// guard is resume-only: a fresh script may still legitimately re-enter a title
+	// later (e.g. phase("review") rounds) and get its events.
+	const hydratedPhases = new Set<string>(opts.resumedState?.phases ?? []);
 	// round-14 P1-2/P1-3/P1-5: closure-scoped runtime state shared by budget/log/args.
 	// Mirrors the pi-dynamic-workflows RuntimeState pattern (workflow.ts:state).
 	// round-18 P2-3: hydrate spent/logs from a resumed checkpoint (backward compatible when unset).
@@ -323,9 +371,10 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 	};
 	// PERS-1: per-agent-call idempotency cache. Hydrated from resumedState so a DWF
 	// resume skips already-completed agent calls (avoids duplicating artifacts/mailbox/tokens).
-	// Uses Record (not Map) for JSON serialization safety.
-	const completedAgentCalls: Record<string, { text: string; usage?: { input: number; output: number } }> =
-		opts.resumedState?.completedAgentCalls ?? {};
+	// Uses Record (not Map) for JSON serialization safety. R6-3 (DR-03 round-6):
+	// values are the FULL AgentResult (text + usage + structured + artifactPath +
+	// actual durationMs) so replay does not drop structured output / artifact linkage.
+	const completedAgentCalls: Record<string, AgentResult> = opts.resumedState?.completedAgentCalls ?? {};
 	// round-14 P1-2: frozen budget surface. The closures read wfState.spent so the
 	// object stays live after Object.freeze(ctx). total is a snapshot primitive.
 	const budget = Object.freeze({
@@ -395,21 +444,20 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 				// from the call arguments and check if this call was already completed
 				// (e.g. during a previous run before a crash). If so, return the cached
 				// result without re-spawning the agent.
-				const callId = JSON.stringify({
-					role: call.role,
-					agent: call.agent,
-					prompt: call.prompt,
-					model: call.model,
-					schema: call.schema ? "yes" : "no",
-				});
+				// R6-3 (DR-03 round-6, HIGH): the key now covers ALL call-shaping fields
+				// (inputs/systemPrompt/disableTools/maxTurns/graceTurns/worktree/skill/…
+				// and the schema BY VALUE) — previously only {role,agent,prompt,model,
+				// schema:"yes"/"no"}, so two DIFFERENT calls sharing those 5 fields hit the
+				// same cache entry on EVERY call (e.g. same prompt with different inputs
+				// returned the first call's result — inputs provably alter the dispatched
+				// task via composeAgentTask). See computeCallId for the normalization.
+				const callId = computeCallId(call);
 				const cached = completedAgentCalls[callId];
 				if (cached) {
-					return {
-						ok: true,
-						text: cached.text,
-						usage: cached.usage,
-						durationMs: 0,
-					};
+					// Full-result replay (R6-3): structured + artifactPath survive the
+					// round-trip through the checkpoint. ok is forced true — only successful
+					// results are cached, and legacy (pre-R6-3) hydrated records lack the field.
+					return { ...cached, ok: true };
 				}
 
 				// BDG-2: reserve-then-adjust budget. Before spawning, estimate the cost and
@@ -500,18 +548,21 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 				// the exitCode/error check and its rawFinalText/finalText — an early
 				// opening sentence — becomes the step's "result": a false-green DWF
 				// step. See run team_20261014082741 for the live stdio shape.
-				if (childResult.exitCode !== 0 || childResult.error || parsed.settledWithoutAnswer === true) {
+				// R6-7 (DR-03 round-6): the settledWithoutAnswer term now carries the
+				// sibling exemptions (patches = real work; cancelled ≠ 429) via
+				// dwfSettledWithoutAnswerFailure — mirroring child-executor.ts:428-431
+				// exactly, so DWF and the task-runner classify the same transcript the
+				// same way (a patch-only coder step or an aborted attempt no longer fails
+				// as rate-limit exhaustion here while passing there).
+				const settledFailure = dwfSettledWithoutAnswerFailure(childResult, parsed);
+				if (childResult.exitCode !== 0 || childResult.error || settledFailure !== undefined) {
 					// BDG-2: un-reserve the estimate on spawn failure.
 					wfState.spent -= estimate;
 					reserved = false;
 					return {
 						ok: false,
 						text: "",
-						error:
-							childResult.error ??
-							(parsed.settledWithoutAnswer === true
-								? "Model settled without a final answer (empty final assistant message; upstream rate-limit/429 exhaustion)"
-								: `exit ${childResult.exitCode}`),
+						error: childResult.error ?? settledFailure ?? `exit ${childResult.exitCode}`,
 						durationMs: Date.now() - started,
 					};
 				}
@@ -552,10 +603,16 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 						durationMs: Date.now() - started,
 					};
 				}
-				// PERS-1: cache the successful result for idempotency on resume.
+				// PERS-1: cache the FULL successful result for idempotency on resume
+				// (R6-3: structured + artifactPath + actual durationMs included, so
+				// replay returns the same payload a live call would have).
 				completedAgentCalls[callId] = {
+					ok: true,
 					text,
-					usage: { input: parsed.usage?.input ?? 0, output: parsed.usage?.output ?? 0 },
+					structured: extracted.structured ? extracted.data : undefined,
+					usage: parsed.usage,
+					artifactPath: artifact.path,
+					durationMs: Date.now() - started,
 				};
 				return {
 					ok: true,
@@ -580,23 +637,17 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 					durationMs: Date.now() - started,
 				};
 			} finally {
-				// round-17 P2-4: clean up the worktree after the agent completes (success
-				// OR failure). Captures the diff as an artifact before removal. Best-effort
-				// — a leak must never crash the workflow.
-				if (worktreePath) {
-					try {
-						await cleanupAgentWorktreeAsync(manifest, worktreePath, worktreeBranch);
-					} catch (cleanupError) {
-						logInternalError("dynamic-workflow-context.worktree-cleanup", cleanupError, `worktreePath=${worktreePath}`);
-					}
-				}
-				// round-18 P2-3: checkpoint AFTER the agent completes (success or fail) so a
-				// crash between agent calls leaves durable state to resume from. The counter is
-				// incremented here (after the call) so the checkpoint reflects the call that ran.
+				// R6-12 (DR-03 round-6): CHECKPOINT BEFORE CLEANUP. agentCount++ and
+				// onCheckpoint must land BEFORE the worktree-cleanup await — previously
+				// the checkpoint ran after it, so a crash/hang during cleanup lost the
+				// just-completed call from the durable checkpoint and resume re-spawned
+				// the same agent (duplicate work/tokens). Cleanup is best-effort and
+				// idempotent-ish (a leaked worktree is recoverable; a lost call is not).
 				agentCount++;
 				if (opts.onCheckpoint) {
 					try {
 						opts.onCheckpoint({
+							version: DWF_CHECKPOINT_VERSION,
 							runId: manifest.runId,
 							vars: ctx.vars,
 							phases: phaseState.phases,
@@ -609,6 +660,17 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 						});
 					} catch (checkpointError) {
 						logInternalError("dynamic-workflow-context.checkpoint", checkpointError, `runId=${manifest.runId}`);
+					}
+				}
+				// round-17 P2-4: clean up the worktree after the agent completes (success
+				// OR failure). Captures the diff as an artifact before removal. Best-effort
+				// — a leak must never crash the workflow. R6-12: runs AFTER the checkpoint
+				// (see above) — ordering is the fix.
+				if (worktreePath) {
+					try {
+						await cleanupAgentWorktreeAsync(manifest, worktreePath, worktreeBranch);
+					} catch (cleanupError) {
+						logInternalError("dynamic-workflow-context.worktree-cleanup", cleanupError, `worktreePath=${worktreePath}`);
 					}
 				}
 				semaphore.release();
@@ -731,19 +793,35 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 			};
 		},
 		async retry(taskId: string, retryOpts?: { feedback?: string }): Promise<AgentResult> {
-			return executeWithRetry(
-				async () =>
-					ctx.agent({
-						role: "executor",
-						prompt: `Re-do task '${taskId}'.${retryOpts?.feedback ? ` Feedback: ${retryOpts.feedback}` : ""}`,
-					}),
-				{
-					maxAttempts: 3,
-					backoffMs: 0,
-					jitterRatio: 0,
-					exponentialFactor: 1,
-				},
-			);
+			// R6-10 (DR-03 round-6): executeWithRetry retries THROWN errors only, but
+			// ctx.agent() returns {ok:false} for every failure class except
+			// DwfAgentCallCapError — so the previous pass-through never retried an
+			// ok:false attempt (a 1-attempt "retry"). Bridge: throw DwfRetryFailure
+			// (typed, carries the AgentResult) on !ok so executeWithRetry retries it;
+			// after exhaustion catch it and return the CARRIED result (public return
+			// type/shape unchanged). DwfAgentCallCapError is not wrapped — it keeps
+			// its terminate-the-workflow semantics and propagates untouched.
+			try {
+				return await executeWithRetry(
+					async () => {
+						const res = await ctx.agent({
+							role: "executor",
+							prompt: `Re-do task '${taskId}'.${retryOpts?.feedback ? ` Feedback: ${retryOpts.feedback}` : ""}`,
+						});
+						if (!res.ok) throw new DwfRetryFailure(res);
+						return res;
+					},
+					{
+						maxAttempts: 3,
+						backoffMs: 0,
+						jitterRatio: 0,
+						exponentialFactor: 1,
+					},
+				);
+			} catch (error) {
+				if (error instanceof DwfRetryFailure) return error.result;
+				throw error;
+			}
 		},
 		mail(
 			to: string,
@@ -791,6 +869,13 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 			}
 			// Idempotency: same phase title → no event, no state change.
 			if (title === phaseState.currentPhase) return;
+			// R6-12 (DR-03 round-6): phase no-dup on resume. A phase already recorded
+			// in the hydrated checkpoint is NOT re-emitted — the resumed script
+			// re-walks its phase history and would otherwise duplicate phase_started/
+			// phase_completed events in events.jsonl. Resume-only guard: hydratedPhases
+			// is empty on a fresh run, so legitimate same-title re-entry later in a
+			// fresh script still emits (see the fresh-run counter-pin test).
+			if (hydratedPhases.has(title)) return;
 			// Close out the previous open phase BEFORE the new one opens.
 			// U2 (2026-10-10): kept SYNC — ctx closures are exercised DIRECTLY by
 			// unit tests that readEvents() synchronously right after the call
@@ -934,6 +1019,8 @@ export function getWorkflowCheckpoint(ctx: WorkflowCtx): DwfCheckpointState {
 	const phaseState = getWorkflowPhaseState(ctx);
 	const logs = getWorkflowLogs(ctx);
 	return {
+		// R6-12: snapshot carries the format version (mirrors the onCheckpoint payload).
+		version: DWF_CHECKPOINT_VERSION,
 		runId: ctx.runId,
 		vars: ctx.vars,
 		phases: phaseState?.phases ?? [],
@@ -941,11 +1028,39 @@ export function getWorkflowCheckpoint(ctx: WorkflowCtx): DwfCheckpointState {
 		logs: logs ?? [],
 		spent: ctx.budget.spent(),
 		agentCount: (ctx as unknown as { __agentCount?: number }).__agentCount ?? 0,
-		completedAgentCalls:
-			(ctx as unknown as { __completedAgentCalls?: Record<string, { text: string; usage?: { input: number; output: number } }> })
-				.__completedAgentCalls ?? {},
+		completedAgentCalls: (ctx as unknown as { __completedAgentCalls?: Record<string, AgentResult> }).__completedAgentCalls ?? {},
 		updatedAt: new Date().toISOString(),
 	};
+}
+
+/**
+ * R6-3 (DR-03 round-6, HIGH): deterministic PERS-1 cache key over ALL
+ * call-shaping AgentCallOpts fields — the JSON of the resolved call object
+ * with stable ordering:
+ *  - object keys sorted (two identical calls built with different literal key
+ *    orders still share a cache entry);
+ *  - top-level array fields (inputs, skill) keyed as a SORTED copy — the same
+ *    set in a different order is the same call;
+ *  - undefined fields dropped;
+ *  - the schema is included BY VALUE (a structural change to the expected
+ *    output shape changes the dispatched task and must miss the cache — the
+ *    old "yes"/"no" placeholder collided different schemas).
+ * Previously the key was {role, agent, prompt, model, schema:"yes"/"no"} only,
+ * omitting inputs/systemPrompt/disableTools/maxTurns/graceTurns/worktree/skill
+ * — e.g. the same prompt with DIFFERENT inputs (which provably alter the
+ * dispatched task via composeAgentTask) hit the first call's cache entry on
+ * EVERY call and returned the wrong call's result (lead-verified :398-412).
+ * Note: fields that do NOT shape the call (description) are included anyway —
+ * over-keying only costs a cache miss (a fresh spawn), never correctness.
+ */
+function computeCallId(call: AgentCallOpts): string {
+	const normalized: Record<string, unknown> = {};
+	for (const key of Object.keys(call).sort()) {
+		const value: unknown = call[key as keyof AgentCallOpts];
+		if (value === undefined) continue;
+		normalized[key] = Array.isArray(value) ? [...(value as unknown[])].sort() : value;
+	}
+	return JSON.stringify(normalized);
 }
 
 /** Compose the agent task: prompt + optional dependency-input context block. */

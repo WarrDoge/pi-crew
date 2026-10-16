@@ -162,7 +162,10 @@ test("G13 cap: cached replays count toward the cap (a resume/spin loop cannot by
 			// Same prompt → PERS-1 cache hit (no spawn) but STILL counts toward the cap.
 			const r2 = await ctx.agent({ role: "executor", prompt: "same prompt", maxTurns: 1 });
 			assert.equal(r2.ok, true);
-			assert.equal(r2.durationMs, 0, "second identical call must be served from the PERS-1 cache");
+			// R6-3 (DR-03 round-6): replays return the FULL cached AgentResult, so the
+			// cache-hit marker is the shared artifactPath (no new spawn/artifact), not
+			// durationMs (the stored ACTUAL duration now comes back verbatim).
+			assert.equal(r2.artifactPath, r1.artifactPath, "second identical call must be served from the PERS-1 cache");
 			await assert.rejects(ctx.agent({ role: "executor", prompt: "distinct prompt after cap", maxTurns: 1 }), (error: unknown) => {
 				assert.match((error as Error).message, /agent-call cap reached/);
 				return true;

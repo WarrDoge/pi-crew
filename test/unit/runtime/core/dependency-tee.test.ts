@@ -121,7 +121,7 @@ test("budget-trimmed dependency context still surfaces a recovery pointer (no lo
 		assert.match(rendered, /## dep-1 \(explorer\)/, "dep header survives the trim");
 		assert.match(
 			rendered,
-			new RegExp(`full output: artifacts/\\S+/results/dep-1\\.txt`),
+			/full output: artifacts\/\S+\/results\/dep-1\.txt/,
 			"trimmed form must surface the relative recovery pointer",
 		);
 	} finally {

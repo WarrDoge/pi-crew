@@ -13,9 +13,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { Type } from "@sinclair/typebox";
-import type { AgentCallOpts } from "../../../../src/runtime/goal-workflow/dynamic-workflow-context.ts";
+import { DWF_CHECKPOINT_VERSION, type DwfCheckpointState } from "../../../../src/runtime/dwf-state-store.ts";
+import type { AgentCallOpts, AgentResult } from "../../../../src/runtime/goal-workflow/dynamic-workflow-context.ts";
 import {
 	classifyReviewOutcome,
+	DwfAgentCallCapError,
 	getWorkflowCheckpoint,
 	getWorkflowFinalResult,
 	getWorkflowLogs,
@@ -1412,7 +1414,8 @@ test("round-18 makeWorkflowCtx hydrates vars/phases/logs/spent/agentCount from r
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
-		const resumedState = {
+		const resumedState: DwfCheckpointState = {
+			version: DWF_CHECKPOINT_VERSION,
 			runId: "team_dwf_test_abc",
 			vars: { lastPhase: "analyze", items: ["a", "b"] },
 			phases: ["scan", "analyze"],
@@ -1465,7 +1468,8 @@ test("round-18 resumedState ctx.vars is a copy (mutating it does not affect the 
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
-		const resumed = {
+		const resumed: DwfCheckpointState = {
+			version: DWF_CHECKPOINT_VERSION,
 			runId: "team_dwf_test_abc",
 			vars: { x: 1 },
 			phases: [],
@@ -1504,6 +1508,316 @@ test("round-18 getWorkflowCheckpoint() snapshots the current ctx state", () => {
 		assert.ok(cp.logs.includes("snap"));
 		assert.equal(cp.agentCount, 0);
 		assert.equal(typeof cp.updatedAt, "string");
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+// ---------------------------------------------------------------------------
+// DR-03 round-6 Cluster 3 (2026-10-16): R6-3 PERS-1 cache key, R6-10 ctx.retry
+// semantics, R6-12 checkpoint ordering + phase re-emission.
+// Spec: docs/specs/DR-03-round6-fixes-2026-10-16.md Cluster 3.
+// ---------------------------------------------------------------------------
+
+/** Count all files under a directory tree (recursive). Used as the spawn-count
+ *  proxy: every REAL successful ctx.agent() call writes exactly one wf/*.md
+ *  artifact; a PERS-1 cache hit writes none. */
+function countArtifacts(root: string): number {
+	if (!fs.existsSync(root)) return 0;
+	let count = 0;
+	for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+		const p = path.join(root, entry.name);
+		if (entry.isDirectory()) count += countArtifacts(p);
+		else count += 1;
+	}
+	return count;
+}
+
+/** Mock child-pi env guard (json-success + allow) with restore. */
+function withJsonSuccessMock<T>(fn: () => Promise<T> | T): Promise<T> | T {
+	const savedMock = process.env.PI_TEAMS_MOCK_CHILD_PI;
+	const savedAllow = process.env.PI_CREW_ALLOW_MOCK;
+	process.env.PI_TEAMS_MOCK_CHILD_PI = "json-success";
+	process.env.PI_CREW_ALLOW_MOCK = "1";
+	return Promise.resolve(fn()).finally(() => {
+		if (savedMock === undefined) delete process.env.PI_TEAMS_MOCK_CHILD_PI;
+		else process.env.PI_TEAMS_MOCK_CHILD_PI = savedMock;
+		if (savedAllow === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
+		else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
+	});
+}
+
+test("R6-3: same prompt + different inputs → two separate spawns (cache must NOT collide)", async () => {
+	const cwd = tmpCwd();
+	try {
+		const manifest = fakeManifest(cwd);
+		const ctx = makeWorkflowCtx(manifest, {
+			signal: new AbortController().signal,
+			concurrency: 1,
+		});
+		const r1 = await withJsonSuccessMock(() => ctx.agent({ role: "explorer", prompt: "read the inputs", inputs: ["a.md"] }));
+		const r2 = await withJsonSuccessMock(() => ctx.agent({ role: "explorer", prompt: "read the inputs", inputs: ["b.md"] }));
+		assert.equal(r1.ok && r2.ok, true, "both calls succeed (mock)");
+		assert.notEqual(r1.artifactPath, r2.artifactPath, "different inputs alter the dispatched task — distinct cache entries");
+		assert.equal(countArtifacts(manifest.artifactsRoot), 2, "two real spawns wrote two artifacts (pre-fix: 1, second call cache-hit)");
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("R6-3: same prompt + different systemPrompt → two separate spawns", async () => {
+	const cwd = tmpCwd();
+	try {
+		const manifest = fakeManifest(cwd);
+		const ctx = makeWorkflowCtx(manifest, {
+			signal: new AbortController().signal,
+			concurrency: 1,
+		});
+		const r1 = await withJsonSuccessMock(() => ctx.agent({ role: "explorer", prompt: "judge it", systemPrompt: "You are persona A." }));
+		const r2 = await withJsonSuccessMock(() => ctx.agent({ role: "explorer", prompt: "judge it", systemPrompt: "You are persona B." }));
+		assert.equal(r1.ok && r2.ok, true, "both calls succeed (mock)");
+		assert.notEqual(r1.artifactPath, r2.artifactPath, "different systemPrompt — distinct cache entries");
+		assert.equal(countArtifacts(manifest.artifactsRoot), 2, "two real spawns");
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("R6-3: identical call twice → ONE spawn; replay returns the same full result; inputs order normalized", async () => {
+	const cwd = tmpCwd();
+	try {
+		const manifest = fakeManifest(cwd);
+		const ctx = makeWorkflowCtx(manifest, {
+			signal: new AbortController().signal,
+			concurrency: 1,
+		});
+		const call: AgentCallOpts = {
+			role: "explorer",
+			prompt: "identical call probe",
+			inputs: ["x.md", "y.md"],
+			systemPrompt: "Shared persona.",
+			maxTurns: 2,
+		};
+		const r1 = await withJsonSuccessMock(() => ctx.agent({ ...call }));
+		const r2 = await withJsonSuccessMock(() => ctx.agent({ ...call }));
+		assert.equal(r1.ok && r2.ok, true, "both succeed");
+		assert.equal(r2.artifactPath, r1.artifactPath, "identical call replays the cached result (same artifact)");
+		assert.equal(r2.text, r1.text, "cached text is returned verbatim");
+		assert.equal(countArtifacts(manifest.artifactsRoot), 1, "exactly one spawn — second call was a cache hit");
+		// Array-field normalization: same inputs in a different order → same key.
+		const r3 = await withJsonSuccessMock(() => ctx.agent({ ...call, inputs: ["y.md", "x.md"] }));
+		assert.equal(r3.artifactPath, r1.artifactPath, "sorted inputs normalization: reordered array still hits the cache");
+		assert.equal(countArtifacts(manifest.artifactsRoot), 1, "still one spawn after the reordered replay");
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("R6-3: replay from a hydrated PERS-1 record returns structured + artifactPath (no spawn)", async () => {
+	const cwd1 = tmpCwd();
+	const cwd2 = tmpCwd();
+	try {
+		// Phase 1: a real call in ctx1 populates the cache under the PRODUCTION key
+		// (read back via getWorkflowCheckpoint — no key re-implementation here).
+		const manifest1 = fakeManifest(cwd1);
+		const ctx1 = makeWorkflowCtx(manifest1, {
+			signal: new AbortController().signal,
+			concurrency: 1,
+		});
+		const r1 = await withJsonSuccessMock(() => ctx1.agent({ role: "explorer", prompt: "structured replay probe" }));
+		assert.equal(r1.ok, true, "seed call succeeds (mock)");
+		assert.ok(r1.artifactPath, "seed call wrote an artifact");
+		const cp = getWorkflowCheckpoint(ctx1);
+		const entries = Object.entries(cp.completedAgentCalls ?? {});
+		assert.equal(entries.length, 1, "exactly one cached call after the seed");
+		const [key, cached] = entries[0];
+		assert.equal(cached.artifactPath, r1.artifactPath, "R6-3: the cached record stores artifactPath");
+		// Simulate a structured payload surviving the checkpoint JSON round-trip.
+		const hydrated: Record<string, AgentResult> = {
+			[key]: { ...cached, structured: { marker: "structured-survives-replay" } },
+		};
+		// Phase 2: a FRESH ctx hydrated with the enriched record — same call shape.
+		const manifest2 = fakeManifest(cwd2);
+		const ctx2 = makeWorkflowCtx(manifest2, {
+			signal: new AbortController().signal,
+			concurrency: 1,
+			resumedState: {
+				version: DWF_CHECKPOINT_VERSION,
+				runId: manifest2.runId,
+				vars: {},
+				phases: [],
+				currentPhase: undefined,
+				logs: [],
+				spent: 0,
+				agentCount: 1,
+				completedAgentCalls: hydrated,
+				updatedAt: new Date().toISOString(),
+			},
+		});
+		const r2 = await ctx2.agent({ role: "explorer", prompt: "structured replay probe" });
+		assert.equal(r2.ok, true, "hydrated cache hit replays as ok");
+		assert.deepEqual(r2.structured, { marker: "structured-survives-replay" }, "R6-3: replay keeps structured output");
+		assert.equal(r2.artifactPath, r1.artifactPath, "R6-3: replay keeps artifactPath");
+		assert.equal(countArtifacts(manifest2.artifactsRoot), 0, "no spawn happened — the hydrated record satisfied the call");
+	} finally {
+		fs.rmSync(cwd1, { recursive: true, force: true });
+		fs.rmSync(cwd2, { recursive: true, force: true });
+	}
+});
+
+// ---------------------------------------------------------------------------
+// R6-10: ctx.retry semantics
+// ---------------------------------------------------------------------------
+
+test("R6-10: ctx.retry retries ok:false — two failures then success = 3 agent calls", async () => {
+	const cwd = tmpCwd();
+	try {
+		const manifest = fakeManifest(cwd);
+		const ctx = makeWorkflowCtx(manifest, { signal: new AbortController().signal });
+		let calls = 0;
+		ctx.agent = (async () => {
+			calls += 1;
+			if (calls < 3) return { ok: false, text: "", error: `probe-fail-${calls}` };
+			return { ok: true, text: "third-time-ok" };
+		}) as typeof ctx.agent;
+		const res = await ctx.retry("task-probe");
+		assert.equal(calls, 3, "ok:false must be retried (pre-fix: 1 attempt, result passed straight through)");
+		assert.equal(res.ok, true, "third attempt's success is returned");
+		assert.equal(res.text, "third-time-ok");
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("R6-10: ctx.retry persistent ok:false → 3 attempts, returns the LAST failure result", async () => {
+	const cwd = tmpCwd();
+	try {
+		const manifest = fakeManifest(cwd);
+		const ctx = makeWorkflowCtx(manifest, { signal: new AbortController().signal });
+		let calls = 0;
+		ctx.agent = (async () => {
+			calls += 1;
+			return { ok: false, text: "", error: `probe-fail-${calls}` };
+		}) as typeof ctx.agent;
+		const res = await ctx.retry("task-probe-2");
+		assert.equal(calls, 3, "exactly maxAttempts=3 attempts");
+		assert.equal(res.ok, false, "exhaustion returns the carried AgentResult (return type unchanged)");
+		assert.equal(res.error, "probe-fail-3", "the LAST attempt's failure is returned");
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("R6-10: ctx.retry does not swallow DwfAgentCallCapError (cap still terminates the workflow)", async () => {
+	const cwd = tmpCwd();
+	try {
+		const manifest = fakeManifest(cwd);
+		const ctx = makeWorkflowCtx(manifest, { signal: new AbortController().signal });
+		ctx.agent = (async () => {
+			throw new DwfAgentCallCapError(5, 5);
+		}) as typeof ctx.agent;
+		await assert.rejects(
+			() => ctx.retry("task-cap-probe"),
+			(error: unknown) => error instanceof DwfAgentCallCapError,
+			"cap errors propagate out of ctx.retry unchanged",
+		);
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+// ---------------------------------------------------------------------------
+// R6-12: checkpoint ordering + phase re-emission on resume
+// ---------------------------------------------------------------------------
+
+test("R6-12: checkpoint (agentCount + onCheckpoint) lands BEFORE the worktree cleanup", async () => {
+	const cwd = tmpCwd();
+	try {
+		initGitRepo(cwd);
+		const manifest = fakeManifest(cwd);
+		let worktreesAtCheckpoint = -1;
+		let agentCountAtCheckpoint = -1;
+		const ctx = makeWorkflowCtx(manifest, {
+			signal: new AbortController().signal,
+			concurrency: 1,
+			onCheckpoint: (state) => {
+				agentCountAtCheckpoint = state.agentCount;
+				// Observable ordering seam: at checkpoint time the agent worktree
+				// must STILL be registered — cleanup runs AFTER the checkpoint.
+				// Pre-fix the awaited cleanup ran first, so this saw only the leader.
+				worktreesAtCheckpoint = execSync("git worktree list", { cwd, encoding: "utf-8" }).trim().split("\n").length;
+			},
+		});
+		await withJsonSuccessMock(() => ctx.agent({ role: "executor", prompt: "worktree ordering probe", worktree: true }));
+		assert.equal(agentCountAtCheckpoint, 1, "checkpoint fired for the completed call");
+		assert.equal(worktreesAtCheckpoint, 2, "agent worktree still exists at checkpoint time (leader + agent worktree)");
+		const after = execSync("git worktree list", { cwd, encoding: "utf-8" }).trim().split("\n").length;
+		assert.equal(after, 1, "cleanup still runs before agent() resolves (no worktree leak)");
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("R6-12: resumed run does NOT re-emit phase events for checkpoint-recorded phases", () => {
+	const cwd = tmpCwd();
+	try {
+		const manifest = fakeManifest(cwd);
+		// Simulate a crash DURING phase "analyze": both phases were started
+		// pre-crash, only "scan" was completed (via phase("analyze")), and
+		// "analyze" is currentPhase (in flight at crash time).
+		const ctx = makeWorkflowCtx(manifest, {
+			signal: new AbortController().signal,
+			resumedState: {
+				version: DWF_CHECKPOINT_VERSION,
+				runId: manifest.runId,
+				vars: {},
+				phases: ["scan", "analyze"],
+				currentPhase: "analyze",
+				logs: [],
+				spent: 0,
+				agentCount: 1,
+				updatedAt: "2026-10-16T00:00:00.000Z",
+			},
+		});
+		// Script re-executes from the top and re-walks its phase history.
+		ctx.phase("scan");
+		ctx.phase("analyze");
+		let phaseEvents = readEvents(manifest.eventsPath).filter((e) => e.type.startsWith("dwf.phase"));
+		assert.equal(
+			phaseEvents.length,
+			0,
+			"replayed phases must not re-emit (pre-fix: phase('scan') emitted completed:analyze + started:scan)",
+		);
+		// A NEW phase still emits normally — and completes the in-flight "analyze"
+		// exactly once (it was started pre-crash but never completed).
+		ctx.phase("build");
+		phaseEvents = readEvents(manifest.eventsPath).filter((e) => e.type.startsWith("dwf.phase"));
+		assert.deepEqual(
+			phaseEvents.map((e) => `${e.type}:${(e.data as { phase: string }).phase}`),
+			["dwf.phase_completed:analyze", "dwf.phase_started:build"],
+			"only the genuinely-new boundary emits",
+		);
+	} finally {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("R6-12: fresh run still re-emits when a script re-enters a phase title (guard is resume-only)", () => {
+	const cwd = tmpCwd();
+	try {
+		const manifest = fakeManifest(cwd);
+		const ctx = makeWorkflowCtx(manifest, {
+			signal: new AbortController().signal,
+		});
+		ctx.phase("A");
+		ctx.phase("B");
+		ctx.phase("A");
+		const phaseEvents = readEvents(manifest.eventsPath).filter((e) => e.type.startsWith("dwf.phase"));
+		assert.deepEqual(
+			phaseEvents.map((e) => `${e.type}:${(e.data as { phase: string }).phase}`),
+			["dwf.phase_started:A", "dwf.phase_completed:A", "dwf.phase_started:B", "dwf.phase_completed:B", "dwf.phase_started:A"],
+			"no resumedState → hydratedPhases is empty → same-title re-entry still emits",
+		);
 	} finally {
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}

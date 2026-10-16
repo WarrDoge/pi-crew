@@ -19,8 +19,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import { makeWorkflowCtx } from "../../../../src/runtime/goal-workflow/dynamic-workflow-context.ts";
-import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { dwfSettledWithoutAnswerFailure, makeWorkflowCtx } from "../../../../src/runtime/goal-workflow/dynamic-workflow-context.ts";
+import type { TeamRunManifest, WorkerExitStatus } from "../../../../src/state/types.ts";
 
 function tmpCwd(prefix: string): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -87,4 +87,62 @@ test("DR-01 DWF: healthy worker (json-success) still passes the gate", async () 
 	} finally {
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+// ---------------------------------------------------------------------------
+// DR-03 round-6 Cluster 3 — R6-7: gate exemptions (patches + cancelled),
+// mirroring child-executor.ts attemptErrorFor :428-431 exactly.
+//
+// Tested at the extracted seam dwfSettledWithoutAnswerFailure (the exact
+// predicate ctx.agent()'s gate consults) because the mock-fixture layer
+// cannot synthesise patch-bearing or cancelled child results without new
+// fixtures (mock-fixtures.ts is outside this cluster's file set). The wiring
+// of the helper INTO the gate is pinned by the two tests above: the
+// json-429-empty-settle shape reaches the gate through the real pipeline and
+// its ok:false outcome proves the non-exempt branch fires end-to-end.
+// ---------------------------------------------------------------------------
+
+/** Minimal cancelled WorkerExitStatus (abort kill shape). */
+function cancelledExitStatus(): WorkerExitStatus {
+	return {
+		exitCode: null,
+		cancelled: true,
+		timedOut: false,
+		killed: true,
+		signal: "SIGTERM",
+		cleanupErrors: [],
+		finalDrainMs: 0,
+	};
+}
+
+test("R6-7 DWF gate: patch-only settle is NOT a failure (patches are real work)", () => {
+	const failure = dwfSettledWithoutAnswerFailure(
+		{},
+		{ settledWithoutAnswer: true, patches: ["--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1 +1 @@\n-old\n+new"] },
+	);
+	assert.equal(failure, undefined, "coder roles may legitimately end patch-only — gate passes (ok:true path)");
+});
+
+test("R6-7 DWF gate: cancelled/aborted attempt is NOT a 429 failure", () => {
+	const failure = dwfSettledWithoutAnswerFailure({ exitStatus: cancelledExitStatus() }, { settledWithoutAnswer: true });
+	assert.equal(failure, undefined, "an abort must never surface as upstream-rate-limit exhaustion");
+});
+
+test("R6-7 DWF gate: patches + cancelled together still exempt", () => {
+	const failure = dwfSettledWithoutAnswerFailure(
+		{ exitStatus: cancelledExitStatus() },
+		{ settledWithoutAnswer: true, patches: ["--- a/x\n+++ b/x"] },
+	);
+	assert.equal(failure, undefined);
+});
+
+test("R6-7 counter-pin: bare empty-settle (no patches, not cancelled) still fails with the 429-style error", () => {
+	const failure = dwfSettledWithoutAnswerFailure({}, { settledWithoutAnswer: true });
+	assert.match(failure ?? "", /settled without a final answer/i);
+	assert.match(failure ?? "", /rate-limit\/429/i);
+});
+
+test("R6-7: worker that DID settle with an answer never enters the settled branch", () => {
+	assert.equal(dwfSettledWithoutAnswerFailure({}, { settledWithoutAnswer: false }), undefined);
+	assert.equal(dwfSettledWithoutAnswerFailure({}, {}), undefined);
 });
