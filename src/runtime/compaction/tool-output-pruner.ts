@@ -39,6 +39,14 @@ export interface ToolResultEntry {
 	content: string;
 	/** Whether the tool result represents an error. */
 	isError?: boolean;
+	/**
+	 * K8: the tool's REAL exit code when the original result carries one
+	 * (e.g. a bash exit status). Passed through to the digest verbatim
+	 * instead of the historical `isError ? 1 : 0` guess — exit 127 digests
+	 * as `exit=127`. Optional: callers whose source shape has no exit code
+	 * omit it and keep the legacy guess.
+	 */
+	exitCode?: number;
 }
 
 /** A file mutation event (edit/write) that can invalidate earlier reads. */
@@ -102,11 +110,23 @@ function estimateTokens(text: string): number {
 
 const DIGEST_NOTICE_TOKEN_CAP_MULTIPLIER = 1.25;
 
-function firstErrorLine(text: string): string | undefined {
-	return text
-		.split(/\r?\n/)
-		.find((line) => /error|failed|exception|panic/i.test(line))
-		?.trim();
+function firstErrorLine(text: string, isError = false): string | undefined {
+	const lines = text.split(/\r?\n/);
+	const matched = lines.find((line) => /error|failed|exception|panic/i.test(line))?.trim();
+	if (matched !== undefined) return matched;
+	// K8: multi-line stderr/stack whose HEAD carries the diagnostic but no
+	// line matches the keyword patterns (localized messages, shell errors,
+	// stack frames without a keyword). Fall back to the first 3 non-empty
+	// lines of the content head — the head names the failing frame; the old
+	// digest kept only the TAIL line, which for a stack trace is the least
+	// informative frame. Gated on isError so success output never grows a
+	// bogus error= part.
+	if (!isError) return undefined;
+	const head = lines
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0)
+		.slice(0, 3);
+	return head.length > 0 ? head.join(" | ") : undefined;
 }
 
 function truncateField(value: string, maxLength: number): string {
@@ -119,22 +139,26 @@ function truncateField(value: string, maxLength: number): string {
  * Generate a compact digest of a tool result for the digest notice.
  * Supports bash (exit code + tail line), grep/search (match/file counts),
  * and falls back to undefined for tools without a known digest format.
+ *
+ * K8: `exitCode` passes the REAL exit status through when the original
+ * result carries one (exit 127 → `exit=127`, not the hardcoded `exit=1`);
+ * when absent the legacy `isError ? 1 : 0` guess is kept.
  */
-export function resultDigest(toolName: string, content: string, isError?: boolean): string | undefined {
+export function resultDigest(toolName: string, content: string, isError?: boolean, exitCode?: number): string | undefined {
 	const name = toolName.toLowerCase();
 	const text = content ?? "";
 	if (name === "bash") {
-		const exitCode = isError ? 1 : 0;
+		const exitCodeValue = typeof exitCode === "number" && Number.isFinite(exitCode) ? Math.trunc(exitCode) : isError ? 1 : 0;
 		const tail = text.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? "";
-		const error = firstErrorLine(text);
-		return [`exit=${exitCode}`, tail ? `tail=${tail}` : undefined, error ? `error=${error}` : undefined]
+		const error = firstErrorLine(text, isError);
+		return [`exit=${exitCodeValue}`, tail ? `tail=${tail}` : undefined, error ? `error=${error}` : undefined]
 			.filter((part): part is string => part !== undefined)
 			.join("; ");
 	}
 	if (name === "search" || name === "grep") {
 		const match = text.match(/(\d+)\s+matches?/i) ?? text.match(/totalMatches["']?:\s*(\d+)/i);
 		const files = text.match(/(\d+)\s+files?/i) ?? text.match(/filesWithMatches["']?:\s*(\d+)/i);
-		const error = firstErrorLine(text);
+		const error = firstErrorLine(text, isError);
 		return (
 			[match ? `matches=${match[1]}` : undefined, files ? `files=${files[1]}` : undefined, error ? `error=${error}` : undefined]
 				.filter((part): part is string => part !== undefined)
@@ -146,7 +170,7 @@ export function resultDigest(toolName: string, content: string, isError?: boolea
 
 function createPrunedNotice(tokens: number, entry: ToolResultEntry): string {
 	const generic = `[Output pruned — ${tokens} tokens]`;
-	const digest = resultDigest(entry.toolName, entry.content, entry.isError);
+	const digest = resultDigest(entry.toolName, entry.content, entry.isError, entry.exitCode);
 	if (!digest) return generic;
 	const genericTokens = countTokens(generic);
 	const maxTokens = Math.max(genericTokens, Math.floor(genericTokens * DIGEST_NOTICE_TOKEN_CAP_MULTIPLIER));

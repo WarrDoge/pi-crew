@@ -316,6 +316,79 @@ describe("resultDigest", () => {
 });
 
 // ---------------------------------------------------------------------------
+// K8 (DR-03 round-6): real exit code pass-through + error-head fallback
+// ---------------------------------------------------------------------------
+
+describe("resultDigest — K8 exit code pass-through", () => {
+	it("exit 127 digested as 127 when the original result carries the real exit code", () => {
+		const digest = resultDigest("bash", "sh: 1: foobar: command not found\nplenty\nof\nstderr\nlines", true, 127);
+		assert.ok(digest);
+		assert.match(digest!, /^exit=127;/);
+		assert.ok(!/exit=1(?!\d)/.test(digest!), `must not fall back to the hardcoded 1: ${digest}`);
+	});
+
+	it("keeps the legacy isError?1:0 guess when no exit code is carried", () => {
+		assert.match(resultDigest("bash", "some output", true)!, /exit=1;/);
+		assert.match(resultDigest("bash", "some output", false, undefined)!, /exit=0;/);
+		assert.match(resultDigest("bash", "some output")!, /exit=0;/);
+	});
+
+	it("non-finite exit codes fall back to the legacy guess", () => {
+		assert.match(resultDigest("bash", "out", true, Number.NaN)!, /exit=1;/);
+	});
+
+	it("pruned notice digests the ENTRY's real exit code (exit=127 through pruneToolOutputs)", () => {
+		const results: ToolResultEntry[] = [
+			{ id: "b1", toolName: "bash", content: BIG, isError: true, exitCode: 127 },
+			{ id: "b2", toolName: "bash", content: "latest bash output" },
+		];
+		const result = pruneToolOutputs(results, {
+			...AGGRESSIVE_CONFIG,
+			protectedTools: [],
+		});
+		assert.ok(result.prunedCount >= 1);
+		assert.match(result.results[0]!.content, /exit=127/);
+		assert.ok(!/exit=1(?!\d)/.test(result.results[0]!.content), "real exit code must pass through, not the hardcoded 1");
+	});
+});
+
+describe("resultDigest — K8 error-head fallback", () => {
+	it("multi-line stack with a keyword head keeps its head line (pattern still wins)", () => {
+		const stack = ["TypeError: x is not defined", "  at a (a.ts:1:1)", "  at b (b.ts:2:2)"].join("\n");
+		const digest = resultDigest("bash", stack, true, 1);
+		assert.match(digest!, /error=TypeError: x is not defined/);
+	});
+
+	it("multi-line stderr with NO keyword line keeps its head (first 3 non-empty lines)", () => {
+		// Shell errors and localized stacks often carry no
+		// error/failed/exception/panic keyword; the old digest kept only the
+		// TAIL line — for a stack trace the least informative frame.
+		const stack = [
+			"sh: 1: foobar: command not found",
+			"Trace frame one",
+			"Trace frame two",
+			"Trace frame three (old tail-only digest kept just this)",
+		].join("\n");
+		const digest = resultDigest("bash", stack, true, 127);
+		// The error= part carries the HEAD (first 3 non-empty lines); the tail=
+		// part still reports the last line, as before.
+		assert.match(digest!, /error=sh: 1: foobar: command not found \| Trace frame one \| Trace frame two$/);
+		assert.match(digest!, /tail=Trace frame three/);
+	});
+
+	it("skips blank/whitespace-only lines when picking the 3-line head", () => {
+		const digest = resultDigest("bash", "\n   \nhead line\nsecond line\nthird line\nfourth", true, 2);
+		assert.match(digest!, /error=head line \| second line \| third line/);
+	});
+
+	it("non-error output without a keyword line grows no error= part (fallback gated on isError)", () => {
+		const digest = resultDigest("bash", "sh: 1: some shell notice\nanother line", false, 0);
+		assert.ok(digest);
+		assert.ok(!digest!.includes("error="), `success digests must not gain a bogus error part: ${digest}`);
+	});
+});
+
+// ---------------------------------------------------------------------------
 // DEFAULT_PRUNE_CONFIG sanity
 // ---------------------------------------------------------------------------
 

@@ -246,4 +246,134 @@ phantom.
 			assert.equal(result[0]!.text, "");
 		});
 	});
+
+	describe("R6-11: duplicate delimiter handling (forged/quoted blocks)", () => {
+		it("forged quote BEFORE genuine emission → genuine (LAST) block wins attribution", () => {
+			// A worker quotes an earlier task's delimited block (e.g. inside a
+			// transcript/code fence), then emits its own genuine block. Under
+			// first-occurrence-wins the QUOTED block stole attribution with full
+			// strategy:"delimiter" trust; last-wins lets the worker's own
+			// emission win.
+			const raw = `Preamble.
+
+<<<TASK_RESULT:task-a>>>
+QUOTED-BLOCK-FROM-EARLIER-TASK — a quoted/forged body.
+<<<END_TASK_RESULT>>>
+
+The worker then emits its own genuine result:
+
+<<<TASK_RESULT:task-a>>>
+GENUINE-BODY-FOR-TASK-A.
+<<<END_TASK_RESULT>>>
+
+<<<TASK_RESULT:task-b>>>
+GENUINE-BODY-FOR-TASK-B.
+<<<END_TASK_RESULT>>>`;
+			const result = splitCoalescedOutput(raw, ["task-a", "task-b"]);
+			assert.equal(result.length, 2);
+			assert.equal(result[0]!.strategy, "delimiter");
+			assert.equal(result[1]!.strategy, "delimiter");
+			assert.match(result[0]!.text, /GENUINE-BODY-FOR-TASK-A/);
+			assert.ok(!result[0]!.text.includes("QUOTED-BLOCK"), "forged/quoted body must NOT win attribution");
+			assert.match(result[1]!.text, /GENUINE-BODY-FOR-TASK-B/);
+		});
+
+		it("logs a structured warn naming the task and hit count on duplicate hits", (t) => {
+			const errMock = t.mock.method(console, "error", () => undefined);
+			try {
+				const raw =
+					"<<<TASK_RESULT:a>>>first<<<END_TASK_RESULT>>><<<TASK_RESULT:a>>>second<<<END_TASK_RESULT>>>" +
+					"<<<TASK_RESULT:b>>>b-body<<<END_TASK_RESULT>>>";
+				const result = splitCoalescedOutput(raw, ["a", "b"]);
+				assert.equal(result[0]!.text, "second"); // last wins
+				assert.equal(result[0]!.strategy, "delimiter");
+				assert.equal(errMock.mock.calls.length, 1, "exactly one warn for the duplicated task");
+				const line = String(errMock.mock.calls[0]!.arguments[0] ?? "");
+				assert.match(line, /output-splitter\.duplicate-delimiter/);
+				assert.match(line, /taskId=a/);
+				assert.match(line, /hits=2/);
+				assert.match(line, /last-wins/);
+			} finally {
+				errMock.mock.restore();
+			}
+		});
+
+		it("no warn when every task has a single delimiter hit", (t) => {
+			const errMock = t.mock.method(console, "error", () => undefined);
+			try {
+				const raw = "<<<TASK_RESULT:a>>>a-body<<<END_TASK_RESULT>>><<<TASK_RESULT:b>>>b-body<<<END_TASK_RESULT>>>";
+				const result = splitCoalescedOutput(raw, ["a", "b"]);
+				assert.equal(result[0]!.strategy, "delimiter");
+				assert.equal(errMock.mock.calls.length, 0);
+			} finally {
+				errMock.mock.restore();
+			}
+		});
+	});
+
+	describe("R6-11: Strategy 2 id matching (word-boundary, not substring)", () => {
+		it("substring id collision no longer misattributes (task-a vs task-alpha)", () => {
+			// Old `headerText.includes(id)` let "task-a" claim the
+			// "### Task task-alpha" header (first taskIds.find hit), collapsing
+			// coverage to 1 task and degrading the whole group to broadcast.
+			const raw = `# Output
+
+### Task task-alpha
+ALPHA-BODY.
+
+### Task task-a
+A-BODY.`;
+			const result = splitCoalescedOutput(raw, ["task-a", "task-alpha"]);
+			assert.equal(result.length, 2);
+			assert.equal(result[0]!.strategy, "section");
+			assert.equal(result[1]!.strategy, "section");
+			assert.equal(result[0]!.taskId, "task-a");
+			assert.match(result[0]!.text, /A-BODY\./);
+			assert.equal(result[1]!.taskId, "task-alpha");
+			assert.match(result[1]!.text, /ALPHA-BODY\./);
+		});
+
+		it("word-boundary matching still accepts decorated headers (id: / id (note))", () => {
+			const raw = `### Task task-a: final
+A-BODY.
+
+### Task task-b (rerun)
+B-BODY.`;
+			const result = splitCoalescedOutput(raw, ["task-a", "task-b"]);
+			assert.equal(result[0]!.strategy, "section");
+			assert.match(result[0]!.text, /A-BODY\./);
+			assert.match(result[1]!.text, /B-BODY\./);
+		});
+	});
+
+	describe("R6-11: numbered sections honor their declared num", () => {
+		it("out-of-order `### Task N of M` headers map by num, not position", () => {
+			const raw = `### Task 2 of 2
+SECOND-BODY.
+
+### Task 1 of 2
+FIRST-BODY.`;
+			const result = splitCoalescedOutput(raw, ["first", "second"]);
+			assert.equal(result.length, 2);
+			assert.equal(result[0]!.strategy, "section");
+			assert.equal(result[1]!.strategy, "section");
+			// Positional mapping previously gave `first` the SECOND body.
+			assert.match(result[0]!.text, /FIRST-BODY\./);
+			assert.match(result[1]!.text, /SECOND-BODY\./);
+		});
+
+		it("out-of-range num is ignored instead of stealing a position", () => {
+			// Sections declare nums 1 and 3 for a 2-task group: num 3 has no
+			// task to map, so section coverage is incomplete and the splitter
+			// degrades to broadcast rather than misattributing by position.
+			const raw = `### Task 1 of 3
+FIRST-BODY.
+
+### Task 3 of 3
+THIRD-BODY.`;
+			const result = splitCoalescedOutput(raw, ["first", "second"]);
+			assert.equal(result[0]!.strategy, "broadcast");
+			assert.equal(result[1]!.strategy, "broadcast");
+		});
+	});
 });

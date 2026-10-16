@@ -28,14 +28,35 @@
  * raw output. When the deadletter strategy is returned, all entries have
  * empty text — the caller decides what marker to surface per task.
  *
- * Note: pure function — no I/O, no LLM calls, deterministic. This is
- * deliberately the simplest possible splitter; we don't try fuzzy
- * matching, NL extraction, or retry-the-LLM. The MVP trusts workers
- * to follow delimiters 99% of the time; a zero-marker miss degrades to
- * broadcast (nothing task-specific exists to leak), and a partial
- * violation now fails closed (G20) instead of leaking cross-task
- * delimited bodies.
+ * Note: deterministic — no I/O, no LLM calls. (R6-11 exception: duplicate
+ * delimiter hits emit a structured `logInternalError` warn to the console
+ * audit trail; parsing itself stays deterministic.) This is deliberately
+ * the simplest possible splitter; we don't try fuzzy matching, NL
+ * extraction, or retry-the-LLM. The MVP trusts workers to follow
+ * delimiters 99% of the time; a zero-marker miss degrades to broadcast
+ * (nothing task-specific exists to leak), and a partial violation now
+ * fails closed (G20) instead of leaking cross-task delimited bodies.
+ *
+ * R6-11 (DR-03 round-6): duplicate-delimiter handling. A worker that QUOTES
+ * an earlier task's delimited block (in prose, code fences, or a transcript)
+ * and then emits its own genuine block produces two `<<<TASK_RESULT:id>>>`
+ * hits for the same id. Previously first-occurrence-wins let the quoted /
+ * forged block steal attribution with full `strategy:"delimiter"` trust.
+ * Now the LAST occurrence wins (the worker's own genuine emission follows
+ * any quote of earlier material), and every duplicate hit raises a
+ * structured warn via `logInternalError` naming the task and hit count so
+ * operators can audit the group.
+ *
+ * R6-11 residual (documented, accepted): emit-then-quote inversion. A worker
+ * that emits its genuine block FIRST and quotes a forged `<<<TASK_RESULT:…>>>`
+ * block LAST still misattributes under last-wins — as would first-wins under
+ * the mirror-image attack. Without content signing (cryptographic proof that
+ * a block was emitted by its owning worker, not merely quoted) neither
+ * ordering heuristic can distinguish genuine from quoted. Signing is out of
+ * scope; the duplicate-hit warn is the audit signal for exactly this case.
  */
+
+import { logInternalError } from "../../utils/internal-error.ts";
 
 export interface SplitResult {
 	taskId: string;
@@ -60,6 +81,7 @@ export function splitCoalescedOutput(rawOutput: string, taskIds: string[]): Spli
 
 	const byId = new Map<string, string>();
 	const delimiterHits = new Set<string>();
+	const delimiterHitCounts = new Map<string, number>();
 
 	// Strategy 1: delimiter parse.
 	// Pattern: <<<TASK_RESULT:{id}>>> ... <<<END_TASK_RESULT>>>
@@ -69,10 +91,28 @@ export function splitCoalescedOutput(rawOutput: string, taskIds: string[]): Spli
 	while ((match = delimiterRegex.exec(rawOutput)) !== null) {
 		const id = match[1]!;
 		const body = match[2]!.trim();
-		if (taskIds.includes(id) && !byId.has(id)) {
-			byId.set(id, body);
-			delimiterHits.add(id);
-		}
+		if (!taskIds.includes(id)) continue;
+		delimiterHitCounts.set(id, (delimiterHitCounts.get(id) ?? 0) + 1);
+		// R6-11: LAST-wins. First-occurrence-wins previously let a quoted /
+		// forged block steal attribution (a worker quoting an earlier task's
+		// delimited output before emitting its own genuine block). With
+		// last-wins the worker's own emission wins; duplicates raise a
+		// structured warn below. Residual: emit-then-quote inversion — see
+		// the header note; unsolvable without content signing.
+		byId.set(id, body);
+		delimiterHits.add(id);
+	}
+	// R6-11 (b): duplicate-hit detection → structured warn naming the task
+	// and hit count, so misattribution attempts (and accidental self-quotes)
+	// surface in the audit trail instead of silently shifting attribution.
+	for (const [id, hits] of delimiterHitCounts) {
+		if (hits <= 1) continue;
+		logInternalError(
+			"output-splitter.duplicate-delimiter",
+			new Error(`task "${id}" produced ${hits} TASK_RESULT delimiter blocks; LAST occurrence wins attribution`),
+			`taskId=${id} hits=${hits} resolution=last-wins`,
+			"warn",
+		);
 	}
 
 	if (delimiterHits.size === taskIds.length) {
@@ -136,10 +176,30 @@ export function splitCoalescedOutput(rawOutput: string, taskIds: string[]): Spli
 }
 
 /**
+ * True iff `headerText` attributes the section to `id` by exact or
+ * word-boundary match. R6-11: plain substring matching let a shorter id
+ * claim a longer id's header ("task-a" matching "### Task task-alpha").
+ * `id` is escaped before regex construction; the surrounding `\b` anchors
+ * require a non-word char (or string edge) on both sides, so "task-a" no
+ * longer matches "task-alpha" while "task-a", "task-a:" and
+ * "task-a (done)" all still match "task-a".
+ */
+function headerMatchesId(headerText: string, id: string): boolean {
+	if (headerText === id) return true;
+	const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`\\b${escaped}\\b`).test(headerText);
+}
+
+/**
  * Strategy 2 implementation: parse sections by heading patterns.
  *
  * Matches `### Task N of M` (N=1..M) or `### Task N` headers, then
  * captures text up to the next header or end-of-input.
+ *
+ * R6-11: numbered sections map to taskIds by their declared `num`
+ * (`### Task 2 of 2` → taskIds[1]), NOT by scan position — a worker that
+ * emits its sections out of order previously had them assigned positionally
+ * to the wrong tasks. Out-of-range `num` values are ignored (no task to map).
  *
  * Falls back to "first heading wins all text" if no N-of-M numbering is
  * present, which is common in worker output that just labels sections.
@@ -155,12 +215,15 @@ function parseBySectionHeadings(rawOutput: string, taskIds: string[]): Map<strin
 	}
 	if (sections.length >= taskIds.length) {
 		sections.sort((a, b) => a.start - b.start);
-		for (let i = 0; i < sections.length && i < taskIds.length; i += 1) {
+		for (let i = 0; i < sections.length; i += 1) {
 			const section = sections[i]!;
 			const end = sections[i + 1]?.start ?? rawOutput.length;
 			const text = rawOutput.slice(section.start, end).trim();
-			const taskId = taskIds[i];
-			if (taskId) result.set(taskId, text);
+			// R6-11: honor the declared `num` — the section's own identity —
+			// instead of mapping by scan position.
+			const taskId = taskIds[section.num - 1];
+			if (taskId === undefined) continue; // num out of range — no task to map
+			if (!result.has(taskId)) result.set(taskId, text); // first occurrence wins
 		}
 		return result;
 	}
@@ -168,7 +231,7 @@ function parseBySectionHeadings(rawOutput: string, taskIds: string[]): Map<strin
 	const idHeaderRegex = /^(#{2,3})\s+Task\s+([^\s].*?)$/gm;
 	while ((m = idHeaderRegex.exec(rawOutput)) !== null) {
 		const headerText = m[2]!.trim();
-		const matchedId = taskIds.find((id) => headerText.includes(id));
+		const matchedId = taskIds.find((id) => headerMatchesId(headerText, id));
 		if (matchedId && !result.has(matchedId)) {
 			result.set(matchedId, ""); // placeholder; filled below
 		}
@@ -179,7 +242,7 @@ function parseBySectionHeadings(rawOutput: string, taskIds: string[]): Map<strin
 		const idHeaderRegex2 = /^(#{2,3})\s+Task\s+([^\s].*?)$/gm;
 		while ((m = idHeaderRegex2.exec(rawOutput)) !== null) {
 			const headerText = m[2]!.trim();
-			const matchedId = taskIds.find((id) => headerText.includes(id));
+			const matchedId = taskIds.find((id) => headerMatchesId(headerText, id));
 			if (matchedId) headerPositions.push({ taskId: matchedId, start: m.index + m[0].length });
 		}
 		headerPositions.sort((a, b) => a.start - b.start);
