@@ -32,6 +32,10 @@ export interface TaskSummary {
 	id: string;
 	status: string;
 	stalledSince?: number;
+	/** L-6 (2026-10-16): last worker heartbeat (tasks already carry
+	 *  `heartbeat.lastSeenAt` — no new writer needed). Preferred over
+	 *  `stalledSince`, which has no writer. */
+	heartbeat?: { lastSeenAt: string };
 }
 
 export interface ManifestSummary {
@@ -47,7 +51,18 @@ export function computeRunHealth(manifest: ManifestSummary): RunHealth {
 	if (taskCount === 0) return { score: 100, grade: "A", penalties: [], deltas: [] };
 
 	const failedCount = tasks.filter((t) => t.status === "failed").length;
-	const stalledCount = tasks.filter((t) => t.stalledSince !== undefined && Date.now() - t.stalledSince > STALLED_THRESHOLD_MS).length;
+	// L-6: stall detection derived from the task's own heartbeat (already
+	// written by worker heartbeat tracking — no new writer). Only RUNNING
+	// tasks can stall. `stalledSince` (no known writer) stays as a fallback
+	// for summaries without heartbeat data.
+	const stalledCount = tasks.filter((t) => {
+		if (t.status !== "running") return false;
+		if (t.heartbeat) {
+			const lastSeenAt = Date.parse(t.heartbeat.lastSeenAt);
+			return Number.isFinite(lastSeenAt) && Date.now() - lastSeenAt > STALLED_THRESHOLD_MS;
+		}
+		return t.stalledSince !== undefined && Date.now() - t.stalledSince > STALLED_THRESHOLD_MS;
+	}).length;
 
 	const failureRate = failedCount / taskCount;
 	if (failureRate > 0.2) {

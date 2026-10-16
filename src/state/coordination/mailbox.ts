@@ -375,9 +375,27 @@ function cachedMailboxRead(filePath: string, direction: MailboxDirection): Mailb
 	return messages.slice();
 }
 
+/** R7-3 (2026-10-16): rotated archive siblings of a live mailbox file,
+ *  sorted lexicographically. The archive name embeds an ISO timestamp, so
+ *  lexicographic order ≈ chronological (oldest first). */
+function listMailboxArchives(filePath: string): string[] {
+	try {
+		const dir = path.dirname(filePath);
+		const base = path.basename(filePath);
+		return fs
+			.readdirSync(dir)
+			.filter((entry) => entry.startsWith(`${base}.`) && entry.endsWith(".archive.jsonl"))
+			.sort()
+			.map((entry) => path.join(dir, entry));
+	} catch {
+		// Directory missing — nothing to read.
+		return [];
+	}
+}
+
 function safeReadMailboxFile(filePath: string, direction: MailboxDirection): MailboxMessage[] {
 	// PERF: stat-gated primary read — ENOENT is handled inside cachedMailboxRead.
-	const messages = cachedMailboxRead(filePath, direction);
+	const live = cachedMailboxRead(filePath, direction);
 	// 3.3 — also include any rotated archive files alongside the live file.
 	// Archive naming: `<filename>.<isoTimestamp>.archive.jsonl`.
 	// PERF: archives are immutable once written (rotation only ever creates
@@ -385,18 +403,37 @@ function safeReadMailboxFile(filePath: string, direction: MailboxDirection): Mai
 	// sequence), so they route through cachedMailboxRead too and permanently
 	// hit after the first parse. pruneOldMailboxArchives deleting an archive
 	// is covered by cachedMailboxRead's ENOENT → cache-delete branch.
-	try {
-		const dir = path.dirname(filePath);
-		const base = path.basename(filePath);
-		for (const entry of fs.readdirSync(dir)) {
-			if (!entry.startsWith(`${base}.`) || !entry.endsWith(".archive.jsonl")) continue;
-			const archivePath = path.join(dir, entry);
-			messages.push(...cachedMailboxRead(archivePath, direction));
+	const archives = listMailboxArchives(filePath);
+	if (archives.length === 0) return live;
+	// R7-3 (2026-10-16) — same-id LAST-WINS merge, live file applied LAST.
+	//
+	// DESIGN: rotation moves a message into an archive and recreates an empty
+	// live file, so a message normally exists in exactly ONE place and a plain
+	// concat was duplicate-free. The exception is updateMailboxMessageReply:
+	// archives are IMMUTABLE history and are never rewritten, so when the
+	// original message lives only in an archive the reply is recorded as a
+	// COMPENSATING record — same id, reply metadata set — appended to the LIVE
+	// file. Merging by id (archives oldest→newest first, live file last)
+	// collapses the pair into a single reply-marked message, so readMailbox /
+	// readMailboxMessage expose ONE copy with repliedAt set; consumers
+	// (replayPendingMailboxMessages, listMailboxByKind, …) never see the
+	// duplicate reply-less archived original.
+	const merged: MailboxMessage[] = [];
+	const indexById = new Map<string, number>();
+	const upsert = (message: MailboxMessage): void => {
+		const existing = indexById.get(message.id);
+		if (existing === undefined) {
+			indexById.set(message.id, merged.length);
+			merged.push(message);
+		} else {
+			merged[existing] = message;
 		}
-	} catch {
-		// Directory missing — nothing to read.
+	};
+	for (const archivePath of archives) {
+		for (const message of cachedMailboxRead(archivePath, direction)) upsert(message);
 	}
-	return messages;
+	for (const message of live) upsert(message);
+	return merged;
 }
 
 /**
@@ -1138,6 +1175,15 @@ export function acknowledgeMailboxMessage(manifest: TeamRunManifest, messageId: 
  * Update an original mailbox message with reply metadata.
  * Rewrites the mailbox file line containing the original message
  * to include `repliedAt` and `replyContent`.
+ *
+ * R7-3 (2026-10-16): the original may have been ROTATED out of the live file
+ * into a `*.archive.jsonl` sibling (rotateMailboxFileIfNeeded). Archives are
+ * IMMUTABLE history — they are never rewritten here. When the original is
+ * found only in an archive, a COMPENSATING record (same id + reply metadata)
+ * is appended to the LIVE file instead; safeReadMailboxFile merges by id
+ * last-wins (live overrides archive), so every reader sees the reply-marked
+ * message. Global run mailboxes AND every task mailbox (inbox + outbox, live
+ * + archives) are scanned.
  */
 export function updateMailboxMessageReply(manifest: TeamRunManifest, originalMessageId: string, replyContent: string): void {
 	const directions: MailboxDirection[] = ["inbox", "outbox"];
@@ -1167,35 +1213,64 @@ export function updateMailboxMessageReply(manifest: TeamRunManifest, originalMes
 	}
 
 	for (const { filePath, direction } of filesToSearch) {
-		if (!fs.existsSync(filePath)) continue;
-		// FIX: Wrap read-modify-write in withFileLockSync to prevent concurrent
-		// updates from clobbering each other (each reply rewrites the whole file).
-		const found = withFileLockSync(filePath, () => {
-			const lines = fs.readFileSync(filePath, "utf-8").split(/\r?\n/).filter(Boolean);
-			let localFound = false;
-			const updatedLines: string[] = [];
-			for (const line of lines) {
-				try {
-					const parsed = JSON.parse(line) as unknown;
-					const msg = parseMailboxMessage(parsed, direction);
-					if (msg && msg.id === originalMessageId) {
-						msg.repliedAt = new Date().toISOString();
-						msg.replyContent = replyContent;
-						updatedLines.push(JSON.stringify(redactSecrets(msg)));
-						localFound = true;
-					} else {
+		const archives = listMailboxArchives(filePath);
+		if (fs.existsSync(filePath)) {
+			// Path 1 (original behavior): the message still lives in the LIVE
+			// file — rewrite its line in place.
+			// FIX: Wrap read-modify-write in withFileLockSync to prevent concurrent
+			// updates from clobbering each other (each reply rewrites the whole file).
+			const found = withFileLockSync(filePath, () => {
+				const lines = fs.readFileSync(filePath, "utf-8").split(/\r?\n/).filter(Boolean);
+				let localFound = false;
+				const updatedLines: string[] = [];
+				for (const line of lines) {
+					try {
+						const parsed = JSON.parse(line) as unknown;
+						const msg = parseMailboxMessage(parsed, direction);
+						if (msg && msg.id === originalMessageId) {
+							msg.repliedAt = new Date().toISOString();
+							msg.replyContent = replyContent;
+							updatedLines.push(JSON.stringify(redactSecrets(msg)));
+							localFound = true;
+						} else {
+							updatedLines.push(line);
+						}
+					} catch {
 						updatedLines.push(line);
 					}
-				} catch {
-					updatedLines.push(line);
 				}
-			}
-			if (localFound) {
-				atomicWriteFile(filePath, `${updatedLines.join("\n")}\n`);
-			}
-			return localFound;
+				if (localFound) {
+					atomicWriteFile(filePath, `${updatedLines.join("\n")}\n`);
+				}
+				return localFound;
+			});
+			if (found) return;
+		}
+		if (archives.length === 0) continue;
+		// Path 2 (R7-3): the original was rotated into an archive. Archives are
+		// immutable (see safeReadMailboxFile) — do NOT rewrite them; append a
+		// compensating record carrying the reply metadata to the LIVE file.
+		// The id-based last-wins merge makes it win over the archived original.
+		const archived = archives
+			.flatMap((archivePath) => cachedMailboxRead(archivePath, direction))
+			.find((message) => message.id === originalMessageId);
+		if (!archived) continue;
+		const compensating: MailboxMessage = {
+			...archived,
+			repliedAt: new Date().toISOString(),
+			replyContent,
+		};
+		withFileLockSync(filePath, () => {
+			// Recreate the live file if it went missing — the archives in this
+			// directory prove the mailbox itself is valid.
+			if (!fs.existsSync(filePath)) atomicWriteFile(filePath, "");
+			fs.appendFileSync(filePath, `${JSON.stringify(redactSecrets(compensating))}\n`, "utf-8");
+			// The append may itself trigger rotation — safe: the compensating
+			// record then lands in the NEWEST archive, which sorts after the
+			// original's archive in the merge order, so it still wins by id.
+			rotateMailboxFileIfNeeded(filePath);
 		});
-		if (found) return;
+		return;
 	}
 	// Not finding the original is non-fatal; the reply is still delivered.
 }
@@ -1224,9 +1299,27 @@ export function validateMailbox(
 	ensureRunMailbox(manifest);
 	const issues: MailboxValidationIssue[] = [];
 	const repaired: string[] = [];
+	// L-9 (2026-10-16): validate + repair the TASK mailboxes
+	// (`mailbox/tasks/<id>/<direction>.jsonl`) with the same line-parse
+	// semantics as the run-level files — enumerate the tasks dir the same way
+	// updateMailboxMessageReply does. Rotated `*.archive.jsonl` files are
+	// immutable history and are deliberately NOT repaired.
+	const filesToValidate: Array<{ filePath: string; direction: MailboxDirection }> = [];
 	for (const direction of ["inbox", "outbox"] as const) {
+		filesToValidate.push({ filePath: mailboxFile(manifest, direction), direction });
+	}
+	const tasksDir = safeMailboxTasksRoot(manifest);
+	if (fs.existsSync(tasksDir)) {
+		for (const entry of fs.readdirSync(tasksDir, { withFileTypes: true })) {
+			if (!entry.isDirectory()) continue;
+			for (const direction of ["inbox", "outbox"] as const) {
+				filesToValidate.push({ filePath: mailboxFile(manifest, direction, entry.name), direction });
+			}
+		}
+	}
+	for (const { filePath, direction } of filesToValidate) {
 		if (options.signal?.aborted) break;
-		const filePath = mailboxFile(manifest, direction);
+		if (!fs.existsSync(filePath)) continue;
 		// FIX: Wrap read + optional repair in withFileLockSync so concurrent appends
 		// don't race with the read-modify-write. Mailbox files are capped at 10MB
 		// (MAILBOX_ARCHIVE_THRESHOLD_BYTES), so the per-call memory is bounded.
@@ -1254,7 +1347,9 @@ export function validateMailbox(
 		});
 	}
 	const delivery = readDeliveryState(manifest);
-	const allMessages = readMailbox(manifest);
+	// L-9: delivery-entry coverage now includes task mailbox messages
+	// (readAllMessages walks the global files AND every task mailbox).
+	const allMessages = [...readAllMessages(manifest, "inbox"), ...readAllMessages(manifest, "outbox")];
 	for (const message of allMessages) {
 		if (options.signal?.aborted) break;
 		if (!delivery.messages[message.id])

@@ -226,14 +226,20 @@ const sharedFields = {
 		// Also accept stringified numbers ("123456") — pi-ai coercion stringifies
 		// numeric values when a Union has a string-literal branch. handleTeamTool
 		// coerces strings back to numbers before handlers run.
+		// R7-5 (docs-truth): this value is ADVISORY metadata — the enforced
+		// deadline is the broker-clamped task.waiting.deadline, not this field.
 		Type.Union(
 			[
 				Type.Literal(""),
-				Type.Integer({ description: "Ms epoch deadline for a reply." }),
+				Type.Integer({
+					description:
+						"Advisory metadata only. The enforced deadline is auto-clamped by the broker (task.waiting.deadline); this value is recorded, not enforced.",
+				}),
 				Type.String({ pattern: NUMERIC_STRING_RE }),
 			],
 			{
-				description: "Ms epoch deadline for a reply.",
+				description:
+					"Advisory metadata only. The enforced deadline is auto-clamped by the broker (task.waiting.deadline); this value is recorded, not enforced.",
 			},
 		),
 	),
@@ -589,7 +595,7 @@ export interface TeamToolParamsValue {
 	replyTo?: string;
 	/** Task ID sending the reply. */
 	replyFrom?: string;
-	/** Ms epoch deadline for a reply. */
+	/** Advisory metadata only. The enforced deadline is auto-clamped by the broker (task.waiting.deadline); this value is recorded, not enforced. */
 	replyDeadline?: number;
 	/** Path to a markdown plan document for orchestration. */
 	planPath?: string;

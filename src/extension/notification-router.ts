@@ -154,11 +154,15 @@ export class NotificationRouter {
 		if (this.batch.length === 0) return;
 		const items = this.batch;
 		this.batch = [];
+		// R7-4 (2026-10-16): flush() also runs inside the setTimeout callback —
+		// a throwing `deliver` used to escape into the timer as an uncaught
+		// exception. Wrap every delivery; log via logInternalError and keep the
+		// lossy batch semantics (the batch is NOT re-queued on error).
 		if (items.length === 1) {
-			this.deliver(items[0]!);
+			this.deliverSafely(items[0]!);
 			return;
 		}
-		this.deliver({
+		this.deliverSafely({
 			id: `batch:${items.map((item) => notificationKey(item)).join(",")}`,
 			severity: batchSeverity(items),
 			source: "batch",
@@ -166,6 +170,15 @@ export class NotificationRouter {
 			body: items.map((item) => `• ${item.title}`).join("\n"),
 			timestamp: this.opts.now?.() ?? Date.now(),
 		});
+	}
+
+	/** R7-4: never let a throwing deliver callback escape flush() (timer context). */
+	private deliverSafely(notification: NotificationDescriptor): void {
+		try {
+			this.deliver(notification);
+		} catch (error) {
+			logInternalError("notification.flush", error);
+		}
 	}
 
 	dispose(): void {

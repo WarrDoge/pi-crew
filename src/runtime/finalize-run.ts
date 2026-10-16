@@ -564,7 +564,7 @@ export async function finalizeRun(ctx: SchedulerContext): Promise<{ manifest: Te
 	const healthStore = new HealthStore(crewRoot);
 	healthStore.saveSnapshot({
 		runId: finalManifest.manifest.runId,
-		tasks: finalTasks.map((t) => ({ id: t.id, status: t.status })),
+		tasks: finalTasks.map((t) => ({ id: t.id, status: t.status, heartbeat: t.heartbeat })),
 		createdAt: finalManifest.manifest.createdAt,
 	});
 	ctx.manifest = manifest;

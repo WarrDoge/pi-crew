@@ -336,8 +336,11 @@ function filterAliveEntries(entries: ActiveRunRegistryEntry[]): {
 				} catch (err) {
 					// Only treat "process does not exist" as dead (ESRCH/ENOENT).
 					// EPERM means process is alive but protected; treat as alive.
+					// R7-15 (2026-10-16): both branches previously `return false`d,
+					// contradicting the comment and silently dropping live EPERM
+					// entries from the registry.
 					const code = (err as NodeJS.ErrnoException).code;
-					if (code !== "ESRCH" && code !== "ENOENT") return false;
+					if (code !== "ESRCH" && code !== "ENOENT") return true;
 					return false;
 				}
 				// FIX Issue 2: Async runs older than the staleness horizon are stale even if
@@ -437,8 +440,12 @@ export function activeRunEntries(): ActiveRunRegistryEntry[] {
 			if (manifest.async?.pid) {
 				try {
 					process.kill(manifest.async.pid, 0);
-				} catch {
-					continue;
+				} catch (err) {
+					// R7-15 (2026-10-16): only ESRCH/ENOENT mean the process is gone.
+					// EPERM (or any other code) means it exists but we cannot signal
+					// it — keep the entry, mirroring filterAliveEntries.
+					const code = (err as NodeJS.ErrnoException).code;
+					if (code === "ESRCH" || code === "ENOENT") continue;
 				}
 			}
 			// Stale non-async run: live-session/scaffold runs older than 30 min

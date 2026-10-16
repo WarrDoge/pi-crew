@@ -231,6 +231,11 @@ export class HeartbeatWatcher {
 			if (!activeKeys.has(key) && ts < cutoff) {
 				this.lastLevel.delete(key);
 				this.consecutiveDead.delete(key);
+				// M-8 (2026-10-16): also drop the deadletter cooldown marker —
+				// before this the map leaked one entry per vanished run:taskId key
+				// and a stale cooldown timestamp could suppress a legitimate
+				// re-trigger after the same task reappeared.
+				this.lastDeadletterTriggerAt.delete(key);
 				this.lastSeen.delete(key);
 			}
 		}
@@ -242,5 +247,7 @@ export class HeartbeatWatcher {
 		this.lastLevel.clear();
 		this.consecutiveDead.clear();
 		this.lastSeen.clear();
+		// M-8: clear the deadletter cooldown map too (was leaked before).
+		this.lastDeadletterTriggerAt.clear();
 	}
 }
