@@ -32,13 +32,24 @@ const tmpDirs: string[] = [];
 
 function makeRun(status: TeamTaskState["status"]): string {
 	// CI platform parity (2026-10-16, caught by the 0.11.22 matrix): mkdtemp
-	// returns the LEXICAL tmpdir path — on macOS $TMPDIR is a /var symlink
-	// (canonical /private/var/…) and on Windows it can be the 8.3 short form.
-	// locateRunCwd's stateRoot comparison works on canonicalized paths, so a
-	// lexical fixture path makes handleSteer answer "Run not found" on those
-	// OSes while linux (/tmp is a real dir) stays green. Canonicalize the
-	// fixture root so lexical == canonical on every platform.
-	const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-steer-clamp-")));
+	// returns the LEXICAL tmpdir path. The product canonicalizes with
+	// realpathSync.NATIVE (paths.ts) — plain realpathSync does NOT expand Windows
+	// 8.3 short names (GH runners' TEMP=C:\Users\RUNNER~1\...) while .native
+	// does, and locateRunCwd's stateRoot comparison then mismatches → handleSteer
+	// answers "Run not found" on windows (macOS symlink case fixed by plain
+	// realpath already; this native form covers BOTH). Same primitive as product.
+	const cwd = (() => {
+		const lexical = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-steer-clamp-"));
+		try {
+			return fs.realpathSync.native(lexical);
+		} catch {
+			try {
+				return fs.realpathSync(lexical);
+			} catch {
+				return lexical;
+			}
+		}
+	})();
 	tmpDirs.push(cwd);
 	const crewRoot = path.join(cwd, ".crew");
 	const stateRoot = path.join(crewRoot, "state", "runs", RUN_ID);

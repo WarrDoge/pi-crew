@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
@@ -7,6 +7,25 @@ import type { ScheduledJob } from "../../../src/runtime/scheduling/scheduler.ts"
 import { loadRunManifestById } from "../../../src/state/stores/state-store.ts";
 import { type AgentsBrowserAgentEntry, AgentsJobsBrowser } from "../../../src/ui/agents-jobs-browser.ts";
 import { visibleWidth } from "../../../src/utils/visual.ts";
+
+// CI 3-OS parity (2026-10-16, 0.11.22 matrix): the product canonicalizes cwd
+// with realpathSync.NATIVE (paths.ts canonicalizePath) — plain realpathSync
+// keeps macOS symlinked $TMPDIR (/var → /private/var) UNRESOLVED is fine, but
+// on Windows it preserves 8.3 short names (RUNNER~1) that .native expands, so
+// manifest.stateRoot identity checks mismatch and runs read as "not found".
+// Canonicalize fixtures with the SAME primitive the product uses.
+const nativeRealpath = (p: string): string => {
+	try {
+		return realpathSync.native(p);
+	} catch {
+		try {
+			return realpathSync(p);
+		} catch {
+			return p;
+		}
+	}
+};
+const mkFixtureDir = (prefix: string): string => nativeRealpath(mkdtempSync(join(tmpdir(), prefix)));
 
 // ─── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -52,7 +71,7 @@ function job(partial: Partial<ScheduledJob> = {}): ScheduledJob {
 let tmpCwd: string;
 
 beforeEach(() => {
-	tmpCwd = mkdtempSync(join(tmpdir(), "agents-browser-"));
+	tmpCwd = mkFixtureDir("agents-browser-");
 });
 
 afterEach(() => {
@@ -206,7 +225,7 @@ test("R5-3: a manifest miss is not durably cached — a manifest created later i
 	// NOTE: `.crew` is a project-root marker (project-markers.ts) — create it
 	// BEFORE the first manifest lookup or findRepoRoot caches the negative and
 	// the run state root never resolves to this fixture dir.
-	const dir = mkdtempSync(join(tmpdir(), "crew-browser-manifest-late-"));
+	const dir = mkFixtureDir("crew-browser-manifest-late-");
 	mkdirSync(join(dir, ".crew"), { recursive: true });
 	try {
 		const runId = "team_test_manifest_late";
@@ -245,7 +264,7 @@ test("R5-3: refreshData(true) invalidates cached manifests — a deleted manifes
 	// after force the cache clears and loadRunManifestById cannot resolve the
 	// run anymore → stub. Pre-fix: the manifest was cached forever, so a run
 	// whose manifest.json was gone kept rendering with no way to notice.
-	const dir = mkdtempSync(join(tmpdir(), "crew-browser-manifest-force-"));
+	const dir = mkFixtureDir("crew-browser-manifest-force-");
 	mkdirSync(join(dir, ".crew"), { recursive: true });
 	try {
 		const runId = "team_test_manifest_force";
@@ -288,7 +307,7 @@ test("R5-3: refreshData(true) invalidates cached manifests — a deleted manifes
 });
 
 test("R5-3: detailLinesFor prefers the fresh entry.manifest over a disk re-read", () => {
-	const dir = mkdtempSync(join(tmpdir(), "crew-browser-manifest-entry-"));
+	const dir = mkFixtureDir("crew-browser-manifest-entry-");
 	try {
 		const runId = "team_test_manifest_entry";
 		const { iso } = writeRunFixture(dir, runId);
@@ -465,7 +484,7 @@ test("default agents source mirrors the widget pipeline (state/runs agents.json)
 	// extension process — the old default (in-process live-agent registry) listed
 	// NOTHING while the widget said "1 running". The browser must read the same
 	// `.crew/state/runs/*/agents.json` pipeline the widget counts use.
-	const dir = mkdtempSync(join(tmpdir(), "crew-browser-default-"));
+	const dir = mkFixtureDir("crew-browser-default-");
 	try {
 		const runId = "team_test_browser_default";
 		const stateRoot = join(dir, ".crew", "state", "runs", runId);
@@ -557,7 +576,7 @@ test("transcriptPathFor falls back to status.json while the agent is RUNNING", (
 	// transcriptPath=null; the live path only exists in the per-agent
 	// status.json (record.statusPath). Without the fallback, `p` died
 	// silently on every running agent.
-	const dir = mkdtempSync(join(tmpdir(), "crew-browser-status-"));
+	const dir = mkFixtureDir("crew-browser-status-");
 	try {
 		const transcriptPath = join(dir, "transcripts", "01_01-agent.attempt-0.jsonl");
 		mkdirSync(join(dir, "transcripts"), { recursive: true });
@@ -602,7 +621,7 @@ test("transcriptPathFor tier 3: running agent resolves via artifacts convention"
 	// Live probe round 6 (2026-09-14): while RUNNING, neither agents.json nor
 	// status.json carries transcriptPath — but the transcript FILE exists from
 	// the first turn at <artifactsRoot>/transcripts/<taskId>.attempt-N.jsonl.
-	const dir = mkdtempSync(join(tmpdir(), "crew-browser-tier3-"));
+	const dir = mkFixtureDir("crew-browser-tier3-");
 	try {
 		const runId = "team_test_tier3";
 		const stateRoot = join(dir, ".crew", "state", "runs", runId);

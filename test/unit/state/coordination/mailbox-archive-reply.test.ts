@@ -46,11 +46,24 @@ const workflow: WorkflowConfig = {
 };
 
 function setupCwd(): string {
-	// CI platform parity (2026-10-16, caught by the 0.11.22 matrix): validateMailbox
-	// reports issue paths built from the manifest's canonicalized state root while
-	// the fixture compared against the LEXICAL mkdtemp path — mismatch on macOS
-	// (symlinked $TMPDIR) / Windows (8.3 short names). Canonicalize the fixture.
-	const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-archive-reply-")));
+	// CI platform parity (2026-10-16, caught by the 0.11.22 matrix): the
+	// manifest (product createRunManifest) records a stateRoot canonicalized
+	// with realpathSync.NATIVE — validateMailbox reports issue paths from that
+	// root, so the test must compare against the SAME form. Plain realpathSync
+	// fixes macOS (/var → /private/var) but NOT Windows 8.3 short names
+	// (RUNNER~1 → runneradmin — only .native expands those).
+	const cwd = (() => {
+		const lexical = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-archive-reply-"));
+		try {
+			return fs.realpathSync.native(lexical);
+		} catch {
+			try {
+				return fs.realpathSync(lexical);
+			} catch {
+				return lexical;
+			}
+		}
+	})();
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	return cwd;
 }
