@@ -10,8 +10,30 @@
  *     (EXT-9: no longer on globalThis[Symbol.for(...)]).
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { logInternalError } from "../../utils/internal-error.ts";
 import { registerPiCrewRpc } from "../cross-extension-rpc.ts";
 import type { RegistrationContext } from "./registration-types.ts";
+
+/**
+ * N-6 (DR-04 round 7): shared generation/ownership guard for the late lazy
+ * team-tool import. The dynamic import resolves on a LATER tick — a
+ * session_shutdown (or session-switch cleanup) may already have torn the
+ * runtime down by then, and installing the crew registry after teardown would
+ * resurrect extension state for a disposed registration. Skip the install
+ * when the registration generation moved on or the context is marked
+ * cleaned-up; session_start rebinds the registry via
+ * refreshCrossExtensionWiringForSession anyway.
+ */
+function registryInstallSkipped(ctx: RegistrationContext, installGeneration: number, where: string): boolean {
+	if (!ctx.cleanedUp && ctx.sessionGeneration === installGeneration) return false;
+	logInternalError(
+		"register.wire-cross-extension",
+		new Error(`skipped crew registry install (${where}): runtime cleanup already ran before the lazy import resolved`),
+		`installGeneration=${installGeneration},currentGeneration=${ctx.sessionGeneration},cleanedUp=${ctx.cleanedUp}`,
+		"debug",
+	);
+	return true;
+}
 
 /** Install both wires on the registration context. */
 export function installCrossExtensionWiring(pi: ExtensionAPI, ctx: RegistrationContext): void {
@@ -27,8 +49,10 @@ export function installCrossExtensionWiring(pi: ExtensionAPI, ctx: RegistrationC
 	// Install the crew registry. Lazy import keeps team-tool.ts (which pulls
 	// in the entire runtime chain) out of the cold-start module graph. EXT-9:
 	// the registry now lives in module-scoped state, not globalThis.
+	const installGeneration = ctx.sessionGeneration;
 	void import("../team-tool.ts").then(({ installCrewGlobalRegistry }) => {
 		// LAZY: defer team-tool until cross-extension wiring fires
+		if (registryInstallSkipped(ctx, installGeneration, "install")) return;
 		const manifestCacheForRegistry = ctx.getManifestCache(ctx.currentCtx?.cwd ?? process.cwd());
 		installCrewGlobalRegistry({
 			manifestCache: manifestCacheForRegistry,
@@ -57,8 +81,10 @@ export function refreshCrossExtensionWiringForSession(pi: ExtensionAPI, ctx: Reg
 		installCrossExtensionWiring(pi, ctx);
 		return;
 	}
+	const installGeneration = ctx.sessionGeneration;
 	void import("../team-tool.ts").then(({ installCrewGlobalRegistry }) => {
 		// LAZY: defer team-tool until cross-extension wiring fires
+		if (registryInstallSkipped(ctx, installGeneration, "session-refresh")) return;
 		installCrewGlobalRegistry({
 			manifestCache: ctx.getManifestCache(ctx.currentCtx?.cwd ?? process.cwd()),
 			cwdProvider: () => ctx.currentCtx?.cwd ?? process.cwd(),

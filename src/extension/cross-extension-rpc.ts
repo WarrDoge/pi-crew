@@ -1,7 +1,8 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TeamToolParamsValue } from "../schema/team-tool-schema.ts";
+import { logInternalError } from "../utils/internal-error.ts";
 import { resolveRealContainedPath } from "../utils/safe-paths.ts";
-import { withHmacVerification } from "./rpc-hmac.ts";
+import { isHmacEnabled, withHmacVerification } from "./rpc-hmac.ts";
 // Lazy-loaded to avoid pulling team-tool.ts (and its entire runtime chain) into module load.
 import type { handleTeamTool as HandleTeamToolFn } from "./team-tool.ts";
 
@@ -73,6 +74,19 @@ const RPC_ALLOWED_OPERATIONS = new Set([
 
 function isAllowedRpcOperation(operation: string): boolean {
 	return RPC_ALLOWED_OPERATIONS.has(operation);
+}
+
+// R7-9 (DR-04 round 7): operations a publisher WITHOUT a valid HMAC signature
+// may issue on the realtime `pi-crew:live-control` channel. Mirrors the
+// RPC_ALLOWED_OPERATIONS semantics (unauthenticated = read-only). The
+// live-control protocol currently defines NO read-only operations — every
+// parseable operation (steer/stop/resume/follow-up) mutates a live agent
+// session — so the set is empty and unauthenticated publishers are rejected
+// outright. Add future read-only live-control ops here when introduced.
+const LIVE_CONTROL_UNAUTHENTICATED_OPERATIONS: ReadonlySet<string> = new Set([]);
+
+function isUnauthenticatedLiveControlOperationAllowed(operation: string): boolean {
+	return LIVE_CONTROL_UNAUTHENTICATED_OPERATIONS.has(operation);
 }
 
 // SECURITY (HIGH #4 fix): In-memory rate limiter for RPC run requests.
@@ -148,9 +162,15 @@ function on(events: EventBusLike, channel: string, handler: (raw: unknown) => un
 }
 
 // SECURITY TRUST BOUNDARY: RPC channels (pi-crew:rpc:run, pi-crew:rpc:status,
-// pi-crew:rpc:live-control) are accessible to any extension on the shared event
-// bus. Mitigations: rate limiting, explicit intent, operation allowlist, cwd
-// containment validation, and HMAC origin signing (see rpc-hmac.ts).
+// pi-crew:rpc:live-control, and the realtime pi-crew:live-control channel) are
+// accessible to any extension on the shared event bus. Mitigations: rate
+// limiting, explicit intent, operation allowlist, cwd containment validation,
+// and HMAC origin signing (see rpc-hmac.ts). Trust model (R7-9): without a
+// valid HMAC signature every RPC surface is read-only — the request/response
+// channels enforce this via RPC_ALLOWED_OPERATIONS, and the realtime
+// pi-crew:live-control channel rejects any operation outside
+// LIVE_CONTROL_UNAUTHENTICATED_OPERATIONS (currently ALL of them, since
+// steer/stop/resume/follow-up are mutating) with a warn log and no publish.
 
 export function registerPiCrewRpc(
 	events: EventBusLike | undefined,
@@ -283,7 +303,24 @@ export function registerPiCrewRpc(
 			"pi-crew:live-control",
 			withHmacVerification((raw) => {
 				const request = parseLiveControlRealtimeMessage(raw);
-				if (request) publishLiveControlRealtime(request);
+				if (!request) return;
+				// R7-9 (DR-04 round 7): gate mutating live-control operations. This
+				// handler is only reachable WITHOUT a valid HMAC signature when
+				// PI_CREW_RPC_SECRET is unset — when the secret IS set the wrapper
+				// rejects missing/invalid signatures outright (throw, no publish).
+				// With no secret the publisher is unauthenticated, so only the
+				// (currently empty) read-only allowlist may pass; steer/stop/
+				// resume/follow-up are rejected with a warn log and no publish.
+				if (!isHmacEnabled() && !isUnauthenticatedLiveControlOperationAllowed(request.operation)) {
+					logInternalError(
+						"rpc.live-control",
+						new Error(`rejected unauthenticated live-control operation '${request.operation}'`),
+						`runId=${request.runId},taskId=${request.taskId}`,
+						"warn",
+					);
+					return;
+				}
+				publishLiveControlRealtime(request);
 			}, "pi-crew:live-control"),
 		),
 		on(

@@ -336,6 +336,79 @@ describe("RPC HMAC authentication", () => {
 		});
 	});
 
+	describe("nonce replay cache (R7-10)", () => {
+		beforeEach(() => {
+			setRpcSecret(TEST_SECRET);
+		});
+
+		it("rejects the same payload verified a second time (replayed nonce)", () => {
+			const body = { requestId: "test-replay", goal: "hello" };
+			const sig = createRpcSignature("test-ext", "pi-crew:rpc:ping", body);
+
+			const first = verifyRpcSignature(sig, body);
+			assert.deepEqual(first, { valid: true });
+
+			const second = verifyRpcSignature(sig, body);
+			assert.equal(second.valid, false);
+			assert.ok(second.valid === false);
+			assert.match(second.reason, /replayed nonce/);
+		});
+
+		it("does not record nonces from signatures that fail HMAC verification", () => {
+			const body = { requestId: "test-poison", goal: "hello" };
+			const sig = createRpcSignature("test-ext", "pi-crew:rpc:ping", body);
+
+			// Tampered body → HMAC mismatch → nonce NOT recorded (an attacker
+			// must not be able to evict recorded nonces with junk traffic).
+			const bad = verifyRpcSignature(sig, { ...body, goal: "tampered" });
+			assert.equal(bad.valid, false);
+
+			const good = verifyRpcSignature(sig, body);
+			assert.deepEqual(good, { valid: true });
+		});
+
+		it("bounds the nonce cache: FIFO eviction past 512 entries re-admits the oldest nonce", () => {
+			const body = { requestId: "test-fifo" };
+			const signatures = [];
+			for (let i = 0; i < 513; i++) {
+				signatures.push(createRpcSignature("test-ext", "pi-crew:rpc:ping", body));
+			}
+			for (const sig of signatures) {
+				assert.equal(verifyRpcSignature(sig, body).valid, true);
+			}
+			// Cache holds the last 512 of the 513 nonces; the very first one was
+			// FIFO-evicted, so it verifies again (bounded memory ⇒ bounded history).
+			assert.equal(verifyRpcSignature(signatures[0], body).valid, true);
+			// The most recent nonce is still cached → replay rejected.
+			const replay = verifyRpcSignature(signatures[512], body);
+			assert.equal(replay.valid, false);
+			assert.ok(replay.valid === false);
+			assert.match(replay.reason, /replayed nonce/);
+		});
+	});
+
+	describe("arrival channel binding (N-3)", () => {
+		beforeEach(() => {
+			setRpcSecret(TEST_SECRET);
+		});
+
+		it("withHmacVerification rejects a signature issued for a different channel", () => {
+			const params = { requestId: "test-123" };
+			// Signed for channel A …
+			const signed = signRpcRequest(params, "test-ext", "pi-crew:rpc:ping");
+			// … submitted to the wrapper guarding channel B.
+			const handler = withHmacVerification(() => ({ ok: true }), "pi-crew:rpc:run");
+			assert.throws(() => handler(signed), /pi-crew HMAC.*channel mismatch/);
+		});
+
+		it("withHmacVerification accepts a signature issued for its own channel", () => {
+			const params = { requestId: "test-123" };
+			const signed = signRpcRequest(params, "test-ext", "pi-crew:rpc:status");
+			const handler = withHmacVerification((p: { requestId: string }) => ({ ok: true, id: p.requestId }), "pi-crew:rpc:status");
+			assert.deepEqual(handler(signed), { ok: true, id: "test-123" });
+		});
+	});
+
 	describe("different secrets produce different signatures", () => {
 		it("produces different signatures with different secrets", () => {
 			setRpcSecret("secret-1");

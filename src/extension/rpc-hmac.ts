@@ -97,6 +97,32 @@ export function createRpcSignature(origin: string, channel: string, body: unknow
 // --- Verification ------------------------------------------------------------
 
 /**
+ * Bounded insertion-ordered (FIFO) cache of nonces from VERIFIED signatures
+ * (R7-10, DR-04 round 7). A captured request replayed inside the signature
+ * validity window is rejected with reason "replayed nonce".
+ *
+ * Nonces are recorded ONLY after the HMAC itself validates, so an attacker
+ * cannot flood the cache with junk nonces to evict recorded ones (that would
+ * re-enable replay). Entries expire with the signature validity window and
+ * are pruned on every verification; size is FIFO-capped to bound memory.
+ */
+const NONCE_CACHE_MAX_ENTRIES = 512;
+const seenNonces = new Map<string, number>();
+
+function pruneSeenNonces(now: number): void {
+	const expiredBefore = now - SIGNATURE_VALIDITY_MS;
+	for (const [nonce, seenAt] of seenNonces) {
+		if (seenAt >= expiredBefore) break; // insertion order ⇒ every later entry is newer
+		seenNonces.delete(nonce);
+	}
+	while (seenNonces.size > NONCE_CACHE_MAX_ENTRIES) {
+		const oldestNonce = seenNonces.keys().next().value;
+		if (oldestNonce === undefined) break;
+		seenNonces.delete(oldestNonce);
+	}
+}
+
+/**
  * Verify an HMAC signature.
  *
  * @returns `{ valid: true }` or `{ valid: false, reason: string }`
@@ -121,7 +147,21 @@ export function verifyRpcSignature(payload: RpcSignedPayload, body: unknown): { 
 	}
 
 	const expected = computeHmac(secret, payload, body);
-	return timingSafeCompare(payload.signature, expected) ? { valid: true } : { valid: false, reason: "HMAC signature mismatch" };
+	if (!timingSafeCompare(payload.signature, expected)) {
+		return { valid: false, reason: "HMAC signature mismatch" };
+	}
+
+	// R7-10: replay protection — reject a nonce that was already verified within
+	// the validity window; record this one only after the HMAC validated.
+	pruneSeenNonces(now);
+	if (seenNonces.has(payload.nonce)) {
+		return {
+			valid: false,
+			reason: `replayed nonce (nonce already verified within the ${Math.round(SIGNATURE_VALIDITY_MS / 60000)}-minute validity window)`,
+		};
+	}
+	seenNonces.set(payload.nonce, now);
+	return { valid: true };
 }
 
 // --- Middleware --------------------------------------------------------------
@@ -135,7 +175,7 @@ export function verifyRpcSignature(payload: RpcSignedPayload, body: unknown): { 
  */
 export function withHmacVerification<P extends { requestId: string }>(
 	handler: (params: P) => unknown | Promise<unknown>,
-	_channel: string,
+	channel: string,
 ): (raw: unknown) => unknown | Promise<unknown> {
 	return (raw: unknown) => {
 		const params = raw as P;
@@ -153,6 +193,17 @@ export function withHmacVerification<P extends { requestId: string }>(
 		const sigPayload = extractSignaturePayload(params);
 		if (!sigPayload) {
 			throw new Error("[pi-crew HMAC] Missing HMAC signature in RPC request.");
+		}
+
+		// N-3 (DR-04 round 7): bind the arrival channel. The MAC covers the
+		// CLAIMED channel (payload.channel is mixed into computeHmac), so without
+		// this check a signature issued for channel A also validates on channel B
+		// — a cross-channel replay. The signature must have been issued for the
+		// exact channel this wrapper guards.
+		if (sigPayload.channel !== channel) {
+			throw new Error(
+				`[pi-crew HMAC] Signature channel mismatch: signature was issued for '${sigPayload.channel}', request arrived on '${channel}'.`,
+			);
 		}
 
 		// Strip HMAC fields from body before verification (HMAC was signed over original params)

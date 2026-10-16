@@ -672,7 +672,9 @@ export function setupCrewScheduler(
 //  - retains the broker across session switches when the session_id is
 //    unchanged; on a session_id change, stops the old broker and binds a new
 //    one on the next acquire.
-//  - stops the broker during session_shutdown BEFORE the runtime cleanup path.
+//  - stops the broker during session_shutdown: cleanupRuntime
+//    (registration/runtime-cleanup.ts) calls ctx.brokerController?.stop()
+//    first, before the rest of the runtime teardown (R7-11 wiring).
 //
 // The gate is re-evaluated on every `issueForChild` call (cheap env+depth
 // check) so the kill switch (PI_CREW_BROKER=0) takes effect immediately.

@@ -293,27 +293,11 @@ export async function handleCancel(params: TeamToolParamsValue, ctx: TeamContext
 			true,
 		);
 	}
-	await terminateLiveAgentsForRun(loaded.manifest.runId, "cancelled", appendEvent, loaded.manifest.eventsPath);
-
-	// Best-effort: kill the async background runner process so it doesn't
-	// overwrite the cancelled state while we hold the run lock.
-	const asyncPid = loaded.manifest.async?.pid;
-	if (asyncPid !== undefined && asyncPid > 0) {
-		try {
-			killProcessPid(asyncPid);
-			// H1 (2026-08-10): informational event in async context — await the
-			// async lock path (non-blocking event loop, ~1ms vs ~14ms sync).
-			await appendEventAsync(loaded.manifest.eventsPath, {
-				type: "async.kill_requested",
-				runId: loaded.manifest.runId,
-				message: "Sent SIGTERM to background runner process.",
-				data: { pid: asyncPid },
-			});
-		} catch (error) {
-			logInternalError("team-tool.handleCancel.killAsync", error, `runId=${loaded.manifest.runId},pid=${asyncPid}`);
-		}
-	}
-
+	// N-5 (DR-04 round 7): the live-agent termination + async-runner kill used
+	// to run HERE on the stale pre-lock `loaded` snapshot — a run that reached a
+	// terminal state during the before_cancel hook gap was still torn down and
+	// its background runner SIGTERMed. The signal decision now derives from the
+	// FRESH in-lock read below (see the gated block inside the lock).
 	return withRunLockSync(loaded.manifest, () => {
 		// R13-2 (2026-08-14): fresh re-read INSIDE the lock. `loaded` was captured
 		// lock-free BEFORE the before_cancel hook + live-agent termination gap; a
@@ -348,6 +332,35 @@ export async function handleCancel(params: TeamToolParamsValue, ctx: TeamContext
 				},
 				true,
 			);
+		}
+		// N-5 (DR-04 round 7): signal ONLY when the FRESH in-lock status is still
+		// "running". Best-effort semantics are kept, but this is a synchronous
+		// run-lock callback (cannot await — H1 2026-08-10 pattern), so the
+		// async operations are fire-and-forget with errors logged. killProcessPid
+		// still signals synchronously here — while we hold the lock — so the async
+		// background runner cannot overwrite the cancelled state we write below.
+		if (fresh.manifest.status === "running") {
+			void terminateLiveAgentsForRun(fresh.manifest.runId, "cancelled", appendEvent, fresh.manifest.eventsPath).catch((error) =>
+				logInternalError("team-tool.handleCancel.terminateLiveAgents", error, `runId=${fresh.manifest.runId}`),
+			);
+			const asyncPid = fresh.manifest.async?.pid;
+			if (asyncPid !== undefined && asyncPid > 0) {
+				try {
+					killProcessPid(asyncPid);
+					// H1 (2026-08-10): informational event in async context — fire-and-forget
+					// on the async lock path (non-blocking event loop, ~1ms vs ~14ms sync).
+					void appendEventAsync(fresh.manifest.eventsPath, {
+						type: "async.kill_requested",
+						runId: fresh.manifest.runId,
+						message: "Sent SIGTERM to background runner process.",
+						data: { pid: asyncPid },
+					}).catch((error) =>
+						logInternalError("team-tool.handleCancel.killAsyncEvent", error, `runId=${fresh.manifest.runId},pid=${asyncPid}`),
+					);
+				} catch (error) {
+					logInternalError("team-tool.handleCancel.killAsync", error, `runId=${fresh.manifest.runId},pid=${asyncPid}`);
+				}
+			}
 		}
 		const cancellableIds = new Set(abortResult.abortedIds);
 		const cancelReason = cancelReasonFromParams(params);

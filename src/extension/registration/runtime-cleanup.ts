@@ -129,6 +129,23 @@ function buildCleanupRuntime(ctx: RegistrationContext): () => void {
 	return (): void => {
 		if (ctx.cleanedUp) return;
 		ctx.cleanedUp = true;
+		// R7-11 (DR-04 round 7): stop the inter-pi broker FIRST, before the rest
+		// of the runtime teardown — this call is what makes the
+		// CrewBrokerLifecycleController docblock's "stops the broker during
+		// session_shutdown" promise true (see lifecycle-handlers.ts). The
+		// controller's stop() is idempotent and swallows its own errors; clearing
+		// the field makes a re-entry a no-op even if the cleanedUp gate were
+		// bypassed. Fire-and-forget: cleanupRuntime is synchronous and shutdown
+		// must not block on the broker socket teardown.
+		try {
+			const stopping = ctx.brokerController?.stop();
+			ctx.brokerController = undefined;
+			stopping?.catch((error) => {
+				logInternalError("cleanup-runtime.broker-stop", error);
+			});
+		} catch (error) {
+			logInternalError("cleanup-runtime.broker-stop", error);
+		}
 		const sid = extractSessionId(ctx.currentCtx);
 		if (ctx.preloadTimer) {
 			clearTimeout(ctx.preloadTimer);
