@@ -153,8 +153,11 @@ function createEventsStateSource(
 	}
 
 	/** STORAGE SCAN (spec U7): one parse of the (tail-capped) log to the
-	 *  current seq. No event replay — the root is rebuilt from storage. */
-	function rootBuild(): void {
+	 *  current seq. No event replay — the root is rebuilt from storage.
+	 *  O-7 (DR-04 R7): returns whether the scan SUCCEEDED — on failure the
+	 *  committed state, the inode/size stamps AND `resynced`/`version` are all
+	 *  left untouched so the next poll re-detects the rewrite and retries. */
+	function rootBuild(): boolean {
 		let scanned: TeamEvent[] | undefined;
 		let scannedSeq = 0;
 		try {
@@ -186,30 +189,43 @@ function createEventsStateSource(
 		// instead of learning the inode one poll late. Stamp ONLY on a successful
 		// scan — on a failed scan keep the previous stamp so the next poll
 		// re-detects the rewrite and RETRIES the resync.
-		if (scanned !== undefined) {
-			try {
-				const stat = fs.statSync(eventsPath);
-				lastIno = stat.ino;
-				lastSize = stat.size;
-			} catch {
-				lastIno = -1;
-				lastSize = -1;
-			}
-			events = scanned.slice(-windowSize);
-			seq = scannedSeq;
+		if (scanned === undefined) {
+			// O-7: failed scan — do NOT claim a fresh root: `resynced`/`version`
+			// stay untouched and no resync frame is emitted (see resyncAttempt).
+			return false;
 		}
+		try {
+			const stat = fs.statSync(eventsPath);
+			lastIno = stat.ino;
+			lastSize = stat.size;
+		} catch {
+			lastIno = -1;
+			lastSize = -1;
+		}
+		events = scanned.slice(-windowSize);
+		seq = scannedSeq;
 		resynced = true;
 		version += 1;
+		return true;
 	}
 
-	function resync(): EventsStateSnapshot {
-		const fromSeq = seq;
-		rootBuild();
+	/** Root-replace and emit ONE resync frame. Returns false (state untouched,
+	 *  no frame) when the storage scan failed — O-7: a failed resync must not
+	 *  count as a committed frame. `stats.resyncs` counts ATTEMPTS either way
+	 *  (MINOR-1 contract: "the resync attempt still counts"). */
+	function resyncAttempt(): boolean {
 		stats.resyncs += 1;
+		const fromSeq = seq;
+		if (!rootBuild()) return false;
 		stats.frames += 1;
 		const frame: EventsStateFrame = { fromSeq, toSeq: seq, events: [...events], version, resync: true };
 		stats.eventsDelivered += frame.events.length;
 		emit(frame);
+		return true;
+	}
+
+	function resync(): EventsStateSnapshot {
+		resyncAttempt();
 		return snapshot();
 	}
 
@@ -224,10 +240,11 @@ function createEventsStateSource(
 		try {
 			const stat = fs.statSync(eventsPath);
 			if (lastIno !== -1 && (stat.ino !== lastIno || stat.size < lastSize)) {
-				lastIno = stat.ino;
-				lastSize = stat.size;
-				resync();
-				return 1;
+				// O-7: do NOT stamp the NEW inode/size before the resync — if the
+				// scan inside fails, the OLD stamps are exactly what makes the
+				// next poll re-detect the rewrite and retry it. rootBuild()
+				// stamps after a successful scan.
+				return resyncAttempt() ? 1 : 0;
 			}
 			lastIno = stat.ino;
 			lastSize = stat.size;
@@ -262,8 +279,8 @@ function createEventsStateSource(
 					backlog = false;
 				}
 				if (backlog) {
-					resync();
-					return committed + 1;
+					// O-7: count the resync frame only when the root scan succeeded.
+					return committed + (resyncAttempt() ? 1 : 0);
 				}
 				break;
 			}

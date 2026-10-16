@@ -26,6 +26,7 @@
 import * as piTui from "@earendil-works/pi-tui";
 import type { MailboxDirection } from "../../state/coordination/mailbox.ts";
 import { pad, sanitizeLine, truncate } from "../../utils/visual.ts";
+import { backspaceChar, isPrintableInput } from "../inline-panel/agent-view-overlay.ts";
 import { overlayActionForKey } from "../keybinding-map.ts";
 import { CURSOR, canopyLine, formatHint, RAIL, railLine, railRaw } from "../rail.ts";
 import { asCrewTheme, type CrewTheme } from "../theme-adapter.ts";
@@ -169,7 +170,9 @@ export class MailboxComposeOverlay {
 		if (field === "direction") return;
 		this.fields = {
 			...this.fields,
-			[field]: (this.fields[field] ?? "").slice(0, -1),
+			// O-4: astral-safe backspace (shared helper) — a trailing surrogate
+			// pair is one code point and must leave together.
+			[field]: backspaceChar(this.fields[field] ?? ""),
 		};
 	}
 
@@ -244,8 +247,11 @@ export class MailboxComposeOverlay {
 				else this.activeField = (this.activeField + 1) % FIELD_ORDER.length;
 				return;
 		}
-		// Free-text passthrough (unchanged): any other printable char is typed
-		// into the active field.
-		if (data.length === 1 && data >= " ") this.appendText(data);
+		// Free-text passthrough (R7-14): any other PRINTABLE input is typed into
+		// the active field — single chars AND multi-char paste chunks (the old
+		// `data.length === 1` guard dropped pasted "hello world" entirely).
+		// Shares the agent-view-overlay classifier: no control bytes, no ESC
+		// sequences, so arrow keys still never land in the field.
+		if (isPrintableInput(data)) this.appendText(data);
 	}
 }

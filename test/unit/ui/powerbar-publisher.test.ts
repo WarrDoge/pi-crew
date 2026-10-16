@@ -7,6 +7,7 @@ import { saveCrewAgents } from "../../../src/runtime/crew-agent-records.ts";
 import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
 import {
+	buildStepsPayload,
 	compactTokens,
 	registerPiCrewPowerbarSegments,
 	resetPowerbarDedupState,
@@ -763,4 +764,42 @@ test("powerbar plan segment shows plan:pending only while approval is pending (W
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
+});
+
+test("O-5: plan-phase name truncation is grapheme-aware — emoji titles never split", () => {
+	// 8 emoji = 16 visual cols > budget 10; the old ad-hoc `slice(0, 9)` cut
+	// UTF-16 UNITS, leaving a lone high surrogate + “…” (stray U+FFFD on
+	// decode). truncLine keeps whole code points.
+	const title = "🚀".repeat(8);
+	const payload = buildStepsPayload(
+		[
+			{
+				run: { workflow: "wf", cwd: "/nonexistent-dr04-w4" },
+				agents: [],
+				tasks: [],
+				snapshot: { plans: [{ version: 1, items: [], phases: [{ title, itemIds: [], status: "active" }] }] },
+			},
+		] as never,
+		[],
+	);
+	const text = payload.text ?? "";
+	assert.ok(text.includes("🚀🚀🚀🚀…"), `expected whole emoji + ellipsis within the 10-col budget, got: ${text}`);
+	assert.ok(!text.includes("�"), `no replacement char from a split surrogate pair: ${text}`);
+	assert.ok(
+		!Array.from(text).some((c) => c.length === 1 && /[\uD800-\uDFFF]/.test(c)),
+		`no lone surrogate unit may leak into the powerbar: ${text}`,
+	);
+	// Exactly-at-budget astral text is NOT truncated (5 emoji = 10 cols).
+	const exact = buildStepsPayload(
+		[
+			{
+				run: { workflow: "wf", cwd: "/nonexistent-dr04-w4" },
+				agents: [],
+				tasks: [],
+				snapshot: { plans: [{ version: 1, items: [], phases: [{ title: "🚀".repeat(5), itemIds: [], status: "active" }] }] },
+			},
+		] as never,
+		[],
+	);
+	assert.ok((exact.text ?? "").includes("🚀".repeat(5)), `at-budget title must pass through whole, got: ${exact.text}`);
 });

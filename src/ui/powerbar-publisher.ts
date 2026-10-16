@@ -12,6 +12,7 @@ import { readJsonFileCoalesced } from "../utils/file-coalescer.ts";
 import { logInternalError } from "../utils/internal-error.ts";
 import { extractSessionId } from "../utils/session-utils.ts";
 import { allWorkflows, discoverWorkflows } from "../workflows/discover-workflows.ts";
+import { truncLine } from "./format-helpers.ts";
 import { RenderCoalescer } from "./render-coalescer.ts";
 import type { RunSnapshotCache, RunUiSnapshot } from "./snapshot-types.ts";
 import { notificationBadge } from "./widget/widget-formatters.ts";
@@ -158,7 +159,9 @@ export function buildStepsPayload(active: ActiveItem[], allTasks: TeamTaskState[
 		const parts = current.phases.map((phase) => {
 			const status = phase.status === "done" ? "completed" : statusOf(phase.itemIds);
 			const icon = status === "completed" ? "✓" : status === "running" ? "→" : "○";
-			const name = phase.title.length > 10 ? `${phase.title.slice(0, 9)}…` : phase.title;
+			// O-5 (DR-04): grapheme-aware truncation — the ad-hoc slice(0, 9)
+			// split surrogate pairs (emoji phase titles → stray U+FFFD).
+			const name = truncLine(phase.title, 10);
 			return `${icon}${name}`;
 		});
 		if (parts.length) {
@@ -196,8 +199,8 @@ export function buildStepsPayload(active: ActiveItem[], allTasks: TeamTaskState[
 	for (const step of workflow.steps) {
 		const status = stepStatus.get(step.id) ?? "pending";
 		const icon = status === "completed" ? "✓" : status === "running" ? "→" : "○";
-		// Shorten long step names
-		const stepName = step.id.length > 10 ? step.id.slice(0, 9) + "…" : step.id;
+		// Shorten long step names (O-5: grapheme-aware — slice(0, 9) split emoji).
+		const stepName = truncLine(step.id, 10);
 		stepParts.push(`${icon}${stepName}`);
 	}
 	const stepsText = stepParts.join(" › ");

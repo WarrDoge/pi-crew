@@ -37,9 +37,23 @@ export interface CrewAgentOverlayOptions {
 const INPUT_PROMPT = " ❯ ";
 
 /** Printable single keypress or paste chunk: no control bytes, no ESC
- *  sequences (arrow keys etc. must not land in the steer text). */
-function isPrintableInput(data: string): boolean {
+ *  sequences (arrow keys etc. must not land in the steer text).
+ *
+ *  R7-14 (DR-04): shared with mailbox-compose-overlay — its free-text
+ *  passthrough previously accepted only single chars, so a multi-char
+ *  bracketed-paste chunk ("hello world") was dropped. */
+export function isPrintableInput(data: string): boolean {
 	return data.length > 0 && !data.startsWith("\x1b") && !/[\x00-\x1f\x7f]/.test(data);
+}
+
+/** O-4 (DR-04): surrogate-safe backspace for editors that edit at
+ *  end-of-value. When the LAST UTF-16 unit is a low surrogate it completes a
+ *  pair — remove BOTH units so astral characters (emoji) never split into a
+ *  stray high surrogate / U+FFFD. Shared with mailbox-compose-overlay. */
+export function backspaceChar(text: string): string {
+	const last = text.length > 0 ? text.charCodeAt(text.length - 1) : 0;
+	if (last >= 0xdc00 && last <= 0xdfff && text.length >= 2) return text.slice(0, -2);
+	return text.slice(0, -1);
 }
 
 export class CrewAgentOverlay {
@@ -136,7 +150,8 @@ export class CrewAgentOverlay {
 			} else if (matchesKey(data, "return")) {
 				this.sendSteer();
 			} else if (matchesKey(data, "backspace")) {
-				this.inputText = this.inputText.slice(0, -1);
+				// O-4: astral-safe backspace (shared helper).
+				this.inputText = backspaceChar(this.inputText);
 			} else if (data === "\x03") {
 				// ctrl+c inside steer input cancels the input, not the view.
 				this.inputMode = false;

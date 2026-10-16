@@ -2,7 +2,7 @@ import type { CrewAgentRecord } from "../../runtime/crew-agent-runtime.ts";
 import { type LiveAgentHandle, listLiveAgents, listLiveAgentsByWorkspace } from "../../runtime/live-session/live-agent-manager.ts";
 import { formatCost } from "../../state/usage.ts";
 import { visibleWidth } from "../../utils/visual.ts";
-import { formatCount, formatDuration } from "../format-helpers.ts";
+import { formatCount, formatDuration, truncLine } from "../format-helpers.ts";
 import { computeLiveDurationMs } from "../live-duration.ts";
 import { overflowHint, statusIcon } from "../rail.ts";
 import type { RunDashboardOptions } from "../run-dashboard.ts";
@@ -99,7 +99,10 @@ function describeActivity(handle: LiveAgentHandle): string {
 				.split("\n")
 				.find((l) => l.trim())
 				?.trim() ?? "";
-		return line.length > 40 ? line.slice(0, 40) + "…" : line;
+		// O-5 (DR-04): grapheme-aware truncation at the original budget (≤40
+		// content columns + 1 ellipsis column) — the ad-hoc slice(0, 40) split
+		// surrogate pairs (emoji → stray U+FFFD).
+		return truncLine(line, 41);
 	}
 	return "thinking…";
 }

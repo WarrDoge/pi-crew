@@ -165,3 +165,61 @@ test("openPane survives a stale ctx (overlay spawn drops, no throw)", () => {
 	assert.deepEqual(getViewedAgent(), { runId: "run1", taskId: "task_1" });
 	setViewedAgent(undefined);
 });
+
+test("O-6: openPane while the mount is still pending no-ops (exactly one custom call)", async () => {
+	setViewedAgent(undefined);
+	__resetInlinePanelForTest();
+	let calls = 0;
+	let factory: ((tui: unknown, theme: unknown, kb: unknown, done: (r: unknown) => void) => unknown) | undefined;
+	let settleHost: (() => void) | undefined;
+	const tui = { terminal: { rows: 24, columns: 100 }, requestRender: () => undefined };
+	const ctx = {
+		cwd: "/tmp/pane-test",
+		hasUI: true,
+		ui: {
+			custom: (
+				factoryFn: (tui: unknown, theme: unknown, kb: unknown, done: (r: unknown) => void) => unknown,
+				_options: Record<string, unknown> | undefined,
+			) => {
+				calls += 1;
+				factory = factoryFn;
+				// Mirror a host that does NOT run the factory synchronously: the
+				// promise (and factory invocation) stay pending until we say so.
+				return new Promise<unknown>((resolve) => {
+					settleHost = () => resolve(undefined);
+				});
+			},
+		},
+	};
+
+	__test__openPane(ctx as never, { runId: "run1", taskId: "task_1" });
+	// Mount pending (factory has not run). A second openPane — key-mash, dock
+	// re-entry, rapid /crew-view — must NOT spawn a second overlay; it only
+	// re-targets the view.
+	__test__openPane(ctx as never, { runId: "run1", taskId: "task_2" });
+	assert.equal(calls, 1, "double-mount guard: exactly one ctx.ui.custom call while mounting");
+	assert.deepEqual(getViewedAgent(), { runId: "run1", taskId: "task_2" }, "second call still re-targets");
+
+	// The host finally runs the factory — the overlay goes live.
+	const overlay = factory!(tui, { colors: {} }, undefined, () => undefined) as CrewAgentOverlay;
+	assert.ok(overlay, "factory produced the overlay");
+
+	// After the mount, re-entry re-targets in place (unchanged behaviour).
+	__test__openPane(ctx as never, { runId: "run1", taskId: "task_3" });
+	assert.equal(calls, 1);
+	assert.deepEqual(getViewedAgent(), { runId: "run1", taskId: "task_3" });
+
+	// Close via the overlay's esc path, settle the host promise, and prove the
+	// guard is not stuck: a fresh openPane after close mounts again.
+	overlay.handleInput("\x1b");
+	settleHost?.();
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(getViewedAgent(), undefined, "esc cleared the viewed agent");
+
+	__test__openPane(ctx as never, { runId: "run1", taskId: "task_4" });
+	assert.equal(calls, 2, "a new mount after close is allowed");
+	settleHost?.();
+	await new Promise((resolve) => setImmediate(resolve));
+	__resetInlinePanelForTest();
+	setViewedAgent(undefined);
+});

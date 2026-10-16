@@ -347,3 +347,46 @@ test("registry: cap eviction FORCE-disposes the oldest entry even while other ho
 	// fresh's own refcount hit zero — its registry entry drops (back below cap).
 	assert.equal(eventsStateSourceRegistrySize(), baseline + 63);
 });
+
+// ── O-7 (DR-04 round-7, 2026-10-16) ───────────────────────────────────────
+
+test("O-7: a FAILED rewrite-resync keeps the old stamp, emits no frame, and retries next poll", () => {
+	// >4KB of committed events: the rewrite below is detected via the SIZE
+	// SHRINK (a fresh directory stats at 4096) — inode reuse would make the
+	// inode check unreliable right after rm+mkdir on ext4.
+	appendEvents(1, 80);
+	const source = eventsStateSource("run-u7", eventsPath());
+	assert.equal(source.poll(), 0, "creation already scanned to the current seq (stamps now set)");
+	const before = source.snapshot();
+	assert.equal(before.seq, 80);
+	const frames: EventsStateFrame[] = [];
+	source.subscribe((frame) => frames.push(frame));
+
+	// Replace the log with a DIRECTORY: statSync succeeds with a smaller size,
+	// but the storage scan inside the resync throws (EISDIR) — the exact
+	// "rewrite detected, scan fails" window O-7 guards.
+	fs.rmSync(eventsPath());
+	fs.mkdirSync(eventsPath());
+
+	assert.equal(source.poll(), 0, "a failed resync commits no frame");
+	const after = source.snapshot();
+	assert.equal(after.version, before.version, "version untouched on a failed scan");
+	assert.equal(after.seq, before.seq, "committed seq kept on a failed scan");
+	assert.equal(frames.length, 0, "no resync frame on a failed scan");
+	assert.equal(source.stats().resyncs, 1, "the resync attempt still counts (MINOR-1 contract)");
+
+	// The stamp was NOT consumed by the failed attempt: swap the directory
+	// for a real rewritten log — the next poll re-detects the rewrite
+	// (old inode/size) and the retried resync SUCCEEDS.
+	fs.rmSync(eventsPath(), { recursive: true });
+	fs.writeFileSync(eventsPath(), [line(1), line(2), line(3)].join(""), { flag: "wx" });
+	assert.equal(source.poll(), 1, "the retry resync counts as one frame");
+	const recovered = source.snapshot();
+	assert.equal(recovered.seq, 3, "root rebuilt from the recovered log");
+	assert.ok(recovered.version > after.version, "version advances only on the successful resync");
+	assert.ok(
+		frames.some((frame) => frame.resync),
+		"the successful retry emitted the resync frame",
+	);
+	source.dispose();
+});

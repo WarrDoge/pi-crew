@@ -28,6 +28,16 @@ export interface RenderSchedulerOptions {
 	 * count and re-arms the loop. Defaults to 8.
 	 */
 	maxIdleFallbackRenders?: number;
+	/**
+	 * R7-12 (DR-04): maximum time (ms) a PENDING render may be starved by a
+	 * sustained event stream. While events keep arriving faster than
+	 * `debounceMs`, every schedule() re-arms the debounce timer and the flush
+	 * would otherwise be postponed forever. At the cap the pending batch is
+	 * force-flushed — from schedule() itself and, as a safety net, from the
+	 * fallback loop. Defaults to `max(3 × debounceMs, 250)`, floored at 250 so
+	 * an explicit small override can never disable the cap entirely.
+	 */
+	maxDelayMs?: number;
 }
 
 const DEFAULT_EVENTS = [
@@ -61,6 +71,8 @@ export class RenderScheduler {
 	private readonly fallbackMs: number;
 	private readonly invalidateCoalesceMs: number;
 	private readonly maxIdleFallbackRenders: number;
+	/** R7-12: pending-starvation cap — see {@link RenderSchedulerOptions.maxDelayMs}. */
+	private readonly maxDelayMs: number;
 	private debounceTimer: ReturnType<typeof setTimeout> | undefined;
 	private fallbackTimer: ReturnType<typeof setTimeout> | undefined;
 	private invalidateTimer: ReturnType<typeof setTimeout> | undefined;
@@ -74,6 +86,9 @@ export class RenderScheduler {
 	private idleFallbackRenders = 0;
 	/** R4: consecutive re-entrancy cap-hits — drives exponential backoff. */
 	private consecutiveCapHits = 0;
+	/** R7-12: when the CURRENT pending batch was first scheduled (undefined =
+	 *  nothing pending). Reset whenever a flush actually renders. */
+	private pendingSince: number | undefined;
 	private readonly unsubs: Array<() => void> = [];
 
 	constructor(events: RenderSchedulerEventBus | undefined, render: () => void, options: RenderSchedulerOptions = {}) {
@@ -85,6 +100,7 @@ export class RenderScheduler {
 		this.fallbackMs = typeof fallback === "number" ? fallback : 750;
 		this.invalidateCoalesceMs = options.invalidateCoalesceMs ?? 50;
 		this.maxIdleFallbackRenders = options.maxIdleFallbackRenders ?? 8;
+		this.maxDelayMs = Math.max(options.maxDelayMs ?? 3 * this.debounceMs, 250);
 		for (const event of options.events ?? DEFAULT_EVENTS) this.subscribe(events, event);
 		this.fallbackTimer = setTimeout(() => this.fallbackLoop(), this.currentFallbackMs());
 		this.fallbackTimer.unref();
@@ -118,6 +134,15 @@ export class RenderScheduler {
 		if (Date.now() - this.lastEventAt < fallbackMs) {
 			// A real external event arrived recently — not idle. Keep polling.
 			this.idleFallbackRenders = 0;
+			// R7-12: BUT a sustained stream (events faster than debounceMs) keeps
+			// re-arming the debounce and the pending render starves. When the
+			// pending batch has waited past the max-delay cap, flush it HERE —
+			// this loop is the safety net for exactly that starvation (it used
+			// to refuse to render while any event was recent).
+			if (this.pendingSince !== undefined && Date.now() - this.pendingSince >= this.maxDelayMs) {
+				this.cancelDebounce();
+				this.flush();
+			}
 			this.fallbackTimer = setTimeout(() => this.fallbackLoop(), fallbackMs);
 			this.fallbackTimer.unref();
 			return;
@@ -145,7 +170,17 @@ export class RenderScheduler {
 		this.idleFallbackRenders = 0;
 		this.consecutiveCapHits = 0;
 		this.invalidate(payload);
-		this.armDebouncedRender();
+		// R7-12: mark when the CURRENT pending batch started (first schedule
+		// since the last actual render).
+		if (this.pendingSince === undefined) this.pendingSince = this.lastEventAt;
+		if (this.lastEventAt - this.pendingSince >= this.maxDelayMs) {
+			// Force flush NOW, even mid-burst: cancel the pending debounce timer
+			// (its render would be redundant) and render synchronously.
+			this.cancelDebounce();
+			this.flush();
+		} else {
+			this.armDebouncedRender();
+		}
 		// R1: if the fallback loop stopped itself after a sustained idle period,
 		// a real event means activity resumed — re-arm the safety-net loop.
 		if (!this.fallbackTimer) {
@@ -167,6 +202,13 @@ export class RenderScheduler {
 			this.flush();
 		}, delay);
 		this.debounceTimer.unref();
+	}
+
+	/** R7-12: cancel a pending debounce flush (its render would be redundant
+	 *  next to a force-flush). Does not touch lastEventAt or pendingSince. */
+	private cancelDebounce(): void {
+		if (this.debounceTimer) clearTimeout(this.debounceTimer);
+		this.debounceTimer = undefined;
 	}
 
 	/**
@@ -229,6 +271,10 @@ export class RenderScheduler {
 		}
 		this.rendering = true;
 		this.pendingRender = false;
+		// R7-12: this flush satisfies the current pending batch — the next
+		// starvation window starts at the NEXT schedule() (set after this, so a
+		// render() that synchronously schedules() still marks a fresh batch).
+		this.pendingSince = undefined;
 		let iterations = 0;
 		try {
 			do {
@@ -254,6 +300,12 @@ export class RenderScheduler {
 			} else {
 				this.consecutiveCapHits = 0;
 			}
+			// R7-12 note: the backoff drain above arms a LONG debounce while
+			// pendingRender is still true, but it never sets pendingSince — only
+			// real events (schedule()) do. Pathological render() re-entrancy
+			// without external events therefore still backs off undisturbed (R4
+			// invariant); the max-delay cap only bounds waits caused by real
+			// incoming events.
 		}
 	}
 

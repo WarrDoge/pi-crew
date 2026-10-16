@@ -47,6 +47,13 @@ const PANE_LIVE_TICK_MS = 700;
 
 let livePane: CrewAgentPane | undefined;
 let liveOverlay: CrewAgentOverlay | undefined;
+/** O-6 (DR-04 R7): double-mount guard — true between the `ctx.ui.custom()`
+ *  call and the moment its factory actually runs (or the call rejects). A
+ *  second openPane in exactly that window (key-mash, dock re-entry, rapid
+ *  `/crew-view`) would otherwise mount a SECOND full-screen overlay on top
+ *  of the first. Cleared by the factory (overlay live), by rejection (state
+ *  reset below) and on the custom() promise settling (overlay closed). */
+let paneMounting = false;
 let paneTickTimer: ReturnType<typeof setInterval> | undefined;
 let editorInstalled = false;
 /** Guards the one-time per-process event hooks. */
@@ -124,7 +131,8 @@ function notifyResult(ctx: ExtensionContext, result: PiTeamsToolResult): void {
  */
 function openPane(ctx: ExtensionContext, target: PanelTarget): void {
 	setViewedAgent(target);
-	if (!liveOverlay) {
+	if (!liveOverlay && !paneMounting) {
+		paneMounting = true;
 		try {
 			void ctx.ui
 				.custom(
@@ -145,6 +153,9 @@ function openPane(ctx: ExtensionContext, target: PanelTarget): void {
 						});
 						liveOverlay = overlay;
 						livePane = overlay.pane;
+						// O-6: the factory ran — the mount window is over; from here on
+						// the `!liveOverlay` check alone owns re-entry.
+						paneMounting = false;
 						return overlay as never;
 					},
 					{
@@ -152,10 +163,17 @@ function openPane(ctx: ExtensionContext, target: PanelTarget): void {
 						overlayOptions: { width: "100%", margin: 0, maxHeight: "100%", anchor: "top-left" },
 					},
 				)
+				.then(() => {
+					// Resolves when the host tears the overlay down (done()) — the
+					// mount window is definitely over (belt and braces for a host
+					// that never invoked the factory).
+					paneMounting = false;
+				})
 				.catch((error) => {
 					// Factory throw or the host tearing the overlay down: drop the
 					// view state so the dock does not point at a view that no
 					// longer exists.
+					paneMounting = false;
 					liveOverlay = undefined;
 					livePane = undefined;
 					setViewedAgent(undefined);
@@ -163,6 +181,7 @@ function openPane(ctx: ExtensionContext, target: PanelTarget): void {
 					logInternalError("view.openOverlay", error, target.taskId);
 				});
 		} catch (error) {
+			paneMounting = false;
 			// A stale ctx (session replaced between keypress and here) drops the
 			// overlay spawn; the fallback editor path still closes cleanly.
 			logInternalError("view.openPane", error, target.taskId);
@@ -326,6 +345,7 @@ export function installInlinePanel(pi: ExtensionAPI, ctx: ExtensionContext, uiCo
 export function __resetInlinePanelForTest(): void {
 	editorInstalled = false;
 	liveOverlay = undefined;
+	paneMounting = false;
 	stopPaneTicker();
 }
 
