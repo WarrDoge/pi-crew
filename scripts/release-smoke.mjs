@@ -47,8 +47,10 @@ try {
 		// deployments the pi HOST supplies these; a naked install legitimately
 		// lacks them. Installing the devDep-pinned versions simulates the host
 		// so the import smoke (6b) tests the tarball artifact, not peer absence.
+		// 0.11.22 (2026-10-16): ^0.84.0 pin predated the U9 pi-tui peer floor
+		// (">=1.0.4 <2.0.0") — ERESOLVE on every run. Aligned to the devDep pin ^1.0.4.
 		run(
-			"npm install @earendil-works/pi-agent-core@^0.84.0 @earendil-works/pi-ai@^0.84.0 @earendil-works/pi-coding-agent@^0.84.0 @earendil-works/pi-tui@^0.84.0",
+			"npm install @earendil-works/pi-agent-core@^1.0.4 @earendil-works/pi-ai@^1.0.4 @earendil-works/pi-coding-agent@^1.0.4 @earendil-works/pi-tui@^1.0.4",
 			tmpDir,
 		);
 
