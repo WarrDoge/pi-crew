@@ -121,7 +121,10 @@ const BUDGETS = {
 		// (m5 extraction from live-session-runtime.ts; pure usage shape/parser
 		// helpers on the hot session path — not deferrable). Baseline verified at
 		// main f10da4cc = 525/525.
-		maxFiles: 526,
+		// DR-03 (2026-10-16): 526 → 527 — broker/protocol/msg-send-targets.ts (pure
+		// D9/§15.2 recipient matrix extracted from crew-broker.ts for the wc-gate;
+		// statically imported — msg.send is a request-scoped path, not cold-start).
+		maxFiles: 527,
 		forbid: ["test/", "scripts/", "docs/", "dist/"],
 	},
 };
