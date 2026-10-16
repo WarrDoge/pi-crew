@@ -58,3 +58,12 @@ L-4/L-5 dead machinery (0 callers), L-7 ask.timedout re-emit, L-8 pickup priorit
 
 ## Gates (lead)
 tsc → targeted suites → biome → ci:fast (16 gates; watch wc-gate + lazy-import ratchet) → full test:unit (expect ~9420+, 0 fail) → build:bundle + dist commit. Commit per cluster; `git add -f dist/index.mjs`.
+
+## Completion record (2026-10-16, commits 2556e6c1..18bbc043)
+All 6 clusters landed + lead wiring (finalize-run heartbeat pass-through — L-6 was dead at the
+production call site) + gates: tsc ✓ · biome ✓ · wc-gate/lazy-import 527/527 ✓ · bundle rebuilt ·
+ci:fast exit 0 · full unit **9431 tests / 9425 pass / 0 real fail / 3 known timing flakes
+(RT-5 #4/#5, pulse-1 — isolated-green ×2 per runbook) / 3 pre-existing skips** (+79 vs DR-03).
+All 2 HIGH + 13 MED + 15 LOW fixed. Deferred documented: L-4/L-5 dead machinery, L-7, L-8, M-6,
+plus W-noted follow-ups: handleForget pre-lock kill (same N-5 pattern, lifecycle-actions.ts),
+readMailboxMessage task-mailbox asymmetry, events-state-source anomalous-fs tail-follow throw.
