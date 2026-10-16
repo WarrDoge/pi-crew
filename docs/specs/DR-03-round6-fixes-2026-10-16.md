@@ -159,3 +159,12 @@ R6-2; document in usage docs when convenient).
 ## Gates (lead, after all clusters land)
 tsc · targeted suites per cluster · ci:fast · full test:unit (0 new fail) · build:bundle + dist commit.
 Real-test battery before any release (src/runtime/task-runner, broker, prompt, scheduling touched).
+
+## Completion record (2026-10-16, commits 0100edef..0c29a3c3)
+All 6 clusters landed + lead gates: tsc ✓ · wc-gate ✓ (crew-broker.ts extracted to exactly 2000 —
+recipient matrix → protocol/msg-send-targets.ts, lazy-import ratchet 526→527 per usage-bridge
+precedent) · ci:fast exit 0 (16 gates; fixed 3 stray biome findings: embedded-tier UR-guard
+comment-in-block, pi-json-output optional-chain, test-fixture empty lambdas) · full unit
+**9352 tests / 9349 pass / 0 fail / 3 pre-existing skips** (+73 vs DR-02 wave-2) · bundle rebuilt.
+All 3 HIGH + 9 MEDIUM fixed; LOWs fixed: I3 I4 I6 H5 H7 H8 J4 J5 K6 K7 K8. Deferred documented:
+H6 K5 I5 J6 I2-policy.
