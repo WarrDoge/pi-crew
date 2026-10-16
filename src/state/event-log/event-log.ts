@@ -7,7 +7,7 @@ import { emitFromTeamEvent } from "../../ui/run-event-bus.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
 import { redactSecrets } from "../../utils/redaction.ts";
 import { sleep, sleepSync } from "../../utils/sleep.ts";
-import { applyCompactionUnlocked, needsRotation, prepareCompaction, rotateEventLogUnlocked } from "./event-log-rotation.ts";
+import { applyCompactionAppendGuarded, needsRotation, prepareCompaction, rotateEventLogUnlocked } from "./event-log-rotation.ts";
 import {
 	advanceSequenceCounter,
 	persistSequenceMonotonic,
@@ -643,7 +643,11 @@ export async function appendEventAsync(eventsPath: string, event: AppendTeamEven
 				overflowHandled = true;
 				try {
 					const prepared = prepareCompaction(eventsPath);
-					if (prepared) applyCompactionUnlocked(eventsPath, prepared);
+					// R7-2 (DR-04): LOCK STATE — `.alock` HELD. We are inside
+					// doAppendUnderLock, which runs under withEventLogLockAsync
+					// (appendEventAsync). The lock is NOT re-entrant, so the guarded
+					// apply must NOT re-acquire it — tail-merge only.
+					if (prepared) applyCompactionAppendGuarded(eventsPath, prepared, { holdsAppendLock: true });
 				} catch (error) {
 					logInternalError("event-log.immediate-compact", error, `eventsPath=${eventsPath}`);
 				}
@@ -747,7 +751,11 @@ export async function appendEventAsync(eventsPath: string, event: AppendTeamEven
 		if (tickAppendCounter(eventsPath) && needsRotation(eventsPath)) {
 			try {
 				const prepared = prepareCompaction(eventsPath);
-				if (prepared) applyCompactionUnlocked(eventsPath, prepared);
+				// R7-2 (DR-04): LOCK STATE — `.alock` HELD. Same scope as the
+				// immediate-compact site above: doAppendUnderLock runs under
+				// withEventLogLockAsync (appendEventAsync). Tail-merge only; the
+				// sync-family bytes appended since the prepare-read are spliced.
+				if (prepared) applyCompactionAppendGuarded(eventsPath, prepared, { holdsAppendLock: true });
 			} catch (error) {
 				logInternalError("event-log.rotation", error, `eventsPath=${eventsPath}`);
 			}
@@ -829,8 +837,17 @@ export async function appendEventAsync(eventsPath: string, event: AppendTeamEven
  * buffered write path, which is the entire point of buffering — the previous
  * per-event fsync made buffer coalescing useless and added ~30ms/event on
  * tmpfs.
+ *
+ * R7-2 (DR-04, 2026-10-16): `locks.holdsAppendLock` declares the CALLING
+ * family's lock state so the inline overflow compaction below can pick the
+ * right guarded-apply mode — see the site comment and
+ * `applyCompactionAppendGuarded` (event-log-rotation.ts).
  */
-async function appendEventBatchInsideLock(eventsPath: string, queue: BufferedAppend[]): Promise<void> {
+async function appendEventBatchInsideLock(
+	eventsPath: string,
+	queue: BufferedAppend[],
+	locks?: { holdsAppendLock?: boolean },
+): Promise<void> {
 	if (queue.length === 0) return;
 	// P0-2: keep the per-path counter honest for cross-path rotation sampling.
 	tickAppendCounter(eventsPath, queue.length);
@@ -855,7 +872,14 @@ async function appendEventBatchInsideLock(eventsPath: string, queue: BufferedApp
 			if (preStat.size > MAX_EVENTS_BYTES) {
 				try {
 					const prepared = prepareCompaction(eventsPath);
-					if (prepared) applyCompactionUnlocked(eventsPath, prepared);
+					// R7-2 (DR-04): LOCK STATE — MIXED, declared by the CALLER. This
+					// function is entered from BOTH families: the async flush
+					// (flushOneEventLogBuffer, inside withEventLogLockAsync → `.alock`
+					// HELD → holdsAppendLock: true, re-acquiring would self-timeout)
+					// and the EL-2 sync flush (flushBufferedQueuesSync, inside
+					// withEventLogLockSync → only `.mkdirlock` held → the helper
+					// must acquire `.alock` itself, nested in the R4-2 order).
+					if (prepared) applyCompactionAppendGuarded(eventsPath, prepared, locks);
 				} catch (error) {
 					logInternalError("event-log.batch-immediate-compact", error, `eventsPath=${eventsPath}`);
 				}
@@ -1049,7 +1073,14 @@ function appendEventInsideLock(eventsPath: string, event: AppendTeamEvent): Team
 			// unbounded log growth → events silently dropped past 50MB).
 			try {
 				const prepared = prepareCompaction(eventsPath);
-				if (prepared) applyCompactionUnlocked(eventsPath, prepared);
+				// R7-2 (DR-04): LOCK STATE — `.mkdirlock` HELD, `.alock` NOT held.
+				// appendEventInsideLock runs under withEventLogLockSync (appendEvent,
+				// :366). The guarded apply acquires `.alock` nested under our
+				// `.mkdirlock` (R4-2 lock order) so the inode-replacing write cannot
+				// interleave with an in-flight async appender parked between open()
+				// and appendFile(); the tail-merge splices sync-family bytes that
+				// landed after the prepare-read.
+				if (prepared) applyCompactionAppendGuarded(eventsPath, prepared);
 			} catch (error) {
 				logInternalError("event-log.immediate-compact", error, `eventsPath=${eventsPath}`);
 			}
@@ -1140,9 +1171,12 @@ function appendEventInsideLock(eventsPath: string, event: AppendTeamEvent): Team
 		// locked compactEventLog would deadlock → 5s timeout → compaction never
 		// ran → unbounded log growth → events silently dropped past 50MB. Use the
 		// unlocked apply path instead (lock already held).
+		// R7-2 (DR-04): LOCK STATE — `.mkdirlock` HELD, `.alock` NOT held (same
+		// scope as the immediate-compact site above). applyCompactionAppendGuarded
+		// acquires `.alock` itself (nested R4-2 order) + tail-merges.
 		try {
 			const prepared = prepareCompaction(eventsPath);
-			if (prepared) applyCompactionUnlocked(eventsPath, prepared);
+			if (prepared) applyCompactionAppendGuarded(eventsPath, prepared);
 		} catch (error) {
 			logInternalError("event-log.rotation", error, `eventsPath=${eventsPath}`);
 		}
@@ -1259,7 +1293,9 @@ async function flushOneEventLogBuffer(eventsPath: string): Promise<void> {
 		// turning 100 buffered events into 100 fsyncs (~3s on tmpfs). Now we do
 		// 1 appendFileSync + 1 fsync + 1 persistSequence for the whole batch.
 		await withEventLogLockAsync(eventsPath, async () => {
-			await appendEventBatchInsideLock(eventsPath, queue);
+			// R7-2 (DR-04): `.alock` HELD here (async family) — the batch's inline
+			// compaction must not re-acquire it.
+			await appendEventBatchInsideLock(eventsPath, queue, { holdsAppendLock: true });
 		});
 	} catch (error) {
 		// Lock acquire failed — fail every queued item so callers can fall back.
@@ -1299,6 +1335,9 @@ export function flushBufferedQueuesSync(): void {
 				// synchronous (fs.appendFileSync + fs.fsyncSync + persistSequence,
 				// no awaits). Invoking without await runs the body synchronously and
 				// returns a resolved Promise that we discard.
+				// R7-2 (DR-04): only `.mkdirlock` is held here (sync family) — the
+				// batch's inline compaction acquires `.alock` itself via the helper
+				// (nested in the R4-2 lock order).
 				void appendEventBatchInsideLock(eventsPath, queue);
 			});
 		} catch (error) {
@@ -1316,8 +1355,15 @@ export function flushBufferedQueuesSync(): void {
 // this hook lets T2 assert the fsync gate directly. Both production call paths
 // (async flush via withEventLogLockAsync and the EL-2 sync flush via
 // withEventLogLockSync) route through appendEventBatchInsideLock.
-export function __test__appendBatchForUnitTest(eventsPath: string, queue: BufferedAppend[]): Promise<void> {
-	return appendEventBatchInsideLock(eventsPath, queue);
+export function __test__appendBatchForUnitTest(
+	eventsPath: string,
+	queue: BufferedAppend[],
+	locks?: { holdsAppendLock?: boolean },
+): Promise<void> {
+	// R7-2 (DR-04): `locks` mirrors the production flush paths' declarations for
+	// tests that reproduce a specific family's lock context (default = no lock
+	// held, matching a bare direct call — the helper then acquires `.alock`).
+	return appendEventBatchInsideLock(eventsPath, queue, locks);
 }
 
 /**

@@ -244,20 +244,61 @@ export function compactPreparedEventLog(
 	prepared: { lines: string; originalSize: number; originalCount: number; kept: TeamEvent[] },
 	options?: CompactionLockOptions,
 ): CompactionResult | undefined {
-	return withEventLogLockSync(
-		eventsPath,
-		() => {
-			return withEventLogAppendLockSync(
-				eventsPath,
-				() => {
-					const merged = { ...prepared, lines: prepared.lines + readTailSince(eventsPath, prepared.originalSize) };
-					return applyCompactionUnlocked(eventsPath, merged);
-				},
-				options?.lock,
-			);
-		},
-		options?.lock,
-	);
+	// R7-2 (DR-04, 2026-10-16): the write phase is now `applyCompactionAppendGuarded`
+	// (below) — `.alock` nested inside the `.mkdirlock` held here, plus the
+	// mandatory `readTailSince` splice. This wrapper keeps the historical
+	// locked entry point (public API + tests) with identical semantics.
+	return withEventLogLockSync(eventsPath, () => applyCompactionAppendGuarded(eventsPath, prepared, options), options?.lock);
+}
+
+/** R7-2 (DR-04, 2026-10-16): options for `applyCompactionAppendGuarded`.
+ * `lock` is forwarded to `withEventLogAppendLockSync` so callers/tests can
+ * bound the wait; `holdsAppendLock` declares the caller's lock state (see the
+ * helper docblock). */
+export interface ApplyCompactionGuardOptions extends CompactionLockOptions {
+	/** Pass `true` ONLY when the caller ALREADY holds the async family's
+	 * `.alock` (i.e. the guarded apply runs inside `withEventLogLockAsync`).
+	 * The on-disk lock is NOT re-entrant — re-acquiring our own `.alock` in
+	 * sync mode can only end in the bounded timeout (sleepSync starves the
+	 * very in-process holder that must release it). With `true` the helper
+	 * only tail-merges; with `false`/omitted it acquires `.alock` itself. */
+	holdsAppendLock?: boolean;
+}
+
+/**
+ * R7-2 (DR-04, 2026-10-16): the guarded write phase for INLINE compaction
+ * call sites (the overflow/rotation-tick paths inside event-log.ts) that
+ * previously called `prepareCompaction` + `applyCompactionUnlocked` bare —
+ * no `.alock` and no tail-merge, so the inode-replacing write could interleave
+ * with an in-flight async-family append parked between `open()` and
+ * `appendFile()` (its fd kept pointing at the renamed-away inode → silent
+ * loss; C2 recovery only re-splices the `kept` window), and sync-family bytes
+ * appended between the prepare-read and the write were clobbered.
+ *
+ * Contract:
+ *  - ALWAYS merges `readTailSince(eventsPath, prepared.originalSize)` into
+ *    `prepared.lines` before `applyCompactionUnlocked` — sync-family appenders
+ *    never hold `.alock`, so they can land in the prepare→apply window even
+ *    while an async-family caller holds `.alock`; the splice rescues them.
+ *  - `opts.holdsAppendLock === true` (caller is inside `withEventLogLockAsync`):
+ *    tail-merge ONLY — never re-acquire `.alock` (non-reentrant → self-timeout).
+ *  - `opts.holdsAppendLock` false/omitted (caller holds `.mkdirlock` — sync
+ *    family — or no lock): acquire `.alock` in sync mode nested inside the
+ *    held `.mkdirlock`, per the R4-2 lock order (`.mkdirlock` → `.alock`; the
+ *    async family never takes `.mkdirlock`, so no inversion). NEVER call this
+ *    with `false` while `.alock` is already held by this process.
+ */
+export function applyCompactionAppendGuarded(
+	eventsPath: string,
+	prepared: { lines: string; originalSize: number; originalCount: number; kept: TeamEvent[] },
+	options?: ApplyCompactionGuardOptions,
+): CompactionResult | undefined {
+	const applyWithTailMerge = (): CompactionResult | undefined => {
+		const merged = { ...prepared, lines: prepared.lines + readTailSince(eventsPath, prepared.originalSize) };
+		return applyCompactionUnlocked(eventsPath, merged);
+	};
+	if (options?.holdsAppendLock) return applyWithTailMerge();
+	return withEventLogAppendLockSync(eventsPath, applyWithTailMerge, options?.lock);
 }
 
 /**
