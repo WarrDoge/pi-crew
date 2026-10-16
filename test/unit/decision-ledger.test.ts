@@ -585,3 +585,115 @@ test("P-02: decayCandidate appends without losing prior entries", () => {
 
 	cleanupRun(runId);
 });
+
+// ── P-3 (DR-04 round-7): tolerant parse — corrupt tail lines ────────────────
+// A partial write / manual edit can leave an unparseable line in the JSONL
+// tail. Readers (getLedger / readTailEntries via getLatestDecision + the
+// append path's coherence read) must SKIP bad lines, keep valid ones, log
+// once per read, and NEVER throw — and appendEntry must keep working on a
+// ledger with a corrupt tail.
+
+test("P-3: getLedger skips unparseable tail lines instead of throwing", () => {
+	const runId = "test-corrupt-tail-p3-" + Date.now();
+	cleanupRun(runId);
+	initLedger(runId);
+	const ledgerPath = join(process.cwd(), `.crew/state/runs/${runId}/decision-ledger.jsonl`);
+
+	// One valid line, then a truncated (partial-write) line.
+	const valid = {
+		rolloutId: "good-1",
+		timestamp: new Date().toISOString(),
+		searchSpace: "test",
+		trialCount: 1,
+		topCandidates: ["c1"],
+		decisionMark: "accept",
+		coherenceMark: { matchesPrior: false, matchesRecursive: false, promotionAllowed: true, reason: "seed" },
+	};
+	writeFileSync(ledgerPath, `${JSON.stringify(valid)}\n{"rolloutId": "trunc`, "utf-8");
+
+	// Capture stderr: logInternalError must fire ONCE for this read with a count.
+	const original = console.error;
+	const captured: string[] = [];
+	console.error = (...args: unknown[]) => {
+		captured.push(args.map(String).join(" "));
+	};
+	try {
+		const ledger = getLedger(runId); // pre-fix: JSON.parse threw here
+		assert.equal(ledger.length, 1, "valid line kept, corrupt line skipped");
+		assert.equal(ledger[0].rolloutId, "good-1");
+	} finally {
+		console.error = original;
+	}
+	assert.equal(captured.length, 1, "exactly one warn per read");
+	assert.match(captured[0] ?? "", /skipped 1 unparseable/, "warn carries the skipped count");
+
+	cleanupRun(runId);
+});
+
+test("P-3: append still works on a ledger with a corrupt tail (readTailEntries tolerant)", () => {
+	const runId = "test-corrupt-append-p3-" + Date.now();
+	cleanupRun(runId);
+	initLedger(runId);
+	const ledgerPath = join(process.cwd(), `.crew/state/runs/${runId}/decision-ledger.jsonl`);
+
+	const valid = {
+		rolloutId: "good-1",
+		timestamp: new Date().toISOString(),
+		searchSpace: "test",
+		trialCount: 1,
+		topCandidates: ["c1"],
+		decisionMark: "accept",
+		coherenceMark: { matchesPrior: false, matchesRecursive: false, promotionAllowed: true, reason: "seed" },
+	};
+	writeFileSync(ledgerPath, `${JSON.stringify(valid)}\nNOT JSON AT ALL\n`, "utf-8");
+
+	// The append path reads the tail under the file lock — a corrupt tail must
+	// not throw out of withFileLockSync (pre-fix behavior: reader threw).
+	const appended = appendEntry(runId, {
+		rolloutId: "after-corrupt",
+		timestamp: new Date().toISOString(),
+		searchSpace: "test",
+		trialCount: 2,
+		topCandidates: ["c2"],
+		decisionMark: "accept",
+		coherenceMark: { matchesPrior: true, matchesRecursive: true, promotionAllowed: true, reason: "placeholder" },
+	});
+	assert.equal(appended.rolloutId, "after-corrupt");
+	assert.equal(appended.coherenceMark.matchesPrior, true, "coherence computed from the valid tail entry");
+
+	// getLatestDecision reads the tail — must see the newly appended entry.
+	const latest = getLatestDecision(runId);
+	assert.equal(latest?.rolloutId, "after-corrupt", "latest decision comes from the tail read");
+
+	// getLedger still tolerates the corrupt line: 2 valid entries.
+	const ledger = getLedger(runId);
+	assert.equal(ledger.length, 2);
+	assert.deepEqual(
+		ledger.map((e) => e.rolloutId),
+		["good-1", "after-corrupt"],
+	);
+
+	cleanupRun(runId);
+});
+
+test("P-3: getLatestDecision skips corrupt tail line (does not throw, no stale latest)", () => {
+	const runId = "test-corrupt-latest-p3-" + Date.now();
+	cleanupRun(runId);
+	initLedger(runId);
+	const ledgerPath = join(process.cwd(), `.crew/state/runs/${runId}/decision-ledger.jsonl`);
+	const valid = {
+		rolloutId: "only-good",
+		timestamp: new Date().toISOString(),
+		searchSpace: "test",
+		trialCount: 1,
+		topCandidates: [],
+		decisionMark: "watch",
+		coherenceMark: { matchesPrior: false, matchesRecursive: false, promotionAllowed: true, reason: "seed" },
+	};
+	// Corrupt line is the LAST line — tail read must skip it, not parse it.
+	writeFileSync(ledgerPath, `${JSON.stringify(valid)}\n<<<garbage>>>`, "utf-8");
+	const latest = getLatestDecision(runId);
+	assert.equal(latest?.rolloutId, "only-good", "corrupt tail skipped; latest valid entry returned");
+
+	cleanupRun(runId);
+});

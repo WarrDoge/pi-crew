@@ -144,6 +144,16 @@ export const CARGO_RUST_GATES: Array<{
 /**
  * Execute a single command and capture output.
  */
+/**
+ * P-4 (DR-04 round-7): accumulation cap while STREAMING child output. The
+ * final `slice(-100000)` already bounds the RESULT, but the live `output`
+ * buffer used to concatenate every chunk until close/timeout — a command
+ * emitting gigabytes held them ALL in memory (plus O(n²) string concat).
+ * Past this cap we stop concatenating and pin a "[truncated]" marker in the
+ * buffer; the final tail slice is unchanged.
+ */
+const OUTPUT_ACCUMULATION_CAP_CHARS = 200 * 1024;
+const OUTPUT_TRUNCATION_MARKER = "\n[truncated]";
 /** Characters/patterns that indicate dangerous shell metacharacters. */
 // Round 25 (VULN-3/VULN-4): also block raw newlines (sh -c treats \n as a
 // command separator -> injection) and bare $VARNAME references (can exfiltrate
@@ -253,7 +263,19 @@ export async function executeCommand(
 
 	const start = Date.now();
 	let output = "";
+	let capped = false;
 	let exitCode: number | null = null;
+
+	// P-4: single capped appender for BOTH streams — once the cap trips, later
+	// chunks are dropped (marker stays in the buffer; final slice keeps it).
+	const appendCapped = (chunk: Buffer): void => {
+		if (capped) return;
+		output += chunk.toString();
+		if (output.length > OUTPUT_ACCUMULATION_CAP_CHARS) {
+			capped = true;
+			output += OUTPUT_TRUNCATION_MARKER;
+		}
+	};
 
 	return new Promise((resolve) => {
 		const shell = spawn("sh", ["-c", command], {
@@ -263,13 +285,9 @@ export async function executeCommand(
 			detached: true, // CORE-10: own process group so group-wide SIGKILL reaches children
 		});
 
-		shell.stdout?.on("data", (data) => {
-			output += data.toString();
-		});
+		shell.stdout?.on("data", appendCapped);
 
-		shell.stderr?.on("data", (data) => {
-			output += data.toString();
-		});
+		shell.stderr?.on("data", appendCapped);
 
 		// M-9 fix (code-review 2026-06-23): store the timeout handle so it can be
 		// cleared when the process exits normally, and unref it so it does not

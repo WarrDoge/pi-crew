@@ -12,12 +12,14 @@
  * onExit: MỘT interval 2s cho cả provider — mỗi tick gọi list-panes đúng
  * một lần rồi đối chiếu mọi pane đang được theo dõi (không spawn N subprocess
  * cho N pane). Pane biến khỏi list hoặc pane_dead=1 → "pane-closed" bắn đúng
- * một lần. tmux call throw (binary mất đột ngột, server chết) → "mux-dead"
+ * một lần. tmux call throw HAI lần liên tiếp (binary mất đột ngột, server chết
+ * — R7-13 strike counter; transient EAGAIN/EMFILE chỉ warn) → "mux-dead"
  * cho mọi handle còn sống.
  */
 
 import { execFileSync } from "node:child_process";
 
+import { logInternalError } from "../../utils/internal-error.ts";
 import type { SurfaceDetection, SurfaceExitReason, SurfaceHandle, SurfaceProvider, SurfaceSpawnOpts } from "./surface-provider.ts";
 import { MAX_PANES_PER_TAB, splitDirectionFor } from "./surface-provider.ts";
 
@@ -111,6 +113,11 @@ export function createTmuxProvider(deps: TmuxProviderDeps = {}): SurfaceProvider
 	// Watcher theo pane id — MỘT timer chung cho mọi pane đang theo dõi.
 	const watchers = new Map<string, PaneWatcher>();
 	let timer: SurfaceTimer | null = null;
+	// R7-13 (DR-04 round-7): consecutive-failure strike counter cho poll list-panes.
+	// 1 lỗi transient (EAGAIN/EMFILE, binary hog dụng một chốc) KHÔNG được giết
+	// hết watcher — chỉ tăng strike + log warn; đến strike thứ 2 liên tiếp mới
+	// kết luận mux chết thật (semantics cũ). Poll thành công bất kỳ → reset về 0.
+	let muxFailStrikes = 0;
 
 	// Tab-layout (spec 2026-08-27-surface-tab-layout): tabKey(run) → MỌI window
 	// của run + số pane đã spawn trong window đang nhận. Tab mở khi run spawn
@@ -153,11 +160,25 @@ export function createTmuxProvider(deps: TmuxProviderDeps = {}): SurfaceProvider
 			// còn không -a thì chỉ thấy current window (pane-closed giả khi user
 			// switch window giữa chừng).
 			stdout = tmux(["list-panes", "-a", "-F", "#{pane_dead} #{pane_id}"]);
-		} catch {
-			// tmux binary mất đột ngột / server chết — mọi handle còn sống thành mux-dead.
+		} catch (error) {
+			// R7-13: strike counter — ≥2 lỗi list-panes LIÊN TIẾP mới coi là mux chết.
+			// Lỗi đơn lẻ (transient EAGAIN/EMFILE…) → giữ nguyên watchers + warn,
+			// tick kế vẫn poll (counter được reset bởi bất kỳ poll thành công nào).
+			muxFailStrikes += 1;
+			if (muxFailStrikes < 2) {
+				logInternalError(
+					"tmux-provider",
+					error instanceof Error ? error : new Error(String(error)),
+					`list-panes failed (strike ${muxFailStrikes}/2) — keeping pane watchers alive`,
+					"warn",
+				);
+				return;
+			}
+			// tmux binary mất đột ngột / server chết thật sự — mọi handle còn sống thành mux-dead.
 			for (const paneId of [...watchers.keys()]) fire(paneId, "mux-dead");
 			return;
 		}
+		muxFailStrikes = 0;
 		const status = parsePaneStatus(stdout);
 		for (const [paneId, watcher] of [...watchers]) {
 			// Không có trong list (đã dọn) hoặc pane_dead=1 → đóng.

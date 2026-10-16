@@ -216,6 +216,84 @@ test("formatZombieReport: surface entries render pane id + provider", () => {
 	assert.match(text, /tmux:%12/, "report must show provider + pane id for surface zombies");
 });
 
+// ── M-7 (DR-04 round-7): starttime + pid age in zombie rows ────────────────
+// PID reuse recycles a dead zombie's PID for an unrelated process; starttime
+// (ticks since boot) + wall-clock STARTED + AGE let the operator detect a
+// reuse before killing, and the hint must push a prompt kill after the scan.
+
+test("M-7: zombie rows render starttime (STARTED column) + pid age (AGE column)", () => {
+	const zombie: ZombieSubagent = {
+		pid: 5150,
+		ppid: 1,
+		crewParentPid: 5050,
+		parentAlive: false,
+		role: "executor",
+		rssKb: 4096,
+		elapsedSec: 3725, // 1h 2m → "1h"
+		starttime: 987654,
+		startedAt: "2026-10-16T04:05:06.000Z",
+		cmd: "pi --mode json -p task",
+	};
+	const text = formatZombieReport({ zombies: [zombie], live: [], foreign: [], errors: [] });
+	assert.match(text, /PID\s+PARENT\s+AGE\s+STARTED/, "table header must have AGE + STARTED columns");
+	assert.match(text, /1h/, "pid age (1h from elapsedSec=3725) must render in the row");
+	assert.match(text, /10-16 04:05:06/, "wall-clock start (MM-DD HH:MM:SS) must render in the row");
+	// The row for THIS zombie must contain both fields on the same line.
+	const row = text.split("\n").find((l) => l.includes("5150"));
+	assert.ok(row, "zombie row must be present");
+	assert.match(row!, /\s1h\s+/, "AGE column filled");
+	assert.match(row!, /10-16 04:05:06/, "STARTED column filled");
+});
+
+test("M-7: unknown starttime/age render placeholders, not 'undefined'", () => {
+	const zombie: ZombieSubagent = {
+		pid: 5151,
+		ppid: 1,
+		crewParentPid: 5051,
+		parentAlive: false,
+		role: undefined,
+		rssKb: 4096,
+		elapsedSec: undefined,
+		cmd: "pi --mode json -p task",
+	};
+	const text = formatZombieReport({ zombies: [zombie], live: [], foreign: [], errors: [] });
+	const row = text.split("\n").find((l) => l.includes("5151"));
+	assert.ok(row);
+	assert.ok(!row!.includes("undefined"), `row must not leak 'undefined': ${row}`);
+});
+
+test("M-7: hint recommends killing promptly after scan (PID-reuse window)", () => {
+	const zombie: ZombieSubagent = {
+		pid: 5152,
+		ppid: 1,
+		crewParentPid: 5052,
+		parentAlive: false,
+		role: "executor",
+		rssKb: 4096,
+		elapsedSec: 10,
+		starttime: 111,
+		startedAt: new Date().toISOString(),
+		cmd: "pi --mode json -p task",
+	};
+	const text = formatZombieReport({ zombies: [zombie], live: [], foreign: [], errors: [] });
+	assert.match(text, /PROMPTLY|promptly|soon after the/i, "hint must push a prompt kill after the scan");
+	assert.match(text, /PID[- ]reuse/i, "hint must name the PID-reuse risk");
+});
+
+test("M-7: __test.computeStartedAtIso derives a wall-clock ISO from starttime ticks", () => {
+	// On Linux /proc/uptime exists → expect an ISO string within a sane range;
+	// on other platforms the helper returns undefined (acceptable).
+	const iso = __test.computeStartedAtIso(12345);
+	if (process.platform === "linux" && iso) {
+		const t = Date.parse(iso);
+		assert.ok(Number.isFinite(t), "ISO parseable");
+		assert.ok(t <= Date.now(), "start time cannot be in the future");
+	} else {
+		assert.equal(iso, undefined);
+	}
+	assert.equal(__test.computeStartedAtIso(undefined), undefined);
+});
+
 // ── R3-16: foreign pi processes (AI_AGENT=pi / PI_CODING_AGENT=true) ─────────
 // The CLI sets both markers POST-exec, so they appear in a process's own frozen
 // /proc/<pid>/environ ONLY when that process was spawned BY another pi process.

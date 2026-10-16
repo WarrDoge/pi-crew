@@ -3,6 +3,7 @@ import test from "node:test";
 import {
 	CARGO_RUST_GATES,
 	computeGreenLevelFromResults,
+	executeCommand,
 	executeVerificationCommands,
 	NPM_TYPESCRIPT_GATES,
 	runPhaseGates,
@@ -110,4 +111,27 @@ test("verification-gates: executeVerificationCommands with empty contract", asyn
 		"/tmp",
 	);
 	assert.deepEqual(results, []);
+});
+
+// ── P-4 (DR-04 round-7): capped accumulation while streaming ────────────────
+// The final result was always sliced to 100k, but the live buffer concatenated
+// EVERY chunk until close/timeout — a multi-MB/GB-emitting gate held it all in
+// memory. Past ~200KB the appender must stop and pin "[truncated]".
+
+test("verification-gates: executeCommand bounds the accumulation buffer past the cap", { timeout: 60_000 }, async () => {
+	// 300KB of output (> 200KB cap) from an allowlisted command (head).
+	const res = await executeCommand("head -c 300000 /dev/zero", process.cwd(), 30000);
+	assert.equal(res.exitCode, 0);
+	// Final slice(-100000) still bounds the result…
+	assert.ok(res.output.length <= 100000, `result must stay ≤100000 chars, got ${res.output.length}`);
+	// …and the streaming buffer stopped at the cap with a visible marker.
+	assert.ok(res.output.includes("[truncated]"), "capped stream must carry the [truncated] marker");
+	assert.ok(res.durationMs >= 0);
+});
+
+test("verification-gates: executeCommand output under the cap is untruncated", { timeout: 30_000 }, async () => {
+	const res = await executeCommand("echo small-output", process.cwd(), 30000);
+	assert.equal(res.exitCode, 0);
+	assert.ok(res.output.includes("small-output"));
+	assert.ok(!res.output.includes("[truncated]"), "small output must not be marked truncated");
 });

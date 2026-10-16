@@ -8,6 +8,7 @@
  * Inline cases (graph, search, onboard, explain, cache, checkpoint, recommend,
  * help) are moved verbatim from the former handleTeamTool switch.
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { allAgents, discoverAgents } from "../../../agents/discover-agents.ts";
 import { loadConfig } from "../../../config/config.ts";
@@ -16,6 +17,7 @@ import { getSkillCacheStats } from "../../../runtime/skill-instructions.ts";
 import type { TeamToolParamsValue } from "../../../schema/team-tool-schema.ts";
 import { computeRunCacheKey, getCachedRun, getCacheStats } from "../../../state/stores/run-cache.ts";
 import { listRunGraphs, loadRunGraph } from "../../../state/stores/run-graph.ts";
+import type { TaskCheckpointState } from "../../../state/types.ts";
 import { allTeams, discoverTeams } from "../../../teams/discover-teams.ts";
 import { searchAgents, searchTeams } from "../../../utils/bm25-search.ts";
 import { projectCrewRoot } from "../../../utils/paths.ts";
@@ -200,14 +202,27 @@ export async function handleStatusDomain(params: TeamToolParamsValue, ctx: TeamC
 			assertSafePathId("runId", params.runId);
 			assertSafePathId("taskId", params.taskId);
 			const stateRoot = path.join(projectCrewRoot(ctx.cwd), "state", "runs", params.runId);
+			// R7-8 (DR-04 round-7): `task.checkpoint` in tasks.json is the REAL
+			// production source — `checkpointTask` (task-runner/state-helpers.ts)
+			// writes the checkpoint into the task record and persists it via
+			// saveRunTasks. FileCheckpointStore is only a fallback for runs whose
+			// task record carries no checkpoint. The output says which source won.
+			const taskCheckpoint = readTaskCheckpointFromTasksJson(stateRoot, params.taskId);
+			if (taskCheckpoint) {
+				return result(
+					`Checkpoint (source: task.checkpoint in tasks.json): phase=${taskCheckpoint.phase}, updatedAt=${taskCheckpoint.updatedAt}` +
+						(taskCheckpoint.childPid !== undefined ? `, childPid=${taskCheckpoint.childPid}` : ""),
+					{ action: "checkpoint", status: "ok", data: { source: "task-record", checkpoint: taskCheckpoint } },
+				);
+			}
 			const store = new FileCheckpointStore(stateRoot);
 			const checkpoint = store.load(params.runId, params.taskId);
 			if (!checkpoint) {
 				return result("No checkpoint found.", { action: "checkpoint", status: "error" }, true);
 			}
 			return result(
-				`Checkpoint: step=${checkpoint.step}, progress=${checkpoint.progress}, savedAt=${new Date(checkpoint.savedAt).toISOString()}`,
-				{ action: "checkpoint", status: "ok", data: { checkpoint } },
+				`Checkpoint (source: checkpoint store): step=${checkpoint.step}, progress=${checkpoint.progress}, savedAt=${new Date(checkpoint.savedAt).toISOString()}`,
+				{ action: "checkpoint", status: "ok", data: { source: "checkpoint-store", checkpoint } },
 			);
 		}
 		default: {
@@ -219,5 +234,30 @@ export async function handleStatusDomain(params: TeamToolParamsValue, ctx: TeamC
 				true,
 			);
 		}
+	}
+}
+
+/**
+ * R7-8 (DR-04 round-7): read `task.checkpoint` from tasks.json — the source
+ * production writers actually use (`checkpointTask` persists the checkpoint
+ * into the task record via saveRunTasks). Read-only and tolerant on purpose:
+ * a status query must never mutate run state (no quarantine/reconstruction),
+ * so a missing/corrupt tasks.json simply falls through to the store fallback.
+ * Handles both on-disk shapes: bare `TeamTaskState[]` (v0, current writer) and
+ * the defensive `{ schemaVersion, tasks }` envelope (see manifest-io.ts).
+ */
+function readTaskCheckpointFromTasksJson(stateRoot: string, taskId: string): TaskCheckpointState | undefined {
+	try {
+		const parsed: unknown = JSON.parse(fs.readFileSync(path.join(stateRoot, "tasks.json"), "utf-8"));
+		const tasks: unknown = Array.isArray(parsed) ? parsed : (parsed as { tasks?: unknown }).tasks;
+		if (!Array.isArray(tasks)) return undefined;
+		for (const task of tasks) {
+			if (task === null || typeof task !== "object" || (task as { id?: unknown }).id !== taskId) continue;
+			const checkpoint = (task as { checkpoint?: unknown }).checkpoint;
+			return checkpoint !== null && typeof checkpoint === "object" ? (checkpoint as TaskCheckpointState) : undefined;
+		}
+		return undefined;
+	} catch {
+		return undefined; // ENOENT / corrupt tasks.json → caller falls back to the store
 	}
 }

@@ -60,6 +60,13 @@ export interface ZombieSubagent {
 	surfacePaneId?: string;
 	rssKb: number;
 	elapsedSec: number | undefined;
+	/** M-7 (DR-04 round-7): /proc/<pid>/stat starttime — clock ticks since boot.
+	 *  Stable pid identity: unlike the pid number, starttime changes when the OS
+	 *  recycles a dead pid for a NEW process, so kill-time re-checks can detect
+	 *  PID reuse between scan and kill. */
+	starttime?: number;
+	/** M-7: wall-clock start time (ISO) derived from starttime + /proc/uptime. */
+	startedAt?: string;
 	cmd: string;
 }
 
@@ -106,8 +113,8 @@ function readProcEnviron(pid: number): Record<string, string> {
 	}
 }
 
-/** Read /proc/<pid>/stat to get ppid + elapsed. Returns undefined if unreadable. */
-function readProcStat(pid: number): { ppid: number; elapsedSec: number | undefined } | undefined {
+/** Read /proc/<pid>/stat to get ppid + starttime + elapsed. Returns undefined if unreadable. */
+function readProcStat(pid: number): { ppid: number; starttime: number | undefined; elapsedSec: number | undefined } | undefined {
 	try {
 		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
 		// stat format: pid (comm) state ppid ... starttime ...
@@ -117,12 +124,36 @@ function readProcStat(pid: number): { ppid: number; elapsedSec: number | undefin
 		if (!rest) return undefined;
 		const ppid = Number.parseInt(rest[PROC_STAT_PPID_INDEX] ?? "", 10);
 		const starttimeTicksRaw = Number.parseInt(rest[PROC_STAT_STARTTIME_INDEX] ?? "", 10);
-		const starttimeTicks = Number.isFinite(starttimeTicksRaw) ? starttimeTicksRaw : undefined;
-		const elapsedSec = computeElapsedSec(starttimeTicks);
-		return { ppid: Number.isFinite(ppid) ? ppid : 0, elapsedSec };
+		const starttime = Number.isFinite(starttimeTicksRaw) ? starttimeTicksRaw : undefined;
+		const elapsedSec = computeElapsedSec(starttime);
+		return { ppid: Number.isFinite(ppid) ? ppid : 0, starttime, elapsedSec };
 	} catch {
 		return undefined;
 	}
+}
+
+/** /proc/uptime first field (seconds since boot); undefined when unreadable. */
+function readUptimeSec(): number | undefined {
+	try {
+		const uptimeRaw = fs.readFileSync("/proc/uptime", "utf-8");
+		const uptimeSec = Number.parseFloat(uptimeRaw.split(" ")[0] ?? "");
+		return Number.isFinite(uptimeSec) ? uptimeSec : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * M-7 (DR-04 round-7): wall-clock start time of a pid from its starttime
+ * ticks — boot time = now - uptime, so startedAt = boot + starttime/CLK_TCK.
+ * Best-effort ISO string; undefined when /proc/uptime is unavailable.
+ */
+function computeStartedAtIso(starttime: number | undefined): string | undefined {
+	if (starttime === undefined || !Number.isFinite(starttime)) return undefined;
+	const uptimeSec = readUptimeSec();
+	if (uptimeSec === undefined) return undefined;
+	const bootMs = Date.now() - uptimeSec * 1000;
+	return new Date(bootMs + (starttime / 100) * 1000).toISOString();
 }
 
 function computeElapsedSec(starttimeTicks: number | undefined): number | undefined {
@@ -132,10 +163,8 @@ function computeElapsedSec(starttimeTicks: number | undefined): number | undefin
 		// portably from Node requires a native addon; hardcoding 100 matches every
 		// mainstream Linux distro and keeps this dependency-free.
 		const ticksPerSec = 100;
-		// /proc/uptime: first field is seconds since boot.
-		const uptimeRaw = fs.readFileSync("/proc/uptime", "utf-8");
-		const uptimeSec = Number.parseFloat(uptimeRaw.split(" ")[0] ?? "");
-		if (!Number.isFinite(uptimeSec)) return undefined;
+		const uptimeSec = readUptimeSec();
+		if (uptimeSec === undefined) return undefined;
 		// starttime (ticks since boot) → process age in seconds = uptime - starttime/ticksPerSec.
 		const startAgeSec = starttimeTicks / ticksPerSec;
 		return Math.max(0, uptimeSec - startAgeSec);
@@ -271,6 +300,10 @@ export function scanZombieSubagents(): ZombieScanResult {
 				surfacePaneId: environ.PI_CREW_SURFACE_PANE || undefined,
 				rssKb: readProcRssKb(pid),
 				elapsedSec: stat?.elapsedSec,
+				// M-7: starttime (ticks) + derived wall-clock start — pid identity pin
+				// for kill-time PID-reuse checks and prompt-kill triage.
+				starttime: stat?.starttime,
+				startedAt: computeStartedAtIso(stat?.starttime),
 				cmd: readProcCmdline(pid),
 			};
 
@@ -392,9 +425,13 @@ export function formatZombieReport(scan: ZombieScanResult): string {
 
 	if (scan.zombies.length > 0) {
 		lines.push(`### Zombies — parent dead (${scan.zombies.length})`);
-		lines.push("These sub-agents are orphaned. Safe to kill after review:");
+		lines.push("These sub-agents are orphaned. Safe to kill, but do it PROMPTLY after this");
+		lines.push("scan: an unreviewed delay re-opens the PID-reuse window (the OS can recycle");
+		lines.push("a dead zombie's PID for an unrelated process). Before killing, re-check that");
+		lines.push("the PID's STARTED column below still matches — a newer starttime means the");
+		lines.push("process you are about to kill is NOT the zombie that was scanned.");
 		lines.push("");
-		lines.push("  PID       PARENT  RSS       ROLE          SURFACE          CMD");
+		lines.push("  PID       PARENT  AGE      STARTED              RSS       ROLE          SURFACE          CMD");
 		for (const z of scan.zombies) {
 			lines.push(formatZombieRow(z));
 		}
@@ -405,7 +442,7 @@ export function formatZombieReport(scan: ZombieScanResult): string {
 		lines.push(`### Live — parent still running (${scan.live.length})`);
 		lines.push("NOT zombies. Do not kill (parent PID is alive and may still reap them).");
 		lines.push("");
-		lines.push("  PID       PARENT  RSS       ROLE          SURFACE          CMD");
+		lines.push("  PID       PARENT  AGE      STARTED              RSS       ROLE          SURFACE          CMD");
 		for (const l of scan.live) {
 			lines.push(formatZombieRow(l));
 		}
@@ -435,7 +472,9 @@ export function formatZombieReport(scan: ZombieScanResult): string {
 		lines.push("");
 	}
 
-	lines.push("To kill a zombie: `kill <PID>` (the OS will reap it). This tool never kills.");
+	lines.push("To kill a zombie: `kill <PID>` (the OS will reap it). Kill soon after the");
+	lines.push("scan — a PID listed here can be reused by an unrelated process if you wait;");
+	lines.push("verify its starttime/age first. This tool never kills.");
 	return lines.join("\n");
 }
 
@@ -443,7 +482,30 @@ export function formatZombieReport(scan: ZombieScanResult): string {
 function formatZombieRow(z: ZombieSubagent): string {
 	// SURFACE = "kind:paneId" (T12) — the pane doctor closes when orphaned.
 	const surface = z.surface ? `${z.surface}:${z.surfacePaneId ?? "?"}` : "-";
-	return `  ${String(z.pid).padEnd(9)}${String(z.crewParentPid).padEnd(8)}${formatRss(z.rssKb).padEnd(10)}${(z.role ?? "?").padEnd(14)}${surface.padEnd(16)}${z.cmd.slice(0, 44)}`;
+	// M-7: AGE + STARTED — pid identity + triage (old zombies = long-leaked;
+	// STARTED mismatch at kill time = PID was reused, do NOT kill).
+	return (
+		`  ${String(z.pid).padEnd(9)}${String(z.crewParentPid).padEnd(8)}${formatAge(z.elapsedSec).padEnd(9)}` +
+		`${formatStartedAt(z.startedAt).padEnd(21)}${formatRss(z.rssKb).padEnd(10)}${(z.role ?? "?").padEnd(14)}` +
+		`${surface.padEnd(16)}${z.cmd.slice(0, 28)}`
+	);
+}
+
+/** M-7: age as a compact human duration ("37s", "5m", "3h", "2d"). */
+function formatAge(sec: number | undefined): string {
+	if (sec === undefined || !Number.isFinite(sec) || sec < 0) return "-";
+	if (sec < 60) return `${Math.floor(sec)}s`;
+	if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+	if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
+	return `${Math.floor(sec / 86400)}d`;
+}
+
+/** M-7: ISO startedAt → "MM-DD HH:MM:SS" (UTC, no year — scan-time triage). */
+function formatStartedAt(iso: string | undefined): string {
+	if (!iso) return "-";
+	const d = new Date(iso);
+	if (Number.isNaN(d.getTime())) return "-";
+	return d.toISOString().slice(5, 19).replace("T", " ");
 }
 
 /** One table row for the R3-16 foreign section — state carries the triage flags. */
@@ -469,4 +531,6 @@ export const __test = {
 	looksLikePiBinary,
 	isHeadlessArgv,
 	collectAncestorPids,
+	// M-7: starttime helpers (ticks → wall-clock start).
+	computeStartedAtIso,
 };

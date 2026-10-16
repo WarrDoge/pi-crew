@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { logInternalError } from "../utils/internal-error.ts";
 import { projectCrewRoot } from "../utils/paths.ts";
 import { assertSafePathId } from "../utils/safe-paths.ts";
 import { withFileLockSync } from "./coordination/locks.ts";
@@ -145,6 +146,12 @@ export function appendEntry(runId: string, entry: RolloutEntry): RolloutEntry {
 
 /**
  * Read all entries from the decision ledger.
+ *
+ * P-3 (DR-04 round-7): tolerant parse — a corrupt line (partial write, manual
+ * edit, disk garbage) is SKIPPED, not thrown: one bad tail line must not take
+ * down every reader of the ledger. Unparseable lines are logged ONCE per read
+ * (with the count) via logInternalError; valid lines are preserved. The reader
+ * never throws.
  */
 export function getLedger(runId: string): RolloutEntry[] {
 	assertSafePathId("runId", runId);
@@ -154,15 +161,47 @@ export function getLedger(runId: string): RolloutEntry[] {
 		return [];
 	}
 
-	const content = readFileSync(ledgerPath, "utf-8");
+	let content: string;
+	try {
+		content = readFileSync(ledgerPath, "utf-8");
+	} catch (error) {
+		// P-3: read failure (EACCES, transient EAGAIN, …) — warn and treat as
+		// empty rather than throwing out of a status/summary reader.
+		logInternalError("decision-ledger.getLedger", error, `run=${runId}`, "warn");
+		return [];
+	}
 	if (!content.trim()) {
 		return [];
 	}
 
-	return content
-		.split("\n")
-		.filter((line) => line.trim())
-		.map((line) => JSON.parse(line) as RolloutEntry);
+	return parseLedgerLines(content, runId, "decision-ledger.getLedger");
+}
+
+/**
+ * P-3 (DR-04 round-7): parse JSONL ledger lines tolerantly — valid lines are
+ * kept, unparseable lines are skipped and reported ONCE per call with a count
+ * (plus a bounded preview) so a corrupt tail is visible without flooding.
+ */
+function parseLedgerLines(content: string, runId: string, scope: string): RolloutEntry[] {
+	const entries: RolloutEntry[] = [];
+	const skipped: string[] = [];
+	for (const line of content.split("\n")) {
+		if (!line.trim()) continue;
+		try {
+			entries.push(JSON.parse(line) as RolloutEntry);
+		} catch {
+			skipped.push(line.slice(0, 80));
+		}
+	}
+	if (skipped.length > 0) {
+		logInternalError(
+			scope,
+			new Error(`skipped ${skipped.length} unparseable decision-ledger line(s)`),
+			`run=${runId} lines=${JSON.stringify(skipped)}`,
+			"warn",
+		);
+	}
+	return entries;
 }
 
 /**
@@ -181,13 +220,22 @@ function readTailEntries(runId: string, n: number = 10): RolloutEntry[] {
 		return [];
 	}
 
-	const content = readFileSync(ledgerPath, "utf-8");
+	let content: string;
+	try {
+		content = readFileSync(ledgerPath, "utf-8");
+	} catch (error) {
+		// P-3: same tolerant-read contract as getLedger — the append path must
+		// not throw out of the file-lock callback because the tail was unreadable.
+		logInternalError("decision-ledger.readTailEntries", error, `run=${runId}`, "warn");
+		return [];
+	}
 	if (!content.trim()) {
 		return [];
 	}
 
-	const lines = content.split("\n").filter((line) => line.trim());
-	return lines.slice(-n).map((line) => JSON.parse(line) as RolloutEntry);
+	// P-3: skip unparseable lines first, THEN take the tail — otherwise a
+	// single corrupt tail line would slice garbage into the coherence window.
+	return parseLedgerLines(content, runId, "decision-ledger.readTailEntries").slice(-n);
 }
 
 /**

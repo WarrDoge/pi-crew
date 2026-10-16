@@ -82,6 +82,10 @@ export interface RestoreResult {
 	path: string;
 	restored: string[];
 	failed: { name: string; reason: string }[];
+	/** P-5 (DR-04 round-7): set when the snapshot was REJECTED before restore —
+	 *  e.g. `unsupported-snapshot-version:<v>`. Distinguishes "restored 0 vars
+	 *  from a valid v1 snapshot" from "refused an unknown format". */
+	reason?: string;
 }
 
 export interface EngineOptions {
@@ -629,11 +633,21 @@ export class EngineManager {
 			const st = fstatSync(fd);
 			if (!st.isFile() || st.isSymbolicLink()) return null;
 			if (st.size > SNAPSHOT_MAX_BYTES) return null;
-			// file validated → lazily start the engine, then read+restore via fd.
-			await this.start();
 			const payload = JSON.parse(readFileSync(fd, { encoding: "utf8" })) as {
+				version?: number;
 				vars?: Record<string, string>;
 			};
+			// P-5 (DR-04 round-7): version gate BEFORE starting the engine — an
+			// unknown snapshot format must fail LOUDLY (warn + explicit result with
+			// restored:[] and a reason), not silently fail-open into an empty
+			// namespace (which reads as "nothing to restore" to every caller).
+			if (payload.version !== 1) {
+				const reason = `unsupported-snapshot-version:${String(payload.version)}`;
+				logInternalError("scratchpad.restoreState", new Error(`${reason} (expected 1) — refusing restore`), path, "warn");
+				return { path, restored: [], failed: [], reason };
+			}
+			// file validated → lazily start the engine, then restore.
+			await this.start();
 			const vars = payload.vars ?? {};
 			const reply = await this.request({ type: "restore", id: randomUUID(), vars }, SNAPSHOT_REQUEST_TIMEOUT_MS);
 			if (reply.type !== "restore_result") return null;

@@ -19,6 +19,8 @@ interface FakeHarness {
 	calls: string[][];
 	respond: (fn: (args: string[]) => string) => void;
 	failWith: (err: Error) => void;
+	/** R7-13: bỏ failure đang cài — tick kế trả về stdout bình thường (poll thành công). */
+	clearFailure: () => void;
 	sleeps: number[];
 	kills: number[];
 	clearedTimers: number[];
@@ -73,6 +75,9 @@ function makeFake(): FakeHarness {
 		},
 		failWith: (err) => {
 			failure = err;
+		},
+		clearFailure: () => {
+			failure = null;
 		},
 		sleeps,
 		kills,
@@ -522,7 +527,7 @@ test("onExit: pane biến khỏi list-panes → 'pane-closed'", async () => {
 	assert.deepEqual(reasons, ["pane-closed"]);
 });
 
-test("onExit: tmux call throw (ENOENT) → 'mux-dead' cho mọi handle sống + dừng timer", async () => {
+test("onExit: tmux call throw 2 lần liên tiếp (ENOENT) → 'mux-dead' cho mọi handle sống + dừng timer", async () => {
 	const h = makeFake();
 	let splitCount = 0;
 	h.respond((args) => {
@@ -540,9 +545,44 @@ test("onExit: tmux call throw (ENOENT) → 'mux-dead' cho mọi handle sống + 
 	handle.onExit((r) => r1.push(r));
 	second.onExit((r) => r2.push(r));
 	h.failWith(new Error("spawn tmux ENOENT"));
+	// R7-13: strike 1 — transient, watchers còn sống, timer không dừng.
+	h.tick();
+	assert.deepEqual(r1, [], "1 strike phải GIỮ watcher (transient)");
+	assert.deepEqual(r2, []);
+	assert.equal(h.clearedTimers.length, 0);
+	// R7-13: strike 2 — mux chết thật, semantics cũ: mọi watcher → mux-dead.
 	h.tick();
 	assert.deepEqual(r1, ["mux-dead"]);
 	assert.deepEqual(r2, ["mux-dead"]);
+	assert.equal(h.clearedTimers.length, 1);
+});
+
+test("R7-13: 1 lỗi transient list-panes → giữ watchers + warn; poll thành công reset counter về 0", async () => {
+	const h = makeFake();
+	h.respond((args) => {
+		if (args[0] === "split-window") return "%12\n";
+		if (args[0] === "list-panes") return "0 %12\n";
+		return "";
+	});
+	const { handle } = await spawnPane(h);
+	const reasons: SurfaceExitReason[] = [];
+	handle.onExit((r) => reasons.push(r));
+	// Strike 1: EAGAIN transient (như EMFILE — fd cạn một chốc).
+	h.failWith(Object.assign(new Error("spawn tmux EAGAIN"), { code: "EAGAIN" }));
+	h.tick();
+	assert.deepEqual(reasons, [], "1 strike transient KHÔNG được giết watcher");
+	assert.equal(h.clearedTimers.length, 0, "timer poll phải tiếp tục chạy");
+	// Hồi phục: poll thành công → reset strike về 0.
+	h.clearFailure();
+	h.tick();
+	assert.deepEqual(reasons, []);
+	// Lỗi đơn lẻ TIẾP THEO (sau reset) vẫn chỉ là strike 1 — không phải strike 2.
+	h.failWith(new Error("spawn tmux EMFILE"));
+	h.tick();
+	assert.deepEqual(reasons, [], "lỗi đơn lẻ sau reset vẫn chỉ là strike 1");
+	// Strike 2 liên tiếp → mux-dead.
+	h.tick();
+	assert.deepEqual(reasons, ["mux-dead"], "2 strike liên tiếp mới fire mux-dead");
 	assert.equal(h.clearedTimers.length, 1);
 });
 
