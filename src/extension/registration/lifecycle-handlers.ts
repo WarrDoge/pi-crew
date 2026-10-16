@@ -536,8 +536,11 @@ async function runDeferredSessionCleanup(
  * Build a CrewScheduler wired to the current session. The scheduler's
  * executor closure invokes handleTeamTool lazily — the heavy team-tool
  * import only fires when a scheduled job actually runs.
+ *
+ * @internal — exported for the R6-2 persistence-wiring unit tests
+ * (test/unit/runtime/scheduling/scheduler-persist-reload.test.ts).
  */
-function setupCrewScheduler(
+export function setupCrewScheduler(
 	pi: ExtensionAPI,
 	ctx: RegistrationContext,
 	extensionCtx: ExtensionContext,
@@ -556,6 +559,15 @@ function setupCrewScheduler(
 			if (ctx.cleanedUp) return;
 			notifyScheduleEvent(event);
 			pi.events?.emit?.("crew-scheduler", event);
+			// R6-2(a) (round-6 audit): `updated` scheduler events persist the job —
+			// the persist flow armCron's docstring always claimed existed. fire()'s
+			// lastStatus flips and advanceCronNextRun's nextRun writes now land on
+			// disk; before this only the executor persisted, and it persisted the
+			// pre-completion snapshot (lastStatus:"running") while the terminal flip
+			// stayed memory-only — a restart in that window reloaded "running" and
+			// fire()'s in-flight guard skipped the job forever (jobs died after
+			// restart). persistScheduledJobUpdate is best-effort (internal catch).
+			if (event.type === "updated") persistScheduledJobUpdate(extensionCtx.cwd, event.job);
 		},
 		executor: (job) => {
 			let runParams: { action: string; team: string; goal: string };
@@ -601,17 +613,26 @@ function setupCrewScheduler(
 							/* best-effort provenance tracking */
 						}
 					}
-					try {
-						const updatedJob = crewScheduler?.list().find((j) => j.id === job.id);
-						if (updatedJob) persistScheduledJobUpdate(extensionCtx.cwd, updatedJob);
-					} catch {
-						/* best-effort */
-					}
-					crewScheduler?.update(job.id, {
-						runCount: job.runCount + 1,
-						lastRun: new Date().toISOString(),
-						lastStatus: "success",
-					});
+					// R6-2(b) + I6 (round-6 audit): update state FIRST, then persist the
+					// UPDATED job. The old order persisted the fire-time snapshot (still
+					// lastStatus:"running") and then flipped memory only — a restart in
+					// that window reloaded "running" and fire()'s in-flight guard skipped
+					// the job forever. runCount comes from a FRESH list() read: the
+					// closure-captured `job` is the dispatch-time snapshot, so any update
+					// that landed between dispatch and completion (run-now, another
+					// completion) would otherwise be clobbered with a stale count. The
+					// update() call also persists via the emit wiring above; the explicit
+					// persist keeps the executor authoritative when the emit guard exited
+					// early (cleanedUp).
+					const freshJob = crewScheduler?.list().find((j) => j.id === job.id);
+					const completedJob = freshJob
+						? crewScheduler?.update(job.id, {
+								runCount: freshJob.runCount + 1,
+								lastRun: new Date().toISOString(),
+								lastStatus: "success",
+							})
+						: undefined;
+					if (completedJob) persistScheduledJobUpdate(extensionCtx.cwd, completedJob);
 				} catch (err) {
 					logInternalError("scheduler.execute", err);
 					crewScheduler?.update(job.id, { lastStatus: "error" });

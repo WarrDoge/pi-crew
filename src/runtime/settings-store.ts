@@ -39,6 +39,25 @@ function validateScheduledJob(job: unknown): boolean {
 	return typeof obj.id === "string" && obj.id.length > 0 && typeof obj.scheduleType === "string" && typeof obj.enabled === "boolean";
 }
 
+/**
+ * R6-2(c) (round-6 audit): a persisted `lastStatus:"running"` is an in-flight
+ * flag written by a process that may already be dead when the file is next
+ * read. It is meaningless at load time and lethal downstream: the scheduler's
+ * fire() treats "running" as backpressure (in-flight guard), so re-loading the
+ * flag verbatim made a job that was mid-run at crash/restart time skip EVERY
+ * later occurrence — scheduled jobs died after restart. Strip only the stale
+ * "running" flag at load; terminal statuses ("success"/"error") survive
+ * untouched, as does every other field.
+ */
+function normalizeStaleRunningJob(job: unknown): unknown {
+	if (!job || typeof job !== "object") return job;
+	const obj = job as Record<string, unknown>;
+	if (obj.lastStatus !== "running") return job;
+	const copy: Record<string, unknown> = { ...obj };
+	delete copy.lastStatus;
+	return copy;
+}
+
 function sanitizeSettings(raw: unknown): CrewSettings {
 	if (!raw || typeof raw !== "object") return {};
 	const r = raw as Record<string, unknown>;
@@ -74,9 +93,10 @@ function sanitizeSettings(raw: unknown): CrewSettings {
 	if (typeof r.notifierIntervalMs === "number" && r.notifierIntervalMs >= 1000) {
 		out.notifierIntervalMs = r.notifierIntervalMs;
 	}
-	// Pass through scheduledJobs after basic validation
+	// Pass through scheduledJobs after basic validation + stale-flag
+	// normalization (R6-2c — see normalizeStaleRunningJob).
 	if (Array.isArray(r.scheduledJobs)) {
-		out.scheduledJobs = (r.scheduledJobs as unknown[]).filter(validateScheduledJob);
+		out.scheduledJobs = (r.scheduledJobs as unknown[]).filter(validateScheduledJob).map(normalizeStaleRunningJob);
 	}
 	return out;
 }

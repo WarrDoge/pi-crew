@@ -120,5 +120,7 @@ test("humanizeSchedule produces human-readable labels", () => {
 	assert.equal(humanizeSchedule({ kind: "once", spec: "+10m" }), "once in 10m");
 	assert.equal(humanizeSchedule({ kind: "interval", spec: "5m" }), "every 5m");
 	assert.equal(humanizeSchedule({ kind: "interval", spec: "1h30m" }), "every 1h30m");
-	assert.equal(humanizeSchedule({ kind: "cron", spec: "0 12 * * *" }), "cron 0 12 * * *");
+	// I4 (round-6 audit): cron fields are matched against UTC calendar parts
+	// (nextCronDate reads getUTC*), so the label must say so.
+	assert.equal(humanizeSchedule({ kind: "cron", spec: "0 12 * * *" }), "cron 0 12 * * * (UTC)");
 });

@@ -53,3 +53,46 @@ test("garbage specs still fail", () => {
 	const r = parseSchedule("soon");
 	assert.ok("error" in r, "non-spec strings must return an error");
 });
+
+// ─── I3 (round-6 audit): parse-time rejection of provably-impossible cron
+// day-of-month × month combinations. Pre-fix, `0 0 31 2 *` passed parse and
+// nextCronDate burned its full 366-day minute-by-minute scan (~309ms)
+// before arm-time disabled the job — the user learned nothing at creation.
+
+test("parseSchedule rejects '0 0 31 2 *' (Feb 31) at parse time", () => {
+	const r = parseSchedule("0 0 31 2 *");
+	assert.ok("error" in r, "provably-impossible dom/month cron must fail parse, got: " + JSON.stringify(r));
+	assert.match((r as { error: string }).error, /day-of-month/, "error must name the impossible fields");
+	assert.match((r as { error: string }).error, /month/);
+});
+
+test("parseSchedule rejects Feb 30 and all-30-day month lists for dom 31", () => {
+	for (const spec of ["0 0 30 2 *", "0 0 31 4 *", "0 0 31 APR,SEP,JUN,NOV *"]) {
+		const r = parseSchedule(spec);
+		assert.ok("error" in r, `${spec} must fail parse (no valid day/month combo), got: ` + JSON.stringify(r));
+	}
+});
+
+test("parseSchedule stays conservative: Feb 29 (leap years) and mixed-month dom 31 stay legal", () => {
+	// Feb 29 exists in leap years — the arm-time uncomputable-next path owns it.
+	const feb29 = parseSchedule("0 0 29 2 *");
+	assert.ok(!("error" in feb29), "Feb 29 must parse (conservative leap-day ceiling)");
+	// A month LIST containing any 31-day month makes dom 31 feasible.
+	const mixed = parseSchedule("0 0 31 2,7 *");
+	assert.ok(!("error" in mixed), "dom 31 in {Feb,Jul} is feasible (July)");
+	// dom steps/lists inside a short month: some dom always exists.
+	const steps = parseSchedule("0 0 */2 2 *");
+	assert.ok(!("error" in steps), "dom */2 in Feb is feasible (day 1 matches)");
+	const list = parseSchedule("0 0 1,15 * *");
+	assert.ok(!("error" in list), "dom list across all months is feasible");
+});
+
+test("I3 fast-fail: impossible cron errors are returned synchronously (no scan-shaped latency)", () => {
+	const t0 = process.hrtime.bigint();
+	const r = parseSchedule("0 0 31 2 *");
+	const elapsedMs = Number(process.hrtime.bigint() - t0) / 1e6;
+	assert.ok("error" in r, "must error");
+	// The pre-fix cost was ~309ms of minute-stepping; the check is pure set
+	// algebra. Generous ceiling to stay flake-free under parallel test load.
+	assert.ok(elapsedMs < 50, `parse must fail fast, took ${elapsedMs.toFixed(2)}ms`);
+});

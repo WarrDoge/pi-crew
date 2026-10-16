@@ -358,7 +358,9 @@ test("cosmetic migration: summary lines that only changed frame language are unc
 	});
 	assert.equal(stripAnsi(renderSchedulesPane([scheduledJob()], NOW)[0] ?? ""), "Scheduled jobs (1):", "header unchanged");
 	assert.ok(
-		stripAnsi(renderSchedulesPane([scheduledJob()], NOW)[1] ?? "").includes("● nightly-build  cron 0 9 * * * · in 84m · ✓ · 12 runs"),
+		stripAnsi(renderSchedulesPane([scheduledJob()], NOW)[1] ?? "").includes(
+			"● nightly-build  cron 0 9 * * * (UTC) · in 84m · ✓ · 12 runs",
+		),
 		"schedules main row keeps all six columns + rhythm",
 	);
 	assert.ok(

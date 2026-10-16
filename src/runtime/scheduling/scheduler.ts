@@ -397,13 +397,17 @@ const CRON_MONTH_NAMES: Record<string, number> = {
 };
 
 /**
- * Match a single cron field value against a cron field expression.
- * Supports the standard cron grammar: wildcard, single N, range a-b, list a,b,c,
- * step syntax (wildcard-step, range-step, from-step), and named tokens
- * (MON, JAN) when a `names` map is passed. Fixes the prior matcher that
- * rejected step values and named DOW (parseInt returned NaN).
+ * Expand a single cron field expression into the set of values it can
+ * match (clamped to min..max). Returns null when any part fails to parse
+ * (empty part, bad step, unrecognizable token) — callers treat null as
+ * "matches nothing / keep legacy behavior" instead of throwing.
+ *
+ * Supports the standard cron grammar: wildcard, single N, range a-b, list
+ * a,b,c, step syntax (wildcard-step, range-step, from-step), and named tokens
+ * (MON, JAN) when a `names` map is passed. Shared by the per-occurrence
+ * matcher below and the parse-time dom/month feasibility check (I3).
  */
-function cronFieldMatches(value: number, field: string, min: number, max: number, names?: Record<string, number>): boolean {
+function cronFieldCandidates(field: string, min: number, max: number, names?: Record<string, number>): Set<number> | null {
 	let normalized = field.trim().toUpperCase();
 	if (names) {
 		for (const name of Object.keys(names).sort((a, b) => b.length - a.length)) {
@@ -415,10 +419,10 @@ function cronFieldMatches(value: number, field: string, min: number, max: number
 	const matched = new Set<number>();
 	for (const rawPart of normalized.split(",")) {
 		const part = rawPart.trim();
-		if (part === "") return false;
+		if (part === "") return null;
 		const stepMatch = part.match(/^(.*)\/(\d+)$/);
 		const step = stepMatch ? Number.parseInt(stepMatch[2], 10) : 1;
-		if (!Number.isFinite(step) || step < 1) return false;
+		if (!Number.isFinite(step) || step < 1) return null;
 		const rangeStr = stepMatch ? stepMatch[1] : part;
 		let lo: number;
 		let hi: number;
@@ -430,7 +434,7 @@ function cronFieldMatches(value: number, field: string, min: number, max: number
 			hi = stepMatch ? max : lo; // bare `N` = single value; `N/S` = N..max step S
 		} else {
 			const rm = rangeStr.match(/^(\d+)-(\d+)$/);
-			if (!rm) return false;
+			if (!rm) return null;
 			lo = Number.parseInt(rm[1], 10);
 			hi = Number.parseInt(rm[2], 10);
 		}
@@ -438,7 +442,19 @@ function cronFieldMatches(value: number, field: string, min: number, max: number
 			if (v >= min && v <= max) matched.add(v);
 		}
 	}
-	return matched.has(value);
+	return matched;
+}
+
+/**
+ * Match a single cron field value against a cron field expression.
+ * Supports the standard cron grammar: wildcard, single N, range a-b, list
+ * a,b,c, step syntax (wildcard-step, range-step, from-step), and named tokens
+ * (MON, JAN) when a `names` map is passed. Fixes the prior matcher that
+ * rejected step values and named DOW (parseInt returned NaN).
+ */
+function cronFieldMatches(value: number, field: string, min: number, max: number, names?: Record<string, number>): boolean {
+	const candidates = cronFieldCandidates(field, min, max, names);
+	return candidates?.has(value) === true;
 }
 
 function nextCronDate(spec: string, from: Date): Date | { error: string } | null {
@@ -491,11 +507,54 @@ export function parseSchedule(spec: string): ScheduleSpec | { error: string } {
 	}
 	const fields = trimmed.split(/\s+/);
 	if (fields.length >= 5) {
+		const impossible = cronDomMonthImpossible(fields[2], fields[3]);
+		if (impossible) return { error: `Invalid cron expression "${trimmed}": ${impossible}.` };
 		return { kind: "cron", spec: trimmed };
 	}
 	return {
 		error: `Invalid schedule "${spec}". Use "5m", "+10m", ISO timestamp, or cron expression.`,
 	};
+}
+
+/** Day-of-month ceilings per month (index 1..12) for a LEAP year — the
+ * conservative upper bound used by the I3 parse-time feasibility check
+ * (February is granted 29: leap years exist inside the multi-year window,
+ * so Feb-29 specs stay legal at parse). */
+const MONTH_DAY_CEILINGS = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * I3 (round-6 audit): cheap parse-time rejection of cron specs whose
+ * day-of-month × month combination cannot occur in ANY year — e.g.
+ * `0 0 31 2 *`. nextCronDate only discovers this by scanning
+ * minute-by-minute across its entire 366-day window (~309ms measured) after
+ * which arm-time disables the job; rejecting at parse surfaces the mistake
+ * to the user at schedule-creation time instead of a silent disable later.
+ *
+ * Conservative by design (NOT a full cron validator):
+ *  - dow is ignored: nextCronDate uses AND semantics across fields, so an
+ *    impossible dom/month pair can never match regardless of the dow field;
+ *  - February is granted its leap-day ceiling of 29 (Feb-29 specs remain
+ *    legal; the existing arm-time disableCronForUncomputableNext path owns
+ *    the beyond-search-window case);
+ *  - any unparseable field returns null here and keeps the legacy runtime
+ *    behavior — this adds no new rejection classes beyond provable
+ *    impossibility (empty expansions like inverted ranges count: an empty
+ *    candidate set can never match under the AND-semantics matcher).
+ *
+ * Returns a human-readable reason, or null when the combo is feasible (or
+ * unknowable cheaply).
+ */
+function cronDomMonthImpossible(domStr: string, monthStr: string): string | null {
+	const doms = cronFieldCandidates(domStr, 1, 31);
+	const months = cronFieldCandidates(monthStr, 1, 12, CRON_MONTH_NAMES);
+	if (doms === null || months === null) return null;
+	const feasible = [...months].some((m) => [...doms].some((d) => d >= 1 && d <= MONTH_DAY_CEILINGS[m]));
+	if (feasible) return null;
+	return `day-of-month {${[...doms]
+		.sort((a, b) => a - b)
+		.join(
+			",",
+		)}} never occurs in month {${[...months].sort((a, b) => a - b).join(",")}} — no valid day/month combination exists in any year`;
 }
 
 export function nextRunTime(spec: ScheduleSpec, from: Date = new Date()): Date | { error: string } {
@@ -545,7 +604,11 @@ export function humanizeSchedule(spec: ScheduleSpec): string {
 		return `every ${spec.spec}`;
 	}
 	if (spec.kind === "cron") {
-		return `cron ${spec.spec}`;
+		// I4: cron fields are matched against UTC calendar parts (nextCronDate
+		// reads getUTCMinutes/getUTCHours/getUTCDate/...), so the label says so —
+		// a user in UTC+7 writing `0 9 * * *` otherwise gets 02:00 local with
+		// no hint why.
+		return `cron ${spec.spec} (UTC)`;
 	}
 	return "unknown schedule";
 }
