@@ -329,5 +329,8 @@ test("T-6 (source-level): exhaustion error path mirrors MAX_CAS_ATTEMPTS=10 and 
 	// before the mtime check — so the guard above cannot fire today. If a future
 	// fix makes exhaustion reachable, keep the message and the behavioral tests
 	// above will need updating to expect the throw.
-	assert.match(source, /merged = updateTask\(latest, taskWithCheckpoint\);/);
+	// (R6-1/R6-4, DR-03 2026-10-16: the per-task merge goes through
+	// mergeTaskUpdateWithDisk — terminal-preserve + allocation max-merge — but
+	// the assignment stays unconditional on every attempt, before the CAS.)
+	assert.match(source, /merged = updateTask\(latest, mergeTaskUpdateWithDisk\(latest, taskWithCheckpoint\)\);/);
 });

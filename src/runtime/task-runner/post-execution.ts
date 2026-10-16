@@ -16,6 +16,7 @@
  */
 import { readFileSync } from "node:fs";
 import { appendHookEvent, executeHook } from "../../hooks/registry.ts";
+import type { TeamEventType } from "../../state/contracts.ts";
 import { withRunLock } from "../../state/coordination/locks.ts";
 import { appendEventAsync } from "../../state/event-log/event-log.ts";
 import { writeArtifact } from "../../state/stores/artifact-store.ts";
@@ -25,6 +26,7 @@ import type {
 	OperationTerminalEvidence,
 	TeamRunManifest,
 	TeamTaskState,
+	TeamTaskStatus,
 	VerificationEvidence,
 } from "../../state/types.ts";
 import { captureWorktreeDiffAsync, captureWorktreeDiffStatAsync } from "../../worktree/worktree-manager.ts";
@@ -46,6 +48,24 @@ import type { TaskExecutionContext } from "./pre-execution.ts";
 import { buildWorkerPromptPipeline } from "./prompt-pipeline.ts";
 import { computeSpecGate } from "./spec-evidence.ts";
 import { persistSingleTaskUpdate, updateTask } from "./state-helpers.ts";
+
+/**
+ * R6-1 (DR-03, 2026-10-16): terminal status → singleton-path terminal event
+ * type. When persistSingleTaskUpdate PRESERVED a disk terminal status (e.g.
+ * `cancelled` written by crash-recovery while this worker was settling), the
+ * emitted event must match the PRESERVED record — emitting task.completed
+ * over a cancelled tasks.json entry recreates the event-log vs tasks.json
+ * divergence crash-recovery reconstructs from. Every terminal task status
+ * has a matching event type in TEAM_EVENT_TYPES; the lookup is total in
+ * practice, the undefined guard is defensive only.
+ */
+const TERMINAL_TASK_EVENT_TYPES: Readonly<Partial<Record<TeamTaskStatus, TeamEventType>>> = {
+	completed: "task.completed",
+	failed: "task.failed",
+	cancelled: "task.cancelled",
+	skipped: "task.skipped",
+	needs_attention: "task.needs_attention",
+};
 
 /**
  * Branch execution output — the set of variables produced by the
@@ -679,7 +699,15 @@ export async function finalizeTaskResult(ctx: TaskExecutionContext, execResult: 
 		await saveRunManifestAsync(manifest);
 		return persistSingleTaskUpdate(manifest, tasks, task, undefined, true);
 	});
-	upsertCrewAgent(manifest, recordFromTask(manifest, task, runtimeKind));
+	// R6-1 (DR-03): persistSingleTaskUpdate may have PRESERVED a disk terminal
+	// status (e.g. cancelled by crash-recovery / stale-reconciler) instead of
+	// this worker's settle status. Everything downstream of the persist — the
+	// agents.json record, the terminal event, and the after_task_complete hook
+	// status — must match the PRESERVED record, never the in-memory verdict.
+	const persistedTask = tasks.find((t) => t.id === task.id) ?? task;
+	const preservedStatus: TeamTaskStatus | undefined = persistedTask.status !== task.status ? persistedTask.status : undefined;
+	const effectiveStatus: TeamTaskStatus = preservedStatus ?? task.status;
+	upsertCrewAgent(manifest, recordFromTask(manifest, persistedTask, runtimeKind));
 	// Execute task_result hook before emitting terminal event
 	const hookReport = await executeHook("task_result", {
 		runId: manifest.runId,
@@ -687,23 +715,35 @@ export async function finalizeTaskResult(ctx: TaskExecutionContext, execResult: 
 		cwd: manifest.cwd,
 	});
 	appendHookEvent(manifest, hookReport);
-	await appendEventAsync(manifest.eventsPath, {
-		type: error ? "task.failed" : noYield ? "task.needs_attention" : "task.completed",
-		runId: manifest.runId,
-		taskId: task.id,
-		message: error,
+	// R6-1: emit the terminal event for the PRESERVED status when one was
+	// preserved (task.cancelled over a cancelled record — never task.completed);
+	// otherwise the inferred settle event exactly as before.
+	const terminalEventType = TERMINAL_TASK_EVENT_TYPES[effectiveStatus];
+	if (terminalEventType !== undefined) {
 		// bug-026 sub-issue B: surface the classified fatal-fs cause (enospc/
 		// edquot/emfile/enfile) on the failure event so operators see "disk
 		// full" instead of a generic timeout diagnostic.
-		...(task.failureCause ? { data: { failureCause: task.failureCause } } : {}),
-	});
+		const eventData: Record<string, unknown> = {
+			...(task.failureCause ? { failureCause: task.failureCause } : {}),
+			...(preservedStatus ? { preservedFrom: task.status } : {}),
+		};
+		await appendEventAsync(manifest.eventsPath, {
+			type: terminalEventType,
+			runId: manifest.runId,
+			taskId: task.id,
+			// For a preserved terminal the disk record's error (the cancel
+			// reason) is the truthful message; otherwise the settle error.
+			message: preservedStatus ? (persistedTask.error ?? error) : error,
+			...(Object.keys(eventData).length > 0 ? { data: eventData } : {}),
+		});
+	}
 
 	// Execute after_task_complete lifecycle hook (non-blocking)
 	const afterTaskReport = await executeHook("after_task_complete", {
 		runId: manifest.runId,
 		taskId: task.id,
 		cwd: manifest.cwd,
-		status: error ? "failed" : noYield ? "needs_attention" : "completed",
+		status: effectiveStatus,
 	});
 	appendHookEvent(manifest, afterTaskReport);
 

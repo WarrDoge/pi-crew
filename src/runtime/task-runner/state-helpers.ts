@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { loadConfig } from "../../config/config.ts";
 import { flushPendingAtomicWrites } from "../../state/atomic-write.ts";
+import { isTerminalTaskStatus } from "../../state/contracts.ts";
 import { withRunLockSync } from "../../state/coordination/locks.ts";
 import { loadRunManifestById, saveRunTasksCoalesced } from "../../state/stores/state-store.ts";
 import type { TaskCheckpointState, TeamRunManifest, TeamTaskState } from "../../state/types.ts";
@@ -9,6 +10,87 @@ import { recordFromTask, upsertCrewAgent } from "../crew-agent-records.ts";
 
 export function updateTask(tasks: TeamTaskState[], updated: TeamTaskState): TeamTaskState[] {
 	return tasks.map((task) => (task.id === updated.id ? updated : task));
+}
+
+/**
+ * R6-1 + R6-4 (DR-03, 2026-10-16): field-level merge of the INCOMING task
+ * onto the DISK task at the persistSingleTaskUpdate merge point. BUG-028
+ * made DISK authoritative for SIBLING tasks; this extends disk authority to
+ * two fields of THIS task where the incoming runner snapshot is provably
+ * stale relative to another writer:
+ *
+ * R6-1 terminal-preserve — when the incoming status is TERMINAL and disk
+ * already holds a DIFFERENT terminal status (e.g. `cancelled` written by
+ * crash-recovery / stale-reconciler / external cancel while a detached
+ * worker was still settling), the disk terminal status + error are
+ * preserved (mirror of the coalesced cancelled branch,
+ * run-coalesced-task-group.ts:367, and the R13-S1 terminal-preserve class
+ * in team-tool api). Without this, a late worker settle overwrote the
+ * leader's cancellation with `completed` and post-execution then emitted
+ * task.completed after crew.run.orphan_cancelled — cancelled run holding a
+ * completed task, event-log vs tasks.json divergence. Incoming fields other
+ * than status/error (result artifacts, finishedAt, usage, …) are still taken
+ * from the incoming record — the worker DID run; only the terminal verdict
+ * is not ours to overwrite. Non-terminal disk status → incoming wins as
+ * before (normal settle path); incoming non-terminal → untouched (the
+ * heartbeat resurrect window is guarded upstream by live-executor's
+ * isCurrent disk-status check, R13-S1 style).
+ *
+ * R6-4 allocation merge — delegate budget accounting (crew-broker writes
+ * task.allocation.tokensSpent under the run lock: reserve = disk + reserved
+ * at admission, roll-up = − reserved + actual on the then-current base at
+ * completion) was a lost update vs the runner's ~1s heartbeat whole-record
+ * replace which carries the dispatch-time (pre-reserve) copy. Rule chosen:
+ * `tokensSpent = max(disk, incoming)`. Verification against the broker
+ * arithmetic (read before choosing — crew-broker.ts reserve ~:1575-1602,
+ * roll-up ~:1690-1708, P2-8c refund ~:1745): every broker write is computed
+ * off the then-current DISK base; each roll-up subtracts exactly the amount
+ * its own reserve previously added and adds back actual ∈ [0, reserved], so
+ * disk(t) ≥ any runner snapshot for snapshots that predate their reserves'
+ * roll-ups — and the runner NEVER writes allocation (zero writers in
+ * task-runner/team-runner; its in-memory copy is dispatch-time lineage that
+ * never saw a reserve). Hence max() degenerates to "disk wins" in every
+ * broker-consistent interleaving, AND self-heals two disk-corruption shapes
+ * verbatim-disk would not: (a) a pre-fix heartbeat that already clobbered a
+ * reserve down, (b) the P2-8c refund over-subtracting a reserve that never
+ * landed. The one theoretical max() hazard — a runner snapshot taken BETWEEN
+ * a reserve and its roll-up, then rolled up with actual < reserved — cannot
+ * occur today because no task-runner path reloads the in-memory task from
+ * disk mid-execution. `tokensGranted` is admission-authoritative write-once
+ * (broker passes it through verbatim) → disk wins verbatim. A heartbeat
+ * snapshot that lacks `allocation` entirely (pre-admission copy) keeps the
+ * disk allocation instead of deleting it — same lost-update class.
+ */
+function mergeTaskUpdateWithDisk(diskTasks: TeamTaskState[], incoming: TeamTaskState): TeamTaskState {
+	const diskTask = diskTasks.find((t) => t.id === incoming.id);
+	if (!diskTask) return incoming;
+
+	let effective = incoming;
+	// R6-1: incoming terminal vs disk DIFFERENT terminal → disk wins for the
+	// terminal verdict (status + error).
+	if (isTerminalTaskStatus(incoming.status) && isTerminalTaskStatus(diskTask.status) && diskTask.status !== incoming.status) {
+		effective = { ...incoming, status: diskTask.status, error: diskTask.error };
+	}
+
+	// R6-4: field-wise allocation merge (see docblock above for the max()
+	// derivation). Applies on every persist (heartbeat, checkpoint, terminal
+	// settle) — all runner paths carry the same stale dispatch-time copy.
+	const incomingAllocation = incoming.allocation;
+	const diskAllocation = diskTask.allocation;
+	if (diskAllocation && !incomingAllocation) {
+		// Heartbeat snapshot predates admission — keep the broker's accounting
+		// instead of deleting it via whole-record replace.
+		effective = { ...effective, allocation: diskAllocation };
+	} else if (diskAllocation && incomingAllocation) {
+		effective = {
+			...effective,
+			allocation: {
+				tokensGranted: diskAllocation.tokensGranted,
+				tokensSpent: Math.max(diskAllocation.tokensSpent ?? 0, incomingAllocation.tokensSpent ?? 0),
+			},
+		};
+	}
+	return effective;
 }
 
 /**
@@ -36,6 +118,12 @@ export function updateTask(tasks: TeamTaskState[], updated: TeamTaskState): Team
  * checkpoints stay in the 50ms coalesce window but drop ONLY the fsync
  * (durability "best-effort") — tasks.json is reconstructible from the
  * fsync'd event log, so a crash loses at most the un-flushed tail.
+ *
+ * R6-1/R6-4 (DR-03, 2026-10-16): the per-task merge is NOT an unconditional
+ * replace-by-id anymore — mergeTaskUpdateWithDisk (above) preserves a disk
+ * terminal status (vs a different incoming terminal) and merges
+ * `allocation.tokensSpent` with max(disk, incoming). The mtime CAS retry
+ * loop, the run lock, and the BUG-028 always-load-disk policy are unchanged.
  *
  * @param checkpointPhase - Optional checkpoint phase to include in the task state alongside the update.
  */
@@ -109,11 +197,13 @@ export function persistSingleTaskUpdate(
 				// stat, i.e. staleness acquired AFTER that baseline — not fallback
 				// staleness that predates it. Loading disk here makes sibling
 				// state authoritative (matching mergeUnitResult / bug-027 policy)
-				// while `updated` still wins for THIS task via updateTask.
+				// while `updated` still wins for THIS task via updateTask — EXCEPT
+				// where R6-1/R6-4 (DR-03) preserve disk authority for the terminal
+				// verdict and delegate budget accounting (mergeTaskUpdateWithDisk).
 				// fallbackTasks remains the fallback when the run state is absent
 				// (fresh run, manifest not yet on disk).
 				const latest = loadRunManifestById(manifest.cwd, manifest.runId)?.tasks ?? fallbackTasks;
-				merged = updateTask(latest, taskWithCheckpoint);
+				merged = updateTask(latest, mergeTaskUpdateWithDisk(latest, taskWithCheckpoint));
 
 				// F2: collapsed from 3 redundant statSync calls into 1. The previous
 				// implementation re-checked mtime twice more after load and before
