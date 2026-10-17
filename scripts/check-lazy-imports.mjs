@@ -124,7 +124,12 @@ const BUDGETS = {
 		// DR-03 (2026-10-16): 526 → 527 — broker/protocol/msg-send-targets.ts (pure
 		// D9/§15.2 recipient matrix extracted from crew-broker.ts for the wc-gate;
 		// statically imported — msg.send is a request-scoped path, not cold-start).
-		maxFiles: 527,
+		// Waves 2-4 (2026-10-17): 527 → 528 — broker/protocol/connection-state.ts
+		// enters the VALUE graph (outbound-queue trio + caps moved from
+		// crew-broker.ts for the wc-gate; it was previously type-only). The two
+		// wc-gate extractions (this + root-gate/settings-enum merges in the other
+		// direction) keep crew-broker.ts ≤ 2000 with pure moves, no new modules.
+		maxFiles: 528,
 		forbid: ["test/", "scripts/", "docs/", "dist/"],
 	},
 };

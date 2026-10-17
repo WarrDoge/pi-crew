@@ -206,3 +206,13 @@ export function stripMcpExtensions(base: LoadedExtensionsShape): LoadedExtension
 		],
 	};
 }
+
+/**
+ * R1-M2 part 2 (Wave-3): pure fail-closed decision — when G2 MCP enforcement
+ * could not be armed (SDK loader missing / degraded), a NON-PERMITTED role
+ * must ABORT the live-session spawn instead of warn+proceed (fail-open);
+ * permitted roles keep the warn+proceed behavior (their access is intended).
+ */
+export function shouldFailClosedMcpEnforcement(mcpPermitted: boolean, degradationReason: string | undefined): boolean {
+	return degradationReason !== undefined && !mcpPermitted;
+}

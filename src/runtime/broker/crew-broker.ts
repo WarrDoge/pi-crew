@@ -64,6 +64,13 @@ import { type DelegateEventTarget, type DelegateEventType, recordDelegateEvent }
 import { promoteShadowToRunning } from "./delegate/shadow-lifecycle.ts";
 import { fanoutMailboxMessage } from "./mailbox-observer/mailbox-fanout.ts";
 import type { CrewBrokerOptions, ServerConnection } from "./protocol/connection-state.ts";
+// Outbound-queue management + caps (wc-gate move — bodies in protocol/connection-state.ts)
+import {
+	handleOutboundOverflowFrame,
+	type OutboundAdmission,
+	type OutboundQueueHooks,
+	writeOrQueueFrame,
+} from "./protocol/connection-state.ts";
 import { handleEventsSince } from "./protocol/events-replay.ts";
 import { DEFAULT_LOCK_BUSY_RETRY_DELAYS_MS, type LockBusyOutcome, withRunLockBusyRetry } from "./protocol/lock-busy.ts";
 import { loadRunForHello } from "./protocol/manifest-loader.ts";
@@ -106,37 +113,6 @@ const HELLO_DEADLINE_MS = 1_000;
  *  TEAM_TERMINAL_RUN_STATUSES on purpose: "blocked" is recoverable, so a
  *  blocked run still authenticates normally. */
 const STALE_RUN_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
-
-/** Default per-connection outbound queue cap (events). */
-const DEFAULT_OUTBOUND_QUEUE_CAP = 256;
-
-/** R8-M1 (2026-10-17): default per-connection queued-BYTES cap. The frame cap
- *  alone lets a subscribed-but-never-reading client buffer 256 × 256 KiB ≈
- *  64 MiB in-app before the R6-5 typed close engages (kernel backpressure
- *  shifts frames off the queue, so the count rarely grows — the BYTES the
- *  process holds do). ~4 MiB bounds a stuck connection's memory while a
- *  healthy LAN client drains comfortably inside it. */
-const DEFAULT_OUTBOUND_QUEUE_BYTES = 4 * 1024 * 1024;
-
-/** R6-5 (2026-10-16): typed protocol close-reason sent as a best-effort
- *  `protocol.close` event frame (direct write, jumps the saturated queue)
- *  before the connection is closed after a fanout/event frame was dropped
- *  at the queue cap. Clients observe the reason, reconnect, and replay via
- *  `events.since` (Phase 1.5). */
-export const OUTBOUND_OVERFLOW_RESYNC_CLOSE_REASON = "outbound-overflow-resync";
-
-/** R6-5: admission class for an outbound frame.
- *  - `false`  — fanout/event class: drop-newest at cap → resync close.
- *  - `true`   — close-reason class: bypass the cap, attempt an immediate
- *    direct write (existing `sendErrorAndClose` behavior).
- *  - `"response"` — request-response class (sendResult/sendError acks):
- *    bypass the drop-newest cap but stay IN the queue (ordering preserved,
- *    backpressure honored). Bounded by the client's in-flight request count
- *    — one response frame per request — so it can never storm the way a
- *    fanout burst can. Kept a `boolean | "response"` union (not a fresh
- *  enum) so the external FanoutWriters interface (mailbox-fanout.ts) keeps
- *  its `(conn, buf, force: boolean)` shape. */
-type OutboundAdmission = boolean | "response";
 
 export class CrewBroker {
 	private readonly options: Required<Pick<CrewBrokerOptions, "sessionId" | "enabled" | "waitMethodsEnabled" | "nestingEnabled">> &
@@ -864,106 +840,19 @@ export class CrewBroker {
 	}
 
 	private writeOrQueue(conn: ServerConnection, buf: Buffer, force: OutboundAdmission): void {
-		if (conn.closed) return;
-		const cap = this.options.outboundQueueCap ?? DEFAULT_OUTBOUND_QUEUE_CAP;
-		// R8-M1: queued-BYTES cap alongside the frame cap. Few-but-large frames
-		// (a slow reader behind a 256 KiB fanout) never trip a 256-frame cap;
-		// without this the process buffers up to ~64 MiB per stuck connection.
-		// Overflow takes the same typed-close path as the frame cap (resync +
-		// reconnect + replay) — applied to ALL admission classes because the
-		// connection is about to close anyway and the alternative is unbounded
-		// memory, not a delivered response.
-		const bytesCap = this.options.outboundQueueBytesCap ?? DEFAULT_OUTBOUND_QUEUE_BYTES;
-		if (conn.queuedBytes + buf.length > bytesCap) {
-			this.handleOutboundOverflow(conn);
-			return;
-		}
-		if (conn.outbound.length >= cap) {
-			if (force === "response") {
-				// R6-5(a): response frames queue PAST the cap instead of being
-				// drop-newest'd. Bounded: at most one response per in-flight
-				// request, and the client's request pipeline is serial — this can
-				// never grow unbounded the way a fanout burst can. Ordering is
-				// preserved (pushed at the tail; drainOutbound honors backpressure).
-				conn.outbound.push(buf);
-				conn.queuedBytes += buf.length;
-				this.drainOutbound(conn);
-				return;
-			}
-			if (force) {
-				// Forced sends (e.g. close-reason) bypass the cap and attempt
-				// to flush directly; if the socket is busy they may still drop.
-				try {
-					conn.socket.write(buf);
-				} catch {
-					/* socket may have closed; the close handler will sweep. */
-				}
-				return;
-			}
-			// R6-5(b): fanout/event frame dropped at cap (drop-newest). The old
-			// `needsResync` marker was write-only (set, never read) — the claimed
-			// "pause + client notices" recovery did not exist, so live frames
-			// were silently dropped for the connection's remaining lifetime.
-			// Now the drop CLOSES the connection with a typed close-reason so
-			// the client reconnects and replays (events.since / msg.inbox).
-			this.handleOutboundOverflow(conn);
-			return;
-		}
-		conn.outbound.push(buf);
-		conn.queuedBytes += buf.length;
-		this.drainOutbound(conn);
+		writeOrQueueFrame(conn, buf, force, this.options, this.outboundHooks());
 	}
 
-	private drainOutbound(conn: ServerConnection): void {
-		while (conn.outbound.length > 0) {
-			const buf = conn.outbound[0];
-			if (buf === undefined) break;
-			// Try the write; if it returns false, wait for drain before pushing more.
-			try {
-				const ok = conn.socket.write(buf);
-				if (!ok) {
-					// Backpressure — re-arm on drain event.
-					conn.socket.once("drain", () => {
-						if (!conn.closed) this.drainOutbound(conn);
-					});
-					return;
-				}
-			} catch {
-				// Write failed — close the connection (we already had it open).
-				this.closeConnection(conn);
-				return;
-			}
-			conn.outbound.shift();
-			conn.queuedBytes -= buf.length;
-			conn.outboundSeq += 1;
-		}
-	}
-
-	/** R6-5(b): a fanout/event frame was dropped at the outbound queue cap.
-	 *  Close the connection with a typed protocol close-reason so the client
-	 *  can reconnect + replay instead of silently missing live frames
-	 *  forever. The reason frame is written DIRECTLY (jumps the saturated
-	 *  queue — those frames are already doomed once we close) and delivery
-	 *  is best-effort, exactly like `sendErrorAndClose`. */
+	/** R6-5(b): fanout/event frame dropped at cap → typed resync close (moved body in connection-state.ts). */
 	private handleOutboundOverflow(conn: ServerConnection): void {
-		// Single-flight: fanoutMailboxMessage iterates a snapshot of the run's
-		// connections, so one burst can re-enter here for an already-overflowing
-		// conn before `closeConnection`'s `closed` guard becomes visible. The
-		// flag is the "close already initiated" bit (its only read).
-		if (conn.needsResync) return;
-		conn.needsResync = true;
-		logInternalError(
-			"crew-broker.outbound.overflow",
-			new Error("outbound queue overflow — closing connection for resync"),
-			`sessionId=${this.options.sessionId} runId=${conn.runId ?? "?"} queued=${conn.outbound.length} seq=${conn.outboundSeq}`,
-		);
-		try {
-			const buf = encodeBrokerFrame({ event: "protocol.close", data: { reason: OUTBOUND_OVERFLOW_RESYNC_CLOSE_REASON } });
-			conn.socket.write(buf);
-		} catch {
-			/* socket may be dead; closeConnection below sweeps regardless */
-		}
-		this.closeConnection(conn);
+		handleOutboundOverflowFrame(conn, this.options, this.outboundHooks());
+	}
+
+	private outboundHooks(): OutboundQueueHooks {
+		return {
+			onOverflow: (conn) => this.handleOutboundOverflow(conn),
+			onClose: (conn) => this.closeConnection(conn),
+		};
 	}
 
 	// Phase 1: msg.send + msg.inbox handlers

@@ -1,4 +1,5 @@
 import type { UsageState } from "../../state/types.ts";
+import { logInternalError } from "../../utils/internal-error.ts";
 import { usageFromValue } from "../session-usage.ts";
 import { trackTaskUsage } from "../usage-tracker.ts";
 
@@ -9,11 +10,11 @@ import { trackTaskUsage } from "../usage-tracker.ts";
  * ledger — the runtime module keeps only the call sites.
  */
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
+export function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
-function isString(value: unknown): value is string {
+export function isString(value: unknown): value is string {
 	return typeof value === "string";
 }
 
@@ -90,4 +91,67 @@ export function trackUsageFromMessageEndEvent(taskId: string, event: unknown): v
 		cacheRead: usage.cacheRead,
 		cost: usage.cost,
 	});
+}
+
+/**
+ * R6-9 (DR-03 round-6): best-effort usage extraction for the fault/watchdog
+ * escape returns. The success return reports usageFromSessionStats(session as SessionWithStats | undefined),
+ * but the fault/watchdog catch paths previously carried NO usage — whenever
+ * embeddedWorkers routed work to the embedded tier and the task faulted, the
+ * burned turns vanished from the budget (under-count). The session may be
+ * disposed or partially unusable after the fault, so stats collection is
+ * guarded — it can never turn a fault into a crash. Returns undefined when no
+ * usable stats surface exists.
+ */
+export function faultPathUsage(session: SessionWithStats | undefined): UsageState | undefined {
+	try {
+		return usageFromSessionStats(session as SessionWithStats | undefined);
+	} catch (error) {
+		logInternalError("live-session.fault-usage-stats", error, "session stats unavailable on fault path");
+		return undefined;
+	}
+}
+
+/**
+ * Type-safe extractor for tool name from streaming events.
+ * Handles various event structures: { tool: { name } }, { toolName }, { name }.
+ */
+export function extractToolName(obj: Record<string, unknown> | undefined): string | undefined {
+	if (!obj) return undefined;
+	const tool = asRecord(obj.tool);
+	if (isString(tool?.name)) return tool.name;
+	if (isString(obj.toolName)) return obj.toolName;
+	if (isString(obj.name)) return obj.name;
+	return undefined;
+}
+
+export function textFromContent(content: unknown): string[] {
+	if (typeof content === "string") return [content];
+	if (!Array.isArray(content)) return [];
+	return content.flatMap((part) => {
+		const obj = asRecord(part);
+		if (!obj) return [];
+		if (obj.type === "text" && typeof obj.text === "string") return [obj.text];
+		if (typeof obj.content === "string") return [obj.content];
+		return [];
+	});
+}
+
+export function eventText(event: unknown): string[] {
+	const obj = asRecord(event);
+	if (!obj) return [];
+	const text: string[] = [];
+	if (typeof obj.text === "string") text.push(obj.text);
+	text.push(...textFromContent(obj.content));
+	const message = asRecord(obj.message);
+	if (message) text.push(...textFromContent(message.content));
+	return text.filter((entry) => entry.trim());
+}
+
+export function finalAssistantText(event: unknown): string[] {
+	const obj = asRecord(event);
+	if (obj?.type !== "message_end") return [];
+	const message = asRecord(obj.message);
+	if (message?.role !== "assistant") return [];
+	return textFromContent(message.content);
 }

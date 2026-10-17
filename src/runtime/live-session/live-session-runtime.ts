@@ -13,7 +13,7 @@ import type { WorkflowStep } from "../../workflows/workflow-config.ts";
 import { BoundedTail } from "../compaction/compact-stages/bounded-tail.ts";
 import { createIrcTool } from "../custom-tools/irc-tool.ts";
 import { createSubmitResultTool } from "../custom-tools/submit-result-tool.ts";
-import { g2EnforcementDegradationReason, mcpPermittedForRole, stripMcpExtensions } from "../mcp-proxy.ts";
+import { g2EnforcementDegradationReason, mcpPermittedForRole, shouldFailClosedMcpEnforcement, stripMcpExtensions } from "../mcp-proxy.ts";
 import {
 	availableModelInfosFromRegistry,
 	buildConfiguredModelRouting,
@@ -87,7 +87,16 @@ import {
 import { hasLiveControlRealtimeListeners, subscribeLiveControlRealtime } from "./live-control-realtime.ts";
 import { buildExtensionBridge } from "./live-extension-bridge.ts";
 import { collectLiveSessionHealth, formatLiveSessionDiagnostics } from "./live-session-health.ts";
-import { type SessionStatsLike, trackUsageFromMessageEndEvent, usageFromSessionStats } from "./usage-bridge.ts";
+import {
+	asRecord,
+	eventText,
+	extractToolName,
+	faultPathUsage,
+	finalAssistantText,
+	type SessionStatsLike,
+	trackUsageFromMessageEndEvent,
+	usageFromSessionStats,
+} from "./usage-bridge.ts";
 
 /**
  * Module-scoped latch for the optional peer dependency import. When N
@@ -435,14 +444,6 @@ function appendTranscript(filePath: string | undefined, event: unknown): void {
 	appendBatchedJsonlLine(filePath, `${JSON.stringify(redactSecrets(event))}\n`);
 }
 
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
-}
-
-function isString(value: unknown): value is string {
-	return typeof value === "string";
-}
-
 /**
  * U3 test seam: register a caller-supplied pi-ai `Provider` on the created
  * session's ModelRuntime right after creation. Passive by design — no faux
@@ -461,50 +462,6 @@ function applyModelProviderOverride(session: LiveSessionLike | undefined, provid
 	} catch (error) {
 		logInternalError("live-session.model-provider-override", error, "registerNativeProvider failed");
 	}
-}
-
-/**
- * Type-safe extractor for tool name from streaming events.
- * Handles various event structures: { tool: { name } }, { toolName }, { name }.
- */
-function extractToolName(obj: Record<string, unknown> | undefined): string | undefined {
-	if (!obj) return undefined;
-	const tool = asRecord(obj.tool);
-	if (isString(tool?.name)) return tool.name;
-	if (isString(obj.toolName)) return obj.toolName;
-	if (isString(obj.name)) return obj.name;
-	return undefined;
-}
-
-function textFromContent(content: unknown): string[] {
-	if (typeof content === "string") return [content];
-	if (!Array.isArray(content)) return [];
-	return content.flatMap((part) => {
-		const obj = asRecord(part);
-		if (!obj) return [];
-		if (obj.type === "text" && typeof obj.text === "string") return [obj.text];
-		if (typeof obj.content === "string") return [obj.content];
-		return [];
-	});
-}
-
-function eventText(event: unknown): string[] {
-	const obj = asRecord(event);
-	if (!obj) return [];
-	const text: string[] = [];
-	if (typeof obj.text === "string") text.push(obj.text);
-	text.push(...textFromContent(obj.content));
-	const message = asRecord(obj.message);
-	if (message) text.push(...textFromContent(message.content));
-	return text.filter((entry) => entry.trim());
-}
-
-function finalAssistantText(event: unknown): string[] {
-	const obj = asRecord(event);
-	if (obj?.type !== "message_end") return [];
-	const message = asRecord(obj.message);
-	if (message?.role !== "assistant") return [];
-	return textFromContent(message.content);
 }
 
 /**
@@ -891,35 +848,6 @@ class BoundedSeenControlRequestIdSet extends Set<string> {
 
 /** @internal — test seam for the C1 cap (see live-agent-control-dedupe tests). */
 export const __test__BoundedSeenControlRequestIdSet = BoundedSeenControlRequestIdSet;
-
-/**
- * R6-9 (DR-03 round-6): best-effort usage extraction for the fault/watchdog
- * escape returns. The success return reports usageFromSessionStats(session),
- * but the fault/watchdog catch paths previously carried NO usage — whenever
- * embeddedWorkers routed work to the embedded tier and the task faulted, the
- * burned turns vanished from the budget (under-count). The session may be
- * disposed or partially unusable after the fault, so stats collection is
- * guarded — it can never turn a fault into a crash. Returns undefined when no
- * usable stats surface exists.
- */
-function faultPathUsage(session: LiveSessionLike | undefined): UsageState | undefined {
-	try {
-		return usageFromSessionStats(session);
-	} catch (error) {
-		logInternalError("live-session.fault-usage-stats", error, "session stats unavailable on fault path");
-		return undefined;
-	}
-}
-
-/**
- * R1-M2 part 2 (Wave-3): pure fail-closed decision — when G2 MCP enforcement
- * could not be armed (SDK loader missing / degraded), a NON-PERMITTED role
- * must ABORT the live-session spawn instead of warn+proceed (fail-open);
- * permitted roles keep the warn+proceed behavior (their access is intended).
- */
-export function shouldFailClosedMcpEnforcement(mcpPermitted: boolean, degradationReason: string | undefined): boolean {
-	return degradationReason !== undefined && !mcpPermitted;
-}
 
 export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<LiveSessionRunResult> {
 	// Cold-start race fix: ensure the hot module graph is warm before touching
