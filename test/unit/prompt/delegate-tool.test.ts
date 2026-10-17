@@ -159,7 +159,12 @@ test("timeout: no mailbox entry before deadline → DELEGATE_TIMED_OUT_RESULT (c
 		});
 		const res = await runDelegate(tool, { prompt: "x" });
 		assert.equal(res.details.status, "timed-out");
-		assert.equal(resultText(res as { content: Array<{ type: string; text?: string }> }), DELEGATE_TIMED_OUT_RESULT);
+		// R9-F1 (wave-2a): the timed-out notice now CARRIES a recovery hint after
+		// the pinned prefix (task inbox / lastResult) — behavior change from the
+		// bare DELEGATE_TIMED_OUT_RESULT pin.
+		const text = resultText(res as { content: Array<{ type: string; text?: string }> });
+		assert.ok(text.startsWith(DELEGATE_TIMED_OUT_RESULT), `text=${text}`);
+		assert.ok(text.includes("task inbox"), `text=${text}`);
 		assert.equal(DELEGATE_TIMED_OUT_RESULT, "[delegate timed out]");
 	} finally {
 		s.cleanup();

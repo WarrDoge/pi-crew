@@ -118,14 +118,21 @@ test("R2-H1 orphan reconcile tick retains all sibling tasks; only the zombie is 
 		// R2-H1 pin: the caller must persist the FULL array (persistTasks), not
 		// the filtered repairedTasks subset — pre-fix, tasks.json held ONLY
 		// task_b and the pid-ALIVE task_a + completed task_c records VANISHED.
-		// (R2-M-A1, separate finding NOT in wave-1 scope: the individual-stale
-		// repair still cancels the pid-ALIVE task_a too — repairStaleRun maps
-		// every non-terminal task; round-2 validation N4 pinned this survives
-		// the R2-H1 fix. We pin record RETENTION here, not survival semantics.)
+		// (R2-M-A1, FIXED in wave-2a (2026-10-17): the individual-stale branch now
+		// cancels ONLY the stale subset — behavior change vs the v0.11.23 pin, which
+		// asserted task_a "survives the write" but AS cancelled. task_a (pid-ALIVE)
+		// now stays RUNNING — the branch's own contract ("repair only the zombie
+		// tasks, not the whole run"). Record retention of all 3 still asserted.)
 		const after = JSON.parse(fs.readFileSync(path.join(runDir, "tasks.json"), "utf-8")) as TeamTaskState[];
 		const byId = new Map(after.map((t) => [t.id, t]));
 		assert.equal(after.length, 3, `tasks.json must retain ALL 3 tasks (got ${after.length}: ${after.map((t) => t.id).join(",")})`);
 		assert.ok(byId.has("task_a"), "pid-ALIVE sibling record must survive the write (R2-H1 data-loss fix)");
+		assert.equal(
+			byId.get("task_a")?.status,
+			"running",
+			"R2-M-A1 (wave-2a): pid-ALIVE sibling must stay RUNNING in the individual-stale branch",
+		);
+		assert.equal(byId.get("task_a")?.finishedAt, undefined, "R2-M-A1: pid-ALIVE sibling is not finished");
 		assert.equal(byId.get("task_b")?.status, "cancelled", "zombie must be cancelled");
 		assert.ok(byId.get("task_b")?.finishedAt, "cancelled zombie gets finishedAt");
 		assert.equal(byId.get("task_c")?.status, "completed", "completed sibling must stay completed");

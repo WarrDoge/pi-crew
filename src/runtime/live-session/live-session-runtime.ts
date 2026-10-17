@@ -1471,12 +1471,16 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 		};
 		unsubscribeControlRealtime = subscribeLiveControlRealtime((request) => {
 			if (!isCurrent() || request.runId !== input.manifest.runId || request.taskId !== input.task.id || !session) return;
+			// R3A-M1: the applier itself now records failures on the request, but a
+			// rejection must never reach unhandledRejection — catch + log here too.
 			void applyLiveAgentControlRequest({
 				request,
 				taskId: input.task.id,
 				agentId,
 				session,
 				seenRequestIds: seenControlRequestIds,
+			}).catch((error) => {
+				logInternalError("live-session.control-realtime-apply", error, `agentId=${agentId}`);
 			});
 		});
 		await pollControl();
@@ -1488,7 +1492,11 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 		// path → keep the faster 500ms cadence.
 		controlTimer = setInterval(
 			() => {
-				if (isCurrent()) void pollControl();
+				// R3A-M1: fire-and-forget poll must never reject unhandled.
+				if (isCurrent())
+					void pollControl().catch((error) => {
+						logInternalError("live-session.control-poll", error, `agentId=${agentId}`);
+					});
 			},
 			hasLiveControlRealtimeListeners() ? 1000 : 500,
 		);
@@ -1525,14 +1533,21 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 						trackLiveAgentTurnEnd(agentId);
 						if (maxTurns !== undefined && !softLimitReached && turnCount >= maxTurns) {
 							softLimitReached = true;
-							void session?.steer?.("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
+							// R3A-M1: rejection here would crash the host session.
+							void session
+								?.steer?.("You have reached your turn limit. Wrap up immediately — provide your final answer now.")
+								.catch((error) => {
+									logInternalError("live-session.turn-limit-steer", error, `agentId=${agentId}`);
+								});
 						} else if (maxTurns !== undefined && softLimitReached && turnCount >= maxTurns + graceTurns) {
 							// U11 mitigation (c): abort + bounded watchdog — if the prompt does
 							// not settle within the grace, dispose the session (drop-reference,
 							// U4 escape discipline) and fail via the escape signal.
 							if (embedded && !embeddedWatchdogFired) {
 								embeddedWatchdogFired = true;
-								void session?.abort?.();
+								void Promise.resolve(session?.abort?.()).catch((error: unknown) => {
+									logInternalError("live-session.watchdog-abort", error, `agentId=${agentId}`);
+								});
 								embeddedWatchdogTimer = armTurnWatchdog({
 									agentId,
 									maxTurns,
@@ -1542,7 +1557,9 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 									escalate: (error: Error) => faultSignalReject?.(error),
 								});
 							} else {
-								void session?.abort?.();
+								void Promise.resolve(session?.abort?.()).catch((error: unknown) => {
+									logInternalError("live-session.watchdog-abort", error, `agentId=${agentId}`);
+								});
 							}
 						}
 					}
@@ -1581,7 +1598,11 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 		}
 		// Round 27 (BUG 4): named abort handler (removed in finally below).
 		onSignalAbort = (): void => {
-			void session?.abort?.();
+			// R3A-M1: abort rejection inside a signal handler must not become an
+			// unhandledRejection — catch + log.
+			void Promise.resolve(session?.abort?.()).catch((error: unknown) => {
+				logInternalError("live-session.signal-abort", error, `agentId=${agentId}`);
+			});
 		};
 		if (input.signal) {
 			if (input.signal.aborted) await session.abort?.();

@@ -17,7 +17,7 @@ import { aggregateUsage } from "../state/usage.ts";
 import { readJsonFileCoalesced } from "../utils/file-coalescer.ts";
 import { logInternalError } from "../utils/internal-error.ts";
 import { resolveRealContainedPath } from "../utils/safe-paths.ts";
-import { sanitizeLine, truncate, visibleWidth } from "../utils/visual.ts";
+import { sanitizeLine, sanitizeUntrustedLine, truncate, visibleWidth } from "../utils/visual.ts";
 import type { InteractiveComponent } from "./component.ts";
 import { renderAgentsPane } from "./dashboard-panes/agents-pane.ts";
 import { summarizeTerminalReason } from "./dashboard-panes/cancellation-pane.ts";
@@ -398,7 +398,9 @@ function agentPreviewLine(agent: CrewAgentRecord, task: TeamTaskState | undefine
 	// GUARD (M4, §4): agents.json records are NOT schema-validated at read time,
 	// so every interpolated field needs a fallback — `${agent.role}${ACTIVE}${agent.agent}`
 	// printed `undefined->undefined` for a partially-written record.
-	return sanitizeLine(
+	// R4-B1: agent records are worker-adjacent untrusted data — untrusted
+	// sanitizer (OSC/APC stripped, non-SGR CSI dropped) before theme wrap.
+	return sanitizeUntrustedLine(
 		`Agent: ${icon} ${agent.taskId ?? "?"} ${agent.role ?? "?"}${ACTIVE}${agent.agent ?? "?"}${stats.length ? ` · ${stats.join(" · ")}` : ""}${recent ? ` ⎿ ${recent}` : ""}`,
 	);
 }
@@ -1044,7 +1046,7 @@ export class RunDashboard implements DashboardComponent {
 						if (filteredPane.length > 0) {
 							lines.push(section(this.activePane));
 							for (const line of filteredPane.slice(0, 8)) {
-								lines.push(colorizeStatusGlyphs(row(truncate(sanitizeLine(line), budget)), this.theme));
+								lines.push(colorizeStatusGlyphs(row(truncate(sanitizeUntrustedLine(line), budget)), this.theme));
 							}
 						}
 
@@ -1104,7 +1106,7 @@ export class RunDashboard implements DashboardComponent {
 								}),
 					);
 					for (const line of paneLines.filter((l) => l && l.trim() !== "").slice(0, SCHEDULES_PANE_MAX_LINES)) {
-						lines.push(colorizeStatusGlyphs(row(truncate(sanitizeLine(line), budget)), this.theme));
+						lines.push(colorizeStatusGlyphs(row(truncate(sanitizeUntrustedLine(line), budget)), this.theme));
 					}
 					if (this.scheduleDeleteArmed) {
 						const victim = jobs[Math.min(this.scheduleSelected, jobs.length - 1)];

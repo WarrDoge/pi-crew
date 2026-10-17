@@ -11,6 +11,7 @@ import { sequencePath } from "../state/event-log/event-log.ts";
 import { loadPlanRecords, planFilePath } from "../state/stores/plan-store.ts";
 import { loadRunManifestById, loadRunManifestByIdAsync } from "../state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../state/types.ts";
+import { sanitizeUntrustedLine } from "../utils/visual.ts";
 import { extractDwfPhaseState } from "./dwf-phase-display.ts";
 import { type EventsStateSource, eventsStateSource } from "./events-state-source.ts";
 import { runEventBus } from "./run-event-bus.ts";
@@ -372,7 +373,7 @@ function recentOutputLines(manifest: TeamRunManifest, agents: CrewAgentRecord[],
 		return outputPath ? tailLines(outputPath, limit) : [];
 	});
 	return [...fromProgress, ...fromFiles]
-		.map((line) => line.replace(/\s+/g, " ").trim())
+		.map((line) => sanitizeUntrustedLine(line).replace(/\s+/g, " ").trim())
 		.filter(Boolean)
 		.slice(-limit);
 }
@@ -387,7 +388,7 @@ async function recentOutputLinesAsync(manifest: TeamRunManifest, agents: CrewAge
 	);
 	const fromFiles = fromFilesArrays.flat();
 	return [...fromProgress, ...fromFiles]
-		.map((line) => line.replace(/\s+/g, " ").trim())
+		.map((line) => sanitizeUntrustedLine(line).replace(/\s+/g, " ").trim())
 		.filter(Boolean)
 		.slice(-limit);
 }

@@ -31,8 +31,14 @@
  *                             event-log.ts) so sync flush handlers run first.
  *   - uncaughtException/unhandledRejection → setImmediate kick, never swallow:
  *                             we add no output and no exit; existing pi-crew
- *                             fatal handlers already own crash reporting (and
- *                             already suppress Node's default, see event-log).
+ *                             fatal handlers own crash reporting. NOTE
+ *                             (R3A-M1, 2026-10-17): they do NOT suppress —
+ *                             event-log's unhandledRejection handler re-throw
+ *                             keeps the process-fatal default, so a stray
+ *                             rejection still kills the host. Call sites must
+ *                             not rely on suppression existing; guard their
+ *                             own fire-and-forget promises (see
+ *                             live-agent-control.ts / live-session-runtime.ts).
  */
 
 import { logInternalError } from "../../utils/internal-error.ts";

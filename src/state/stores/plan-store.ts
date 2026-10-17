@@ -58,6 +58,31 @@ export function loadPlanRecords(manifest: TeamRunManifest): PlanRecord[] {
 	}
 }
 
+/** R5-M-B4 (2026-10-17): mutation-site strict read. `loadPlanRecords` must
+ *  keep its public degrade-to-[] contract (readers never throw), but a
+ *  mutation that feeds a locked FULL-OVERWRITE (writePlanFile replaces the
+ *  entire revisions array) must NOT proceed on a [] synthesized from a
+ *  read/parse fault — the write would erase the whole v1-window lineage.
+ *  ENOENT is a legitimate empty store (first write); every other error
+ *  THROWS so the caller skips this cycle instead of wiping plans.json. */
+function loadPlanRecordsStrict(manifest: TeamRunManifest): PlanRecord[] {
+	const filePath = planFilePath(manifest);
+	try {
+		const raw = fs.readFileSync(filePath, "utf-8");
+		const parsed = JSON.parse(raw) as Partial<PlanFile>;
+		if (!parsed || !Array.isArray(parsed.revisions)) return [];
+		return parsed.revisions.filter((r): r is PlanRecord => Boolean(r?.id && typeof r.version === "number"));
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+		logInternalError(
+			"plan-store.read-failed-mutation-skipped",
+			err instanceof Error ? err : new Error(String(err)),
+			`run=${manifest.runId}`,
+		);
+		throw new Error(`plan-store: plans.json unreadable (${(err as Error).message}) — refusing to overwrite existing revisions`);
+	}
+}
+
 /** Current revision = manifest.plan pointer when resolvable; else the highest
  *  version (benign crash-window fallback, header note). */
 export function getCurrentPlanRecord(manifest: TeamRunManifest): PlanRecord | undefined {
@@ -122,7 +147,11 @@ function assertRecordWellFormed(record: PlanRecord): void {
  */
 export function appendPlanRevision(manifest: TeamRunManifest, record: PlanRecord): PlanRecord {
 	return withRunLockSync(manifest, () => {
-		const revisions = loadPlanRecords(manifest);
+		// R5-M-B4: strict read — a read/parse fault must NOT degrade to [] here:
+		// [] is indistinguishable from "first revision" and the full-overwrite
+		// below would then erase the whole lineage (loadPlanRecordsStrict throws
+		// instead, skipping this mutation cycle).
+		const revisions = loadPlanRecordsStrict(manifest);
 		if (revisions.length === 0) {
 			if (record.version !== 1) throw new Error(`plan-store: first revision must be v1, got v${record.version}`);
 			if (record.revisionOf) throw new Error("plan-store: first revision must not set revisionOf");

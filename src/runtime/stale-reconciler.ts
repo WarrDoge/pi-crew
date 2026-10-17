@@ -415,10 +415,22 @@ export function hasLiveRunClaim(runId: string, manifest: TeamRunManifest): boole
 	return false;
 }
 
-function repairStaleRun(manifest: TeamRunManifest, tasks: TeamTaskState[], reason: string): TeamTaskState[] {
+function repairStaleRun(
+	manifest: TeamRunManifest,
+	tasks: TeamTaskState[],
+	reason: string,
+	// R2-M-A1 (2026-10-17): when set, ONLY these task ids are cancelled — used
+	// by the no_pid_individual_stale_task branch, whose contract (and comment)
+	// says "repair only the zombie subset, not the whole run": cancelling
+	// pid-ALIVE workers there destroyed healthy siblings in the SAME run.
+	onlyTaskIds?: Set<string>,
+): TeamTaskState[] {
 	const now = new Date().toISOString();
 	const repairedTasks = tasks.map((task) => {
-		if (task.status === "running" || task.status === "queued" || task.status === "waiting") {
+		if (
+			(onlyTaskIds === undefined || onlyTaskIds.has(task.id)) &&
+			(task.status === "running" || task.status === "queued" || task.status === "waiting")
+		) {
 			return {
 				...task,
 				status: "cancelled" as const,
@@ -571,7 +583,13 @@ export function reconcileStaleRun(manifest: TeamRunManifest, tasks: TeamTaskStat
 		// ALL tasks are zombies, while this path repairs only the zombie
 		// subset when some tasks are still healthy.
 		if (staleTaskIds.length > 0) {
-			const repaired = repairStaleRun(manifest, tasks, "no_pid_individual_stale_task");
+			// R2-M-A1 (2026-10-17): cancel ONLY the stale subset. The pre-fix code
+			// called repairStaleRun unscoped, which cancelled EVERY running/queued/
+			// waiting task in the run — including pid-ALIVE workers the branch was
+			// supposed to leave alone (pinned by stale-reconciler-r2h1-retention,
+			// updated in the same wave: task_a now stays running).
+			const staleSet = new Set(staleTaskIds);
+			const repaired = repairStaleRun(manifest, tasks, "no_pid_individual_stale_task", staleSet);
 			// Only return the individually repaired tasks in detail
 			return {
 				runId,

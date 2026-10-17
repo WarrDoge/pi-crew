@@ -292,6 +292,43 @@ function setAsyncAgentReaderCache(
 	}
 }
 
+/** FS2 (2026-10-17): sentinel returned by `readCrewAgents` when agents.json
+ *  EXISTS but could not be read or parsed. Empty array by identity — every
+ *  read-only caller keeps its "no agents" degrade behavior — but persisting
+ *  callers compare `=== CREW_AGENTS_READ_FAILED` and SKIP the save so an
+ *  unreadable agents.json is never overwritten with []. */
+export const CREW_AGENTS_READ_FAILED: CrewAgentRecord[] = [];
+
+/** FS2: strict disk read for the sync agents path. ENOENT is a legitimate
+ *  first-write [] — every other read/parse failure returns the sentinel after
+ *  logging (atomic-write.ts readJsonFile conflates both into undefined, so the
+ *  errno/JSON.parse classification happens here). */
+function readAgentsRecordsStrict(agentsFilePath: string): CrewAgentRecord[] {
+	let raw: string;
+	try {
+		raw = fs.readFileSync(agentsFilePath, "utf-8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+		logInternalError(
+			"crew-agents.read-failed",
+			error instanceof Error ? error : new Error(String(error)),
+			`agentsPath=${agentsFilePath}`,
+		);
+		return CREW_AGENTS_READ_FAILED;
+	}
+	try {
+		const parsed = JSON.parse(raw) as unknown;
+		return Array.isArray(parsed) ? (parsed as CrewAgentRecord[]) : [];
+	} catch (error) {
+		logInternalError(
+			"crew-agents.parse-failed",
+			error instanceof Error ? error : new Error(String(error)),
+			`agentsPath=${agentsFilePath}`,
+		);
+		return CREW_AGENTS_READ_FAILED;
+	}
+}
+
 export function readCrewAgents(manifest: TeamRunManifest): CrewAgentRecord[] {
 	// F06 / RR-017: read-after-write WITHOUT forcing the pending coalesced write
 	// to disk. `upsertCrewAgent` always reads first, so the previous scoped
@@ -303,12 +340,20 @@ export function readCrewAgents(manifest: TeamRunManifest): CrewAgentRecord[] {
 	// written, so overlaying it preserves the "intra-process readers see the
 	// latest data" contract (and cross-process readers still see the file within
 	// one coalesce window) with zero I/O.
+	//
+	// FS2 (2026-10-17): a MISSING file (ENOENT) is a legitimate [] — first
+	// write. A file that EXISTS but cannot be read (EACCES/EIO) or parsed
+	// (corrupt JSON) must NOT degrade to [] (atomic-write.ts readJsonFile
+	// returns undefined for BOTH cases, so we classify ourselves): the next
+	// upsert would persist that [] and WIPE agents.json. Such reads return the
+	// CREW_AGENTS_READ_FAILED sentinel (identity ===, iterable-empty) and
+	// persisting callers (upsertCrewAgent / removeCrewAgent) skip the save.
 	const agentsFilePath = agentsPath(manifest);
 	const pending = peekPendingCoalescedWrite<CrewAgentRecord[]>(agentsFilePath);
 	try {
 		const records =
-			pending ??
-			readJsonFileCoalesced(agentsFilePath, AGENT_READER_TTL_MS, () => readJsonFile<CrewAgentRecord[]>(agentsFilePath) ?? []);
+			pending ?? readJsonFileCoalesced(agentsFilePath, AGENT_READER_TTL_MS, () => readAgentsRecordsStrict(agentsFilePath));
+		if (records === CREW_AGENTS_READ_FAILED) return CREW_AGENTS_READ_FAILED;
 		// Validate schema and deduplicate by id to handle concurrent write conflicts
 		const seen = new Set<string>();
 		const deduped = records.filter((r) => {
@@ -581,8 +626,20 @@ export function upsertCrewAgent(manifest: TeamRunManifest, record: CrewAgentReco
 		asyncAgentReaderCache.delete(agentsPath(manifest));
 		return;
 	}
-	// Read current state
+	// Read current state. FS2 (2026-10-17): when agents.json exists but is
+	// unreadable/unparseable, readCrewAgents returns the CREW_AGENTS_READ_FAILED
+	// sentinel — persisting the merged (empty) array would WIPE the authoritative
+	// index over state we could not read. Skip the save entirely (log already
+	// emitted by the reader) and let the next healthy read repair it.
 	const existing = readCrewAgents(manifest);
+	if (existing === CREW_AGENTS_READ_FAILED) {
+		logInternalError(
+			"crew-agents.upsert-skipped-unreadable",
+			new Error("skipping agents.json persist — current records unreadable (read/parse failure)"),
+			`agentsPath=${agentsPath(manifest)} taskId=${record.taskId}`,
+		);
+		return;
+	}
 	// Deduplicate by id: keep newer record when same id appears
 	const idIndex = new Map(existing.map((item, i) => [item.id, i]));
 	const merged: CrewAgentRecord[] = existing.map((item) => (item.id === record.id ? record : item));

@@ -22,6 +22,10 @@ export interface CrewBrokerOptions {
 	maxFrameBytes?: number;
 	/** Per-connection outbound queue cap. Default 256. */
 	outboundQueueCap?: number;
+	/** R8-M1: per-connection queued-BYTES cap (frames can be up to
+	 *  MAX_BROKER_FRAME_BYTES each, so the frame cap alone bounds the queue
+	 *  at cap × 256 KiB ≈ 64 MiB in-app). Default 4 MiB. */
+	outboundQueueBytesCap?: number;
 	/** Required: when false, start() is a no-op and the server never binds.
 	 *  Lets the lifecycle controller install the broker unconditionally and
 	 *  have a single kill switch. */
@@ -102,6 +106,9 @@ export interface ServerConnection {
 	authedSecretHash?: string;
 	/** Outbound queue of encoded frames awaiting drain. */
 	outbound: Buffer[];
+	/** R8-M1: sum of `outbound[i].length` — maintained by writeOrQueue/
+	 *  drainOutbound so the queued-BYTES cap does not rescan the queue. */
+	queuedBytes: number;
 	/** Set when the queue has hit the cap and a frame was dropped. */
 	needsResync: boolean;
 	/** Set when the connection is closing (idempotent). */

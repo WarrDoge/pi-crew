@@ -307,10 +307,31 @@ export function applyCompactionAppendGuarded(
  * rotation — caller then proceeds without a splice, which is the pre-US-001
  * behaviour). Must be called while holding the event-log lock.
  */
+/** R4-N1: typed abort — distinguishes "foreign rotation, skip this compaction
+ *  cycle" from the benign transient read errors readTailSince degrades on. */
+class ForeignRotationAbortError extends Error {
+	constructor(size: number, offset: number) {
+		super(
+			`event-log.compaction-foreign-rotation: live file (${size}B) smaller than compaction snapshot offset (${offset}B) — aborting cycle`,
+		);
+		this.name = "ForeignRotationAbortError";
+	}
+}
+
 function readTailSince(filePath: string, offset: number): string {
 	try {
 		const size = fs.statSync(filePath).size;
-		if (size <= offset) return "";
+		// R4-N1 (2026-10-17): a file SMALLER than the snapshot offset means a
+		// foreign rotation replaced the live file with a smaller one. The old
+		// `size <= offset` proceed-no-splice let the caller's atomicWrite then
+		// CLOBBER the new live file (post-rotation appends lost, ~1000 stale
+		// events resurrected, C2 reported SUCCESS). size === offset is the
+		// benign "nothing appended" case; size < offset ABORTS the compaction
+		// cycle (typed throw — every caller of applyCompactionAppendGuarded
+		// wraps in try/catch+log and skips this cycle; the next cycle
+		// re-evaluates against the new file).
+		if (size < offset) throw new ForeignRotationAbortError(size, offset);
+		if (size === offset) return "";
 		const fd = fs.openSync(filePath, "r");
 		try {
 			const length = size - offset;
@@ -322,7 +343,10 @@ function readTailSince(filePath: string, offset: number): string {
 		} finally {
 			fs.closeSync(fd);
 		}
-	} catch {
+	} catch (error) {
+		// R4-N1: the foreign-rotation abort must ESCAPE the benign-error degrade
+		// below — the whole point is that the caller must not proceed.
+		if (error instanceof ForeignRotationAbortError) throw error;
 		return "";
 	}
 }

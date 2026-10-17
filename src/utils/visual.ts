@@ -175,6 +175,90 @@ export function sanitizeLine(value: string): string {
 	return result;
 }
 
+/** R4-B1 (2026-10-17): neutralize UNTRUSTED (worker-sourced) single-line
+ *  text BEFORE any theme wrap. `sanitizeLine` deliberately preserves ALL
+ *  well-formed escape sequences (theme colors ride CSI SGR and pi-tui's
+ *  OSC-8/APC contracts), which makes it wrong for worker output/mailbox
+ *  bodies/activity text: OSC-52 (clipboard write — paste-to-execute on
+ *  kitty/tmux set-clipboard-on), OSC-8 (clickable links — no scheme
+ *  allowlist in the open dispatch), title/alt-screen/cursor spoofing and APC
+ *  payloads all pass verbatim, and pi-tui zero-widths them so the width
+ *  guard never trips (audit PART D). Spec, per line, before theme wrap:
+ *  (1) strip ALL OSC, (2) strip ALL APC, (3) strip CSI EXCEPT SGR-shaped
+ *  `ESC[…m` (keep colors), (4) strip DCS + bare ESC, (5) remaining C0/C1 →
+ *  space. Trusted paths keep sanitizeLine and may re-add their OWN OSC-8
+ *  AFTER sanitization. */
+export function sanitizeUntrustedLine(value: string): string {
+	if (!value) return "";
+	let result = "";
+	let i = 0;
+	while (i < value.length) {
+		const char = value[i];
+		if (char === "\u001b") {
+			const next = value[i + 1];
+			// (1)+(2) OSC (`ESC ]`) and APC (`ESC _`) — stripped wholesale when
+			// well-formed; malformed (no BEL/ST terminator) falls through to the
+			// bare-ESC drop so the payload cannot smuggle through.
+			if (next === "]" || next === "_") {
+				const len = consumeAnsi(value, i);
+				i += len > 0 ? len : 1;
+				continue;
+			}
+			// (3) CSI (`ESC [`) — keep ONLY SGR-shaped sequences (final byte `m`).
+			// Non-SGR CSI (screen clear / alt-screen / cursor / mouse-mode / …) is
+			// dropped; malformed CSI drops the ESC and the payload hits the C0/C1
+			// rule below.
+			if (next === "[") {
+				const len = consumeAnsi(value, i);
+				if (len > 0) {
+					const seq = value.slice(i, i + len);
+					if (seq.endsWith("m")) result += seq;
+					i += len;
+					continue;
+				}
+				i += 1;
+				continue;
+			}
+			// (4) DCS (`ESC P … ST/BEL`) and SOS/PM (`ESC X` / `ESC ^`): strip the
+			// WHOLE string sequence (payload included) when terminated; malformed
+			// drops introducer+byte. Bare ESC drops just the ESC byte.
+			if (next === "P" || next === "X" || next === "^") {
+				let j = i + 2;
+				let terminated = false;
+				while (j < value.length) {
+					const c = value.charCodeAt(j);
+					if (c === 0x07) {
+						j += 1;
+						terminated = true;
+						break;
+					}
+					if (c === 0x1b && value[j + 1] === "\\") {
+						j += 2;
+						terminated = true;
+						break;
+					}
+					if (c < 0x20) break; // malformed — control char cannot be in the payload
+					j += 1;
+				}
+				i = terminated ? j : i + 2;
+				continue;
+			}
+			i += 1;
+			continue;
+		}
+		const code = value.charCodeAt(i);
+		// (5) remaining C0/C1 control chars (incl. \n \r \t and 0x7F-0x9F) → space.
+		if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) {
+			result += " ";
+			i += 1;
+			continue;
+		}
+		result += value[i];
+		i += 1;
+	}
+	return result;
+}
+
 export function pad(value: string, width: number): string {
 	const current = visibleWidth(value);
 	if (current >= width) return value;

@@ -220,6 +220,12 @@ export interface EventCursorResult {
 	nextSeq: number;
 	total: number;
 	nextByteOffset?: number;
+	/** R9-N2 (2026-10-17): true when the WIDE (default) path dropped a prefix
+	 *  because the log exceeds the 4 MB tail window — callers paging by seq
+	 *  alone cannot reach the dropped prefix; pass `fromByteOffset` to resume
+	 *  scanning from a byte position instead. Additive/optional: callers that
+	 *  ignore it keep the exact previous behavior. */
+	truncated?: boolean;
 	/** R-03: live generation of the events file at read time. Callers doing
 	 * streaming byte-offset reads should echo this back as `generation` on the
 	 * next call so rotation is detected and the cursor resets. */
@@ -861,9 +867,12 @@ export function readEventsCursor(eventsPath: string, options: EventCursorOptions
 			tailBytes: TAIL_BYTES,
 		});
 	}
-	return cursorResultFromEvents(tail.events, eventsPath, sinceSeq, limit, {
+	const result = cursorResultFromEvents(tail.events, eventsPath, sinceSeq, limit, {
 		tornTail: tail.tornTail,
 		poisonSkipped: tail.poisonSkipped,
 		parseFailures: tail.parseFailures,
 	});
+	// R9-N2: surface the dropped-prefix condition so replay consumers can
+	// switch to the fromByteOffset anchor instead of silently missing the head.
+	return tail.truncated ? { ...result, truncated: true } : result;
 }

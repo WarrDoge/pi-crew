@@ -17,6 +17,7 @@
 import { isPlanApprovalPending } from "../../runtime/plan-approval.ts";
 import { deriveItemProgress } from "../../state/stores/plan-store.ts";
 import type { PlanItemStatus, TeamTaskState } from "../../state/types.ts";
+import { sanitizeUntrustedLine } from "../../utils/visual.ts";
 import { formatCount } from "../format-helpers.ts";
 import { ACTIVE, formatHint, statusIcon } from "../rail.ts";
 
@@ -66,7 +67,8 @@ function taskLine(task: TeamTaskState, indent: string): string {
 	// T3/R5 depth badge: grandchildren (depth 2+) surface explicitly so the
 	// tree shows delegation nesting without another pane.
 	const depth = typeof task.depth === "number" && task.depth > 1 ? ` d${task.depth}` : "";
-	const role = task.displayName ?? task.role ?? "?";
+	// R5-M-A3 (R4-B1 family): displayName/role are worker-authored — sanitize.
+	const role = sanitizeUntrustedLine(task.displayName ?? task.role ?? "?");
 	return `${indent}${glyph} ${task.id ?? "?"}${depth} ${role} [${task.status}]`;
 }
 
@@ -142,14 +144,14 @@ export function renderPlanPane(snapshot: RunUiSnapshot, options: PlanPaneOptions
 	const lines: string[] = [header, ...approval];
 	for (const phase of phases) {
 		const glyph = ITEM_GLYPH[phase.status] ?? "?";
-		lines.push(`${glyph} ${phase.title ?? "?"}`);
+		lines.push(`${glyph} ${sanitizeUntrustedLine(phase.title ?? "?")}`);
 		for (const itemId of phase.itemIds ?? []) {
 			const item = itemById.get(itemId);
 			if (!item) continue;
 			const p = progress.get(itemId);
 			const counts = p ? ` ${p.done}/${p.total}${p.failed ? ` ✗${p.failed}` : ""}${p.running ? ` ▸${p.running}` : ""}` : "";
 			const droppedTag = item.status === "dropped" ? " ✗ dropped" : "";
-			lines.push(`  ${ITEM_GLYPH[item.status] ?? "?"} ${item.title ?? "?"}${counts}${droppedTag}`);
+			lines.push(`  ${ITEM_GLYPH[item.status] ?? "?"} ${sanitizeUntrustedLine(item.title ?? "?")}${counts}${droppedTag}`);
 			for (const taskId of item.taskIds ?? []) {
 				const task = tasksById.get(taskId);
 				if (task) lines.push(taskLine(task, "    "));

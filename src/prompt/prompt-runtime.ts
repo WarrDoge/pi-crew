@@ -408,6 +408,65 @@ export function shouldRegisterAskTool(env: NodeJS.ProcessEnv = process.env): boo
 
 const PI_CREW_DELEGATE_ENABLED_ENV = "PI_CREW_DELEGATE_ENABLED";
 export const DELEGATE_TIMED_OUT_RESULT = "[delegate timed out]";
+
+// ── R9-F1 (2026-10-17): delegate-result recovery across parent turn-restarts ──
+// A parent session can restart mid-turn (pi-core seam): the delegate poll loop
+// dies with it, the grandchild later COMPLETES durably into the task inbox,
+// and nothing ever re-reads that message — the report is silently lost
+// (runtime-proven: run event seq 209/216/281/431, mailbox msg_b0297f83).
+// Conservative, seam-level mitigation (the pi-core trigger is external):
+//  - every in-flight subId is tracked in `inFlightDelegateSubIds`;
+//  - whenever a delegate poll loop (re)starts, the inbox is scanned ONCE for
+//    results of still-pending subIds that have no delivered result yet and
+//    they are re-injected into `recoveredDelegateResults` (logged as
+//    `delegate.result.recovered`) so the owning loop's next iteration — or a
+//    RESTARTED loop for the same subId — surfaces it without re-deriving it;
+//  - the timed-out notice points at the durable copy in the task inbox.
+// `no double-count`: a recovered message is consumed exactly once (deleted
+// from the map on delivery) and the inbox stays append-only ground truth.
+const inFlightDelegateSubIds = new Set<string>();
+const recoveredDelegateResults = new Map<string, MailboxMessage>();
+const RECOVERED_DELEGATE_RESULTS_MAX = 64;
+
+/** R9-F1: scan the task inbox for completed results of still-pending subIds.
+ *  Pure w.r.t. its inputs (injectable reader for tests); mutates the module
+ *  recovery map + logs one `delegate.result.recovered` internal event per
+ *  recovered subId. Returns the recovered messages keyed by subId. */
+export function recoverPendingDelegateResults(
+	manifest: TeamRunManifest,
+	pendingSubIds: ReadonlySet<string>,
+	readInbox: (m: TeamRunManifest) => MailboxMessage[] = (m) => readAllMailboxMessages(m, "inbox"),
+): Map<string, MailboxMessage> {
+	const recovered = new Map<string, MailboxMessage>();
+	if (pendingSubIds.size === 0) return recovered;
+	let messages: MailboxMessage[];
+	try {
+		messages = readInbox(manifest);
+	} catch (error) {
+		logInternalError("prompt-runtime.delegate-recovery-inbox-read", error instanceof Error ? error : new Error(String(error)), "warn");
+		return recovered;
+	}
+	for (const message of messages) {
+		const from = message.from ?? "";
+		if (!from.startsWith("delegate:")) continue;
+		const subId = from.slice("delegate:".length);
+		if (!pendingSubIds.has(subId)) continue;
+		if (recoveredDelegateResults.has(subId)) continue; // already recovered — no double-count
+		recoveredDelegateResults.set(subId, message);
+		while (recoveredDelegateResults.size > RECOVERED_DELEGATE_RESULTS_MAX) {
+			const oldest = recoveredDelegateResults.keys().next().value;
+			if (oldest === undefined) break;
+			recoveredDelegateResults.delete(oldest);
+		}
+		recovered.set(subId, message);
+		logInternalError(
+			"delegate.result.recovered",
+			new Error(`recovered completed delegate result from task inbox after a parent turn-restart (subId=${subId})`),
+			"warn",
+		);
+	}
+	return recovered;
+}
 /** P3-11: poll slack past the server deadline — the server timer fires first
  *  and writes the fenced (timed out) result; the client checks a bit longer
  *  so the outcome lands in-tool instead of lingering unread in the inbox. */
@@ -540,24 +599,40 @@ export function createDelegateTool(deps: DelegateToolDeps = {}): DelegateToolDef
 				const fromTag = `delegate:${subId}`;
 				let terminal: "completed" | "timed-out" | "aborted" = "timed-out";
 				let result: MailboxMessage | undefined;
-				while (true) {
-					if (signal?.aborted) {
-						terminal = "aborted";
-						break;
+				// R9-F1: register the subId as in-flight and, at every loop (re)start,
+				// re-inject results of still-pending subIds that a previous (restarted)
+				// turn never delivered — they become visible to THIS loop's reads.
+				inFlightDelegateSubIds.add(subId);
+				try {
+					recoverPendingDelegateResults(manifest, inFlightDelegateSubIds);
+					while (true) {
+						if (signal?.aborted) {
+							terminal = "aborted";
+							break;
+						}
+						// Consume a recovered result FIRST (exactly once — map delete), then
+						// fall through to the durable inbox read (append-only ground truth).
+						result = recoveredDelegateResults.get(subId);
+						if (result) recoveredDelegateResults.delete(subId);
+						if (!result) {
+							try {
+								result = readAllMailboxMessages(manifest, "inbox").find(
+									(m) => m.from === fromTag && (m.taskId === undefined || m.taskId === taskId),
+								);
+							} catch {
+								/* transient read error — keep polling */
+							}
+						}
+						if (result) {
+							terminal = "completed";
+							break;
+						}
+						if (now() >= deadline) break;
+						await sleep(effectiveSteeringInterval(hasLiveControlRealtimeListeners()));
 					}
-					try {
-						result = readAllMailboxMessages(manifest, "inbox").find(
-							(m) => m.from === fromTag && (m.taskId === undefined || m.taskId === taskId),
-						);
-					} catch {
-						/* transient read error — keep polling */
-					}
-					if (result) {
-						terminal = "completed";
-						break;
-					}
-					if (now() >= deadline) break;
-					await sleep(effectiveSteeringInterval(hasLiveControlRealtimeListeners()));
+				} finally {
+					inFlightDelegateSubIds.delete(subId);
+					recoveredDelegateResults.delete(subId);
 				}
 				const waitedMs = now() - startedAt;
 				if (terminal === "completed" && result) {
@@ -574,8 +649,17 @@ export function createDelegateTool(deps: DelegateToolDeps = {}): DelegateToolDef
 						details: { status: "aborted", grandchildTaskRef: subId, waitedMs },
 					};
 				}
+				// R9-F1: recovery hint — the grandchild can still complete AFTER this
+				// timeout (and after a parent turn-restart the tool result itself can be
+				// lost); the durable copy lands in the task inbox. Point the model at it
+				// instead of silently redoing the delegated work.
 				return {
-					content: [{ type: "text" as const, text: DELEGATE_TIMED_OUT_RESULT }],
+					content: [
+						{
+							type: "text" as const,
+							text: `${DELEGATE_TIMED_OUT_RESULT} — the grandchild may still complete; its result lands durably in the task inbox (from=delegate:${subId}) — check the task inbox / lastResult before redoing the work, or ask the leader to relay it.`,
+						},
+					],
 					details: { status: "timed-out", grandchildTaskRef: subId, waitedMs },
 				};
 			} finally {

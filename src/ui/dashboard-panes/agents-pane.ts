@@ -1,7 +1,7 @@
 import type { CrewAgentRecord } from "../../runtime/crew-agent-runtime.ts";
 import { type LiveAgentHandle, listLiveAgents, listLiveAgentsByWorkspace } from "../../runtime/live-session/live-agent-manager.ts";
 import { formatCost } from "../../state/usage.ts";
-import { visibleWidth } from "../../utils/visual.ts";
+import { sanitizeUntrustedLine, visibleWidth } from "../../utils/visual.ts";
 import { formatCount, formatDuration, truncLine } from "../format-helpers.ts";
 import { computeLiveDurationMs } from "../live-duration.ts";
 import { overflowHint, statusIcon } from "../rail.ts";
@@ -102,7 +102,8 @@ function describeActivity(handle: LiveAgentHandle): string {
 		// O-5 (DR-04): grapheme-aware truncation at the original budget (≤40
 		// content columns + 1 ellipsis column) — the ad-hoc slice(0, 40) split
 		// surrogate pairs (emoji → stray U+FFFD).
-		return truncLine(line, 41);
+		// R4-B1: live agent response text is worker-sourced — sanitize before render.
+		return truncLine(sanitizeUntrustedLine(line), 41);
 	}
 	return "thinking…";
 }
@@ -156,7 +157,7 @@ export function renderAgentsPane(snapshot: RunUiSnapshot | undefined, options: R
 					: agent.status === "queued"
 						? "queued"
 						: agent.status === "failed"
-							? (agent.error ?? "failed")
+							? sanitizeUntrustedLine(agent.error ?? "failed")
 							: "done";
 
 		// Stats: tokens + cost + duration

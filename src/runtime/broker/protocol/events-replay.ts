@@ -11,6 +11,7 @@
 
 import { readEventsCursor } from "../../../state/event-log/event-log.ts";
 import { loadRunManifestById } from "../../../state/stores/state-store.ts";
+import { encodeBrokerFrame } from "../../../utils/ndjson.ts";
 import type { ServerConnection } from "./connection-state.ts";
 
 export interface EventWriterHelpers {
@@ -50,18 +51,57 @@ export async function handleEventsSince(
 	const v = params && typeof params === "object" && !Array.isArray(params) ? (params as Record<string, unknown>) : {};
 	const sinceSeq = typeof v.sinceSeq === "number" && Number.isFinite(v.sinceSeq) ? Math.max(0, Math.floor(v.sinceSeq)) : 0;
 	const limit = typeof v.limit === "number" && Number.isFinite(v.limit) ? Math.min(Math.max(1, Math.floor(v.limit)), 1000) : 1000;
+	// R9-N2 (2026-10-17): optional byte-offset anchor + generation echo. The
+	// default (non-offset) read only sees the last TAIL_BYTES (4 MB) of the
+	// log, so the PREFIX of a larger log is unreachable by seq alone; a client
+	// that passes fromByteOffset pages it (the cursor resumes scanning from
+	// that byte position). Omitted → exact previous behavior.
+	const fromByteOffset =
+		typeof v.fromByteOffset === "number" && Number.isFinite(v.fromByteOffset) && v.fromByteOffset >= 0
+			? Math.floor(v.fromByteOffset)
+			: undefined;
+	const generation = typeof v.generation === "number" && Number.isFinite(v.generation) ? Math.floor(v.generation) : undefined;
 	try {
-		const result = readEventsCursor(eventsPath, { sinceSeq, limit });
-		// hasMore is true iff the total filtered count exceeds the page we
-		// returned. When `total === events.length` we are at the exact end
-		// of the stream (caller will discover this on the next call when
-		// `nextSeq` is unchanged from `sinceSeq`).
-		const hasMore = result.total > result.events.length;
-		helpers.sendResult(conn, id, {
-			events: result.events,
-			nextSeq: result.nextSeq,
-			hasMore,
+		const result = readEventsCursor(eventsPath, { sinceSeq, limit, fromByteOffset, generation });
+		// R9-N1 (2026-10-17): a page whose encoded frame exceeds the broker
+		// frame limit used to make sendResult → enqueueFrame → encodeBrokerFrame
+		// throw into a debug-only log — the client hung on its id with no
+		// response (runtime-proven on >256 KiB replays). Pre-check the EXACT
+		// response frame here and binary-halve the batch until it encodes;
+		// `truncated` + `nextSinceSeq` tell the client to page the rest. Never
+		// silence — if even ONE event cannot encode, answer with a typed error.
+		let events = result.events;
+		let frameTruncated = false;
+		let response: Record<string, unknown>;
+		const buildResponse = (): Record<string, unknown> => ({
+			events,
+			nextSeq: events.length ? events.reduce((max, event) => Math.max(max, event.metadata?.seq ?? 0), sinceSeq) : result.nextSeq,
+			hasMore: result.total > events.length,
+			// Continuation contract: nextSinceSeq is the seq to pass as sinceSeq on
+			// the next call (safe resume anchor — never past an undelivered event).
+			nextSinceSeq: events.length ? events.reduce((max, event) => Math.max(max, event.metadata?.seq ?? 0), sinceSeq) : result.nextSeq,
+			truncated: frameTruncated || result.truncated === true,
+			...(result.nextByteOffset !== undefined ? { nextByteOffset: result.nextByteOffset } : {}),
+			...(result.generation !== undefined ? { generation: result.generation } : {}),
 		});
+		while (true) {
+			response = buildResponse();
+			try {
+				encodeBrokerFrame(response);
+				break;
+			} catch {
+				if (events.length <= 1) {
+					// A single event over the frame limit can never page — typed error
+					// (enqueueFrame's R9-N1 fallback would also catch this, but failing
+					// here keeps the client's paging loop coherent).
+					helpers.sendError(conn, id, "response-oversize", "events.since: single event exceeds the broker frame limit");
+					return;
+				}
+				events = events.slice(0, Math.ceil(events.length / 2));
+				frameTruncated = true;
+			}
+		}
+		helpers.sendResult(conn, id, response);
 	} catch (err) {
 		helpers.sendError(conn, id, "replay-failed", (err as Error).message);
 	}

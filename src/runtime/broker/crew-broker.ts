@@ -110,6 +110,14 @@ const STALE_RUN_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", 
 /** Default per-connection outbound queue cap (events). */
 const DEFAULT_OUTBOUND_QUEUE_CAP = 256;
 
+/** R8-M1 (2026-10-17): default per-connection queued-BYTES cap. The frame cap
+ *  alone lets a subscribed-but-never-reading client buffer 256 × 256 KiB ≈
+ *  64 MiB in-app before the R6-5 typed close engages (kernel backpressure
+ *  shifts frames off the queue, so the count rarely grows — the BYTES the
+ *  process holds do). ~4 MiB bounds a stuck connection's memory while a
+ *  healthy LAN client drains comfortably inside it. */
+const DEFAULT_OUTBOUND_QUEUE_BYTES = 4 * 1024 * 1024;
+
 /** R6-5 (2026-10-16): typed protocol close-reason sent as a best-effort
  *  `protocol.close` event frame (direct write, jumps the saturated queue)
  *  before the connection is closed after a fanout/event frame was dropped
@@ -137,6 +145,7 @@ export class CrewBroker {
 			| "socketPath"
 			| "maxFrameBytes"
 			| "outboundQueueCap"
+			| "outboundQueueBytesCap"
 			| "cwd"
 			| "netModule"
 			| "waitStatusCache"
@@ -189,6 +198,7 @@ export class CrewBroker {
 			socketPath: options.socketPath,
 			maxFrameBytes: options.maxFrameBytes,
 			outboundQueueCap: options.outboundQueueCap,
+			outboundQueueBytesCap: options.outboundQueueBytesCap,
 			cwd: options.cwd,
 			netModule: options.netModule,
 			waitMethodsEnabled: options.waitMethodsEnabled === true,
@@ -473,6 +483,7 @@ export class CrewBroker {
 			role: undefined,
 			authMatchKind: undefined,
 			outbound: [],
+			queuedBytes: 0,
 			needsResync: false,
 			closed: false,
 			helloTimer: null,
@@ -822,6 +833,27 @@ export class CrewBroker {
 				err instanceof Error ? err : new Error(String(err)),
 				`sessionId=${this.options.sessionId}`,
 			);
+			// R9-N1 (2026-10-17): silently dropping a REQUEST-RESPONSE frame here
+			// (e.g. an events.since replay page larger than MAX_BROKER_FRAME_BYTES)
+			// left the client waiting on its id until its request timeout — a
+			// hang with no diagnostic. When the payload carries an id, answer it
+			// with a small typed error frame on the SAME id; if even that cannot
+			// encode, close (the client's reconnect+replay is the only durable
+			// answer left).
+			const id = (payload as { id?: unknown } | null)?.id;
+			if (typeof id === "number" || typeof id === "string") {
+				try {
+					const errBuf = encodeBrokerFrame({
+						id,
+						error: { code: "response-oversize", message: "response frame exceeds the broker frame limit" },
+					});
+					this.writeOrQueue(conn, errBuf, /*force*/ true);
+					return;
+				} catch {
+					/* fall through to close */
+				}
+			}
+			this.closeConnection(conn);
 			return;
 		}
 		// R6-5: request responses (the acks for ping/msg.send/wait.request/…)
@@ -834,6 +866,18 @@ export class CrewBroker {
 	private writeOrQueue(conn: ServerConnection, buf: Buffer, force: OutboundAdmission): void {
 		if (conn.closed) return;
 		const cap = this.options.outboundQueueCap ?? DEFAULT_OUTBOUND_QUEUE_CAP;
+		// R8-M1: queued-BYTES cap alongside the frame cap. Few-but-large frames
+		// (a slow reader behind a 256 KiB fanout) never trip a 256-frame cap;
+		// without this the process buffers up to ~64 MiB per stuck connection.
+		// Overflow takes the same typed-close path as the frame cap (resync +
+		// reconnect + replay) — applied to ALL admission classes because the
+		// connection is about to close anyway and the alternative is unbounded
+		// memory, not a delivered response.
+		const bytesCap = this.options.outboundQueueBytesCap ?? DEFAULT_OUTBOUND_QUEUE_BYTES;
+		if (conn.queuedBytes + buf.length > bytesCap) {
+			this.handleOutboundOverflow(conn);
+			return;
+		}
 		if (conn.outbound.length >= cap) {
 			if (force === "response") {
 				// R6-5(a): response frames queue PAST the cap instead of being
@@ -842,6 +886,7 @@ export class CrewBroker {
 				// never grow unbounded the way a fanout burst can. Ordering is
 				// preserved (pushed at the tail; drainOutbound honors backpressure).
 				conn.outbound.push(buf);
+				conn.queuedBytes += buf.length;
 				this.drainOutbound(conn);
 				return;
 			}
@@ -865,6 +910,7 @@ export class CrewBroker {
 			return;
 		}
 		conn.outbound.push(buf);
+		conn.queuedBytes += buf.length;
 		this.drainOutbound(conn);
 	}
 
@@ -888,6 +934,7 @@ export class CrewBroker {
 				return;
 			}
 			conn.outbound.shift();
+			conn.queuedBytes -= buf.length;
 			conn.outboundSeq += 1;
 		}
 	}

@@ -716,11 +716,11 @@ describe("NEW-1 persistTasks (individual-stale repair)", () => {
 				"tasks.json must keep the FULL task array after individual-stale repair",
 			);
 			assert.equal(reloaded.tasks.find((t) => t.id === "t-stale")?.status, "cancelled");
-			// NOTE: repairStaleRun cancels every non-terminal task in the array it is
-			// handed (the healthy sibling included) — NEW-1 fixes PRESENCE on disk, not
-			// the repair-cancel rule, so t-new survives as cancelled rather than
-			// being deleted from tasks.json entirely.
-			assert.equal(reloaded.tasks.find((t) => t.id === "t-new")?.status, "cancelled");
+			// R2-M-A1 (wave-2a, 2026-10-17): the individual-stale branch now cancels
+			// ONLY the stale subset. Pre-fix, repairStaleRun cancelled EVERY non-terminal
+			// task (healthy sibling included); NEW-1 fixed PRESENCE on disk, R2-M-A1 fixes
+			// the repair-cancel rule — t-new now stays RUNNING (pin updated: was "cancelled").
+			assert.equal(reloaded.tasks.find((t) => t.id === "t-new")?.status, "running");
 			assert.equal(reloaded.tasks.find((t) => t.id === "t-done")?.status, "completed");
 			assert.equal(reloaded.tasks.find((t) => t.id === "t-fail")?.status, "failed");
 		} finally {

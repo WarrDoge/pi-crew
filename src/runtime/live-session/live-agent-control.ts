@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { TeamRunManifest } from "../../state/types.ts";
+import { logInternalError } from "../../utils/internal-error.ts";
 import { agentStateFile, ensureAgentStateDir } from "../crew-agent-records.ts";
 
 export type LiveAgentControlOperation = "steer" | "follow-up" | "stop" | "resume";
@@ -96,20 +97,39 @@ export async function applyLiveAgentControlRequest(input: {
 	if (seenRequestIds?.has(request.id)) return false;
 	if (request.agentId && request.agentId !== agentId && request.agentId !== taskId) return false;
 	seenRequestIds?.add(request.id);
-	if (request.operation === "steer") await session.steer?.(request.message ?? "Please report current status and wrap up if possible.");
-	else if (request.operation === "follow-up")
-		await session.prompt?.(request.message ?? "Please continue with the follow-up request.", {
-			source: "api",
-			expandPromptTemplates: false,
-			streamingBehavior: "followUp",
-		});
-	else if (request.operation === "resume")
-		await session.prompt?.(request.message ?? "Please resume and report final status.", {
-			source: "api",
-			expandPromptTemplates: false,
-			streamingBehavior: "followUp",
-		});
-	else if (request.operation === "stop") await session.abort?.();
+	// R3A-M1 (2026-10-17): a rejecting steer/prompt/abort used to escape this
+	// await into fire-and-forget `void` call sites (live-session-runtime) →
+	// unhandledRejection → host session crash. Every operation is now guarded;
+	// the failure is recorded on the request (`error`, + processedAt for
+	// observability) and logged — the control request is CONSUMED either way so
+	// a poisoned request cannot crash the loop that polls for it.
+	try {
+		if (request.operation === "steer")
+			await session.steer?.(request.message ?? "Please report current status and wrap up if possible.");
+		else if (request.operation === "follow-up")
+			await session.prompt?.(request.message ?? "Please continue with the follow-up request.", {
+				source: "api",
+				expandPromptTemplates: false,
+				streamingBehavior: "followUp",
+			});
+		else if (request.operation === "resume")
+			await session.prompt?.(request.message ?? "Please resume and report final status.", {
+				source: "api",
+				expandPromptTemplates: false,
+				streamingBehavior: "followUp",
+			});
+		else if (request.operation === "stop") await session.abort?.();
+		request.processedAt = new Date().toISOString();
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		request.error = message;
+		request.processedAt = new Date().toISOString();
+		logInternalError(
+			"live-agent-control.apply-failed",
+			error instanceof Error ? error : new Error(message),
+			`runId=${request.runId} taskId=${request.taskId} operation=${request.operation} requestId=${request.id}`,
+		);
+	}
 	return true;
 }
 

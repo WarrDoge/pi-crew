@@ -1,3 +1,4 @@
+import { sanitizeUntrustedLine } from "../../utils/visual.ts";
 import { formatHint } from "../rail.ts";
 import type { RunUiSnapshot } from "../snapshot-types.ts";
 
@@ -41,7 +42,7 @@ export function renderTranscriptPane(snapshot: RunUiSnapshot | undefined): strin
 			["o", "for raw output"],
 		])}`,
 		...modelAttemptLines(snapshot),
-		...lines.slice(-12).map((line) => `⎿ ${line}`),
+		...lines.slice(-12).map((line) => `⎿ ${sanitizeUntrustedLine(line)}`),
 		...(lines.length ? [] : ["No recent output"]),
 	];
 }

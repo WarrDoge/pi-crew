@@ -3,7 +3,7 @@ import { matchesKey } from "@earendil-works/pi-tui";
 import { agentOutputPath, readCrewAgents } from "../runtime/crew-agent-records.ts";
 import type { TeamRunManifest } from "../state/types.ts";
 import { resolveRealContainedPath } from "../utils/safe-paths.ts";
-import { truncate, truncateToVisualLines, truncateToVisualLinesTail } from "../utils/visual.ts";
+import { sanitizeUntrustedLine, truncate, truncateToVisualLines, truncateToVisualLinesTail } from "../utils/visual.ts";
 import type { InteractiveComponent } from "./component.ts";
 import { canopyLine, formatHint, overflowHint, RAIL, railLine } from "./rail.ts";
 import { renderDiff } from "./render-diff.ts";
@@ -130,7 +130,8 @@ export function formatTranscriptEvent(event: unknown, themeLike: unknown = undef
 			...text
 				.split(/\r?\n/)
 				.filter(Boolean)
-				.map((line) => theme.fg("muted", line)),
+				// R4-B1: transcript text is worker-sourced — sanitize before theme wrap.
+				.map((line) => theme.fg("muted", sanitizeUntrustedLine(line))),
 		];
 	}
 	const message = asRecord(obj.message);
