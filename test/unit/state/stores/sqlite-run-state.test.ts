@@ -83,7 +83,7 @@ test("U8 sqlite store: opens with WAL journal + creates the spec schema", () => 
 		assert.deepEqual(store.loadWorkerStatuses(), []);
 		store.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -100,7 +100,7 @@ test("U8 sqlite store: manifest + tasks round-trip (deep equal)", () => {
 		assert.deepEqual(loaded.tasks, tasks, "tasks must round-trip deep-equal, insertion order preserved");
 		store.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -119,7 +119,7 @@ test("U8 sqlite store: saveTasks is a full-set replace (tasks.json semantics)", 
 		assert.equal(tasks[0].status, "completed", "upsert-by-id keeps the updated record");
 		store.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -157,7 +157,7 @@ test("U8 sqlite store: batch is all-or-nothing — serialization error mid-batch
 		);
 		reopened.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -193,7 +193,7 @@ test("U8 sqlite store: worker-status CRUD (upsert batch / single / delete / load
 		);
 		store.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -209,7 +209,7 @@ test("U8 sqlite store: nextSeq is monotonic from 1 and survives reopen", () => {
 		assert.equal(reopened.nextSeq("batch"), 3, "seq persists across close/reopen");
 		reopened.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -223,7 +223,7 @@ test("U8 sqlite store: data persists across close/reopen (fresh handle)", () => 
 		assert.ok(reopened.loadManifestAndTasks(), "committed batch must be visible to a fresh handle");
 		reopened.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -299,7 +299,7 @@ test("U8 review fix: handle cache is LRU — a hit refreshes recency, hot run su
 		assert.equal(getSqliteRunStateStore(hot), hotHandle);
 	} finally {
 		__test__closeAllSqliteStores();
-		for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
+		for (const root of roots) fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -333,7 +333,7 @@ test("R3A-M2: corrupt state.sqlite → quarantined, fresh db created, no throw, 
 		assert.equal(Number(v.user_version), 1, "fresh db stamped with user_version=1");
 	} finally {
 		__test__closeAllSqliteStores();
-		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });
 
@@ -363,6 +363,6 @@ test("R3A-M2: pre-existing db with absent user_version (0) → treated as foreig
 		void store;
 	} finally {
 		__test__closeAllSqliteStores();
-		fs.rmSync(root, { recursive: true, force: true });
+		fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
 });

@@ -509,7 +509,12 @@ test("F07: inode replacement (rotation) is detected even when the size grows bac
 		fs.writeFileSync(replacement, lines.join(""), "utf-8");
 		fs.renameSync(replacement, eventsPath);
 		assert.ok(fs.statSync(eventsPath).size > primedState.size, "the replacement is larger than the primed size");
-		assert.notEqual(fs.statSync(eventsPath).ino, primedState.ino, "the replacement has a new inode");
+		// NTFS legitimately reuses file IDs after a same-path rename-replace —
+		// the inode inequality is a POSIX-side detail; rotation detection on
+		// Windows rides on the size/watermark checks above + the read below.
+		if (process.platform !== "win32") {
+			assert.notEqual(fs.statSync(eventsPath).ino, primedState.ino, "the replacement has a new inode");
+		}
 
 		const after = readCrewAgentEventsCursor(manifest, "task-1", { sinceSeq: 140 });
 		assert.deepEqual(
