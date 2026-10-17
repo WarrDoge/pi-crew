@@ -10,6 +10,8 @@ import {
 	buildModelCandidates,
 	configuredModelInfosFromPiConfig,
 	isRetryableModelFailure,
+	isRetryableModelFailureFrom,
+	isSafetyRefusalStopReason,
 	orderAutoFallbacks,
 	resolveDefaultSubagentModel,
 	resolveModelCandidate,
@@ -799,4 +801,42 @@ test("warnOutOfScopeSoft: emits for out-of-scope non-caller, silent otherwise", 
 	} finally {
 		console.error = original;
 	}
+});
+
+// ---------------------------------------------------------------------------
+// R2-M-B2 (Wave-3): structured safety-refusal stop reasons are NON-retryable.
+// The structured check runs FIRST — before auth/billing and before the legacy
+// `/safety/i` retryable substring fallback.
+// ---------------------------------------------------------------------------
+
+test("R2-M-B2: structured safety-refusal error object → NOT retryable despite retryable-looking message", () => {
+	const refusal = Object.assign(new Error("transient network hiccup — overloaded, please retry"), {
+		stopReason: "refusal",
+	});
+	assert.equal(isRetryableModelFailureFrom(refusal), false, "object stopReason=refusal must not retry");
+	assert.equal(isRetryableModelFailureFrom(refusal, refusal.message), false, "cause object wins over the string");
+
+	const safety = { stop_reason: "safety", message: "503 service overloaded retryable" };
+	assert.equal(isRetryableModelFailureFrom(safety), false, "snake_case stop_reason=safety must not retry");
+
+	const nested = { error: { stopReason: "content_policy" }, message: "bad gateway, retry me" };
+	assert.equal(isRetryableModelFailureFrom(nested), false, "nested error.stopReason must not retry");
+});
+
+test("R2-M-B2: serialized stop_reason marker in the string → NOT retryable", () => {
+	assert.equal(isRetryableModelFailure('provider error: {"stop_reason":"refusal"} upstream overloaded'), false);
+	assert.equal(isRetryableModelFailure("stopReason: safety — 503 bad gateway"), false);
+	// legacy fallback intact: safety substring WITHOUT a structured marker stays retryable
+	assert.equal(isRetryableModelFailure("safety filter engaged, upstream overloaded"), true);
+	// auth still non-retryable
+	assert.equal(isRetryableModelFailure("api key invalid after safety review"), false);
+});
+
+test("R2-M-B2: isSafetyRefusalStopReason set membership", () => {
+	assert.equal(isSafetyRefusalStopReason("refusal"), true);
+	assert.equal(isSafetyRefusalStopReason("Safety"), true);
+	assert.equal(isSafetyRefusalStopReason(" content_policy_violation "), true);
+	assert.equal(isSafetyRefusalStopReason("end_turn"), false);
+	assert.equal(isSafetyRefusalStopReason("max_tokens"), false);
+	assert.equal(isSafetyRefusalStopReason(undefined), false);
 });

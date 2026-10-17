@@ -32,10 +32,73 @@ import * as path from "node:path";
 import type { StatementSync } from "node:sqlite";
 import { DatabaseSync } from "node:sqlite";
 import { getCrewEnv } from "../../config/env-vars.ts";
+import { logInternalError } from "../../utils/internal-error.ts";
 import type { TeamRunManifest, TeamTaskState } from "../types.ts";
 
 /** File name of the sqlite run-state db inside the run's stateRoot. */
 export const SQLITE_STATE_FILE = "state.sqlite";
+
+/** R3A-M2 (Wave-3): schema-identity stamp. A db whose user_version differs
+ * (0/absent or a foreign value) is treated as corrupt/foreign → quarantine. */
+export const SQLITE_STATE_USER_VERSION = 1;
+
+/** R3A-M2 (Wave-3): rename a corrupt/foreign state.sqlite aside (loudly) so a
+ * fresh db can be created; the JSON mirrors carry the data forward. */
+function quarantineSqliteState(stateRoot: string, cause: unknown): void {
+	const dbPath = sqliteDbPath(stateRoot);
+	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+	for (const suffix of ["", "-wal", "-shm"]) {
+		const src = `${dbPath}${suffix}`;
+		if (!fs.existsSync(src)) continue;
+		try {
+			fs.renameSync(src, `${dbPath}${suffix}.corrupt-${stamp}`);
+		} catch {
+			/* best-effort — the retry open below surfaces an unrecoverable file */
+		}
+	}
+	const message =
+		cause instanceof Error ? cause.message : typeof cause === "object" && cause !== null ? JSON.stringify(cause) : String(cause);
+	// Loud error event (always emits — severity "error", not debug-gated).
+	logInternalError(
+		"sqlite-state.quarantined",
+		new Error(`state.sqlite corrupt/foreign — quarantined to state.sqlite.corrupt-${stamp}; falling through to JSON mirrors`),
+		`cause=${message}`,
+		"error",
+	);
+}
+
+function readSqliteUserVersion(db: DatabaseSync): number {
+	const row = db.prepare("PRAGMA user_version").get() as { user_version?: number | bigint } | undefined;
+	const value = row?.user_version;
+	return typeof value === "number" ? value : typeof value === "bigint" ? Number(value) : 0;
+}
+
+/** R3A-M2 (Wave-3): open (or create) the run-state db with quarantine semantics. */
+function openSqliteStateDb(stateRoot: string): DatabaseSync {
+	const dbPath = sqliteDbPath(stateRoot);
+	const preExisting = fs.existsSync(dbPath);
+	try {
+		const db = new DatabaseSync(dbPath);
+		const version = readSqliteUserVersion(db);
+		if (preExisting && version !== SQLITE_STATE_USER_VERSION) {
+			try {
+				db.close();
+			} catch {
+				/* best-effort */
+			}
+			throw new Error(`state.sqlite user_version=${version} (expected ${SQLITE_STATE_USER_VERSION}) — foreign or corrupt db`);
+		}
+		if (!preExisting) db.exec(`PRAGMA user_version = ${SQLITE_STATE_USER_VERSION}`);
+		return db;
+	} catch (error) {
+		quarantineSqliteState(stateRoot, error);
+		// Retry ONCE on a fresh file. If the quarantine rename failed the retry
+		// hits the same corruption and THROWS (correct: nothing safe to do).
+		const db = new DatabaseSync(dbPath);
+		db.exec(`PRAGMA user_version = ${SQLITE_STATE_USER_VERSION}`);
+		return db;
+	}
+}
 
 /** manifest-table row key holding the run manifest record. */
 const MANIFEST_KEY = "manifest";
@@ -88,7 +151,14 @@ export class SqliteRunStateStore {
 		// The stateRoot always exists by the time a save runs (createRunManifest
 		// mkdirs it first), but be defensive — sqlite does not create dirs.
 		fs.mkdirSync(stateRoot, { recursive: true });
-		this.db = new DatabaseSync(sqliteDbPath(stateRoot));
+		// R3A-M2 (Wave-3): QUARANTINE on open failure or a foreign user_version.
+		// A corrupt/foreign state.sqlite used to THROW out of the constructor and
+		// kill every subsequent save/load; now the bad file is renamed aside
+		// (state.sqlite.corrupt-<ts>), a loud error is logged, and a FRESH db is
+		// created — reads then fall through to the JSON mirrors (state-store
+		// read paths treat an empty db as "not populated" and read manifest.json/
+		// tasks.json, which are written on EVERY save as read-side twins).
+		this.db = openSqliteStateDb(stateRoot);
 		// wave-2b (sqlite 0600): DatabaseSync creates the file with the process
 		// umask — a permissive umask (0022→0644) left run state (manifest, tasks,
 		// worker records) group/world-readable, unlike the JSON backend's 0600

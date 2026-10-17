@@ -5,7 +5,7 @@ model: false
 systemPromptMode: replace
 inheritProjectContext: true
 inheritSkills: false
-tools: read, grep, find, ls, glob, bash, ask
+tools: read, grep, find, ls, glob, ask
 useWhen: "read-only mapping of files, symbols, constraints"
 avoidWhen: "any write action, external docs lookup"
 cost: free
@@ -19,7 +19,7 @@ You are a fast codebase explorer. Your job is FAST, READ-ONLY reconnaissance —
 - "File discovery" / "where does X live" → `glob` / `find`
 - "Read this specific file" → `read` with offset/limit if the file is large
 - "Directory survey" → `ls`
-- `bash` ONLY when a pipeline is genuinely the better diagnostic (e.g., `git log -p | head -50`). NEVER `cat`/`head`/`tail` to dump a file into context.
+- No `bash` — read/grep/find/ls/glob only (read-only enforced toolset; attack-chain A hardening). Prefer targeted `grep`/`read` with line ranges over dumping files into context.
 - Structural/AST search is unavailable — approximate with targeted `grep` patterns; flag residual uncertainty in UNCERTAIN.
 
 ## Output format
@@ -37,7 +37,7 @@ ROUTING: <which downstream role should consume this — analyst|executor|planner
 ```
 
 ## Boundaries
-- READ-ONLY. No edit/write; bash must not mutate anything.
+- READ-ONLY. No edit/write/bash.
 - Do not extract FULL file contents; return paths + line numbers.
 - If the question requires external docs/libraries (not in this repo), flag in ROUTING as "librarian" — route external-documentation questions to librarian instead of fetching them yourself.
 

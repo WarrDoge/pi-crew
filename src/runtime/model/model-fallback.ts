@@ -444,11 +444,79 @@ const NON_RETRYABLE_MODEL_FAILURE_PATTERNS = [
 	/credit/i,
 ];
 
+// R2-M-B2 (Wave-3): provider SAFETY/REFUSAL stop reasons must NOT be retried
+// down the fallback chain ("safety-refusal laundering" — re-dispatching the
+// same refused prompt to other models). The STRUCTURED stop reason is the
+// authoritative signal; the legacy `/safety/i` substring in
+// RETRYABLE_MODEL_FAILURE_PATTERNS stays as a FALLBACK only for errors that
+// carry no structured marker (legacy serialization).
+export const SAFETY_REFUSAL_STOP_REASONS: ReadonlySet<string> = new Set([
+	"refusal",
+	"refused",
+	"safety",
+	"safety_block",
+	"safety_block_consumed",
+	"content_policy",
+	"content_policy_violation",
+	"content_filter",
+]);
+
+/** Normalize + match a stop reason (or stopReason/stop_reason value) against the refusal/safety set. */
+export function isSafetyRefusalStopReason(reason: unknown): boolean {
+	if (typeof reason !== "string") return false;
+	return SAFETY_REFUSAL_STOP_REASONS.has(reason.trim().toLowerCase());
+}
+
+const SERIALIZED_STOP_REASON_MARKER = /(?:stop_reason|stopReason|stop reason)["':=\s]+["']?([a-z_\- ]+)/i;
+
+/**
+ * Structured safety-refusal detection on an ERROR OBJECT (preferred) or a
+ * serialized error string: true when the error carries a stop_reason in the
+ * refusal/safety family. Object shape: `{ stopReason }`, `{ stop_reason }`,
+ * nested under `.error`/`.cause`, or the same marker serialized into a string
+ * (JSON.stringify'd errors, stderr tails).
+ */
+export function hasStructuredSafetyRefusal(errorLike: unknown): boolean {
+	if (!errorLike) return false;
+	if (typeof errorLike === "string") {
+		const match = SERIALIZED_STOP_REASON_MARKER.exec(errorLike);
+		return match ? isSafetyRefusalStopReason(match[1]) : false;
+	}
+	if (typeof errorLike !== "object") return false;
+	const obj = errorLike as Record<string, unknown>;
+	if (isSafetyRefusalStopReason(obj.stopReason)) return true;
+	if (isSafetyRefusalStopReason(obj.stop_reason)) return true;
+	if (obj.error !== undefined && obj.error !== obj && hasStructuredSafetyRefusal(obj.error)) return true;
+	if (obj.cause !== undefined && obj.cause !== obj && hasStructuredSafetyRefusal(obj.cause)) return true;
+	// Error instances: message may carry the serialized marker.
+	if (typeof obj.message === "string") {
+		const match = SERIALIZED_STOP_REASON_MARKER.exec(obj.message);
+		if (match && isSafetyRefusalStopReason(match[1])) return true;
+	}
+	return false;
+}
+
 export function isRetryableModelFailure(error: string | undefined): boolean {
 	if (!error) return false;
+	// R2-M-B2 (Wave-3): structured safety/refusal stop reasons are checked
+	// FIRST — non-retryable even when the message text otherwise matches
+	// retryable-looking patterns ("overloaded", "transient", …). The plain
+	// `/safety/i` substring below remains as the LEGACY fallback for errors
+	// without a structured marker.
+	if (hasStructuredSafetyRefusal(error)) return false;
 	// Auth / billing / invalid-key failures will never succeed on retry.
 	if (NON_RETRYABLE_MODEL_FAILURE_PATTERNS.some((pattern) => pattern.test(error))) return false;
 	return RETRYABLE_MODEL_FAILURE_PATTERNS.some((pattern) => pattern.test(error));
+}
+
+/**
+ * R2-M-B2 companion for call sites that still hold the structured CAUSE
+ * object: consult it FIRST (authoritative), then fall back to the string
+ * classification of `message`.
+ */
+export function isRetryableModelFailureFrom(cause: unknown, message?: string): boolean {
+	if (hasStructuredSafetyRefusal(cause)) return false;
+	return isRetryableModelFailure(message ?? (cause instanceof Error ? cause.message : undefined));
 }
 
 export function formatModelAttemptNote(attempt: ModelAttemptSummary, nextModel?: string): string {

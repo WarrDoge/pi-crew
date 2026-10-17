@@ -57,6 +57,7 @@ import {
 	buildConfiguredModelRouting,
 	formatModelAttemptNote,
 	isRetryableModelFailure,
+	isRetryableModelFailureFrom,
 	type ModelAttemptSummary,
 	type ModelFallbackPolicy,
 	resolveDefaultSubagentModel,
@@ -1217,7 +1218,7 @@ export async function runChildProcessTask(ctx: TaskExecutionContext): Promise<Ta
 		// after the precompute, or the precompute ran before the parent
 		// model was known). If a different candidate is found, use it as
 		// nextModel; otherwise fall through to the existing break.
-		if (!nextModel && !reResolveUsed && isRetryableModelFailure(error)) {
+		if (!nextModel && !reResolveUsed && isRetryableModelFailureFrom(childResult, error)) {
 			reResolveUsed = true;
 			const reResolved = buildConfiguredModelRouting({
 				overrideModel: undefined,
@@ -1252,7 +1253,7 @@ export async function runChildProcessTask(ctx: TaskExecutionContext): Promise<Ta
 				if (input.spawnBudget) input.spawnBudget.max += 1;
 			}
 		}
-		if (!nextModel || !isRetryableModelFailure(error)) break;
+		if (!nextModel || !isRetryableModelFailureFrom(childResult, error)) break;
 		// P2-1 spike: before burning the queued (expensive) re-attempt, ask the
 		// host classifier whether the failure looks transient. Dormant unless
 		// classifierTriageEnabled — the disabled path returns without touching

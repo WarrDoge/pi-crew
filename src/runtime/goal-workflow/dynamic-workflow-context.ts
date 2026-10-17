@@ -375,6 +375,14 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 	// values are the FULL AgentResult (text + usage + structured + artifactPath +
 	// actual durationMs) so replay does not drop structured output / artifact linkage.
 	const completedAgentCalls: Record<string, AgentResult> = opts.resumedState?.completedAgentCalls ?? {};
+	// R2-M-B5 + R5-M-A2 (Wave-3): the identical-call cache is RESUME-ONLY.
+	// Only calls HYDRATED from resumedState (this Set) are eligible for a
+	// cache hit; results added during a LIVE run are still recorded for a
+	// future resume's checkpoint, but identical call options within the SAME
+	// run RE-SPAWN. The previous within-run hit made the documented
+	// `while(true){review; if accept break; retry}` loop replay round-1's
+	// verdict forever (stale-verdict hazard, docs/dynamic-workflows.md).
+	const hydratedCallIds = new Set<string>(Object.keys(opts.resumedState?.completedAgentCalls ?? {}));
 	// round-14 P1-2: frozen budget surface. The closures read wfState.spent so the
 	// object stays live after Object.freeze(ctx). total is a snapshot primitive.
 	const budget = Object.freeze({
@@ -442,8 +450,9 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 				}
 				// PERS-1: per-agent-call idempotency. Compute a deterministic call ID
 				// from the call arguments and check if this call was already completed
-				// (e.g. during a previous run before a crash). If so, return the cached
-				// result without re-spawning the agent.
+				// in a PREVIOUS run (hydrated from resumedState — R2-M-B5: resume-only;
+				// identical calls within a LIVE run re-spawn). If hydrated, return the
+				// cached result without re-spawning the agent.
 				// R6-3 (DR-03 round-6, HIGH): the key now covers ALL call-shaping fields
 				// (inputs/systemPrompt/disableTools/maxTurns/graceTurns/worktree/skill/…
 				// and the schema BY VALUE) — previously only {role,agent,prompt,model,
@@ -452,7 +461,7 @@ export function makeWorkflowCtx(manifest: TeamRunManifest, opts: MakeWorkflowCtx
 				// returned the first call's result — inputs provably alter the dispatched
 				// task via composeAgentTask). See computeCallId for the normalization.
 				const callId = computeCallId(call);
-				const cached = completedAgentCalls[callId];
+				const cached = hydratedCallIds.has(callId) ? completedAgentCalls[callId] : undefined;
 				if (cached) {
 					// Full-result replay (R6-3): structured + artifactPath survive the
 					// round-trip through the checkpoint. ok is forced true — only successful

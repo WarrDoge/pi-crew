@@ -75,6 +75,21 @@ export async function registerPiTeams(pi: ExtensionAPI): Promise<void> {
 		);
 	}
 
+	// Wave-3 (attack-chain A / R2-M-B1 hardening): hermeticWorkers is DEFAULT
+	// ON; runtime.hermeticWorkers=false is a deliberate trust downgrade (worker
+	// pi sessions load ambient extensions/skills — the parity state where a
+	// repo-planted worker can reach the `team` tool's user-tier persistence).
+	// Emit ONE prominent warning at extension init so the operator sees it.
+	try {
+		if (loadConfig(process.cwd()).config.runtime?.hermeticWorkers === false) {
+			console.warn(
+				"[pi-crew] ⚠ SECURITY: runtime.hermeticWorkers=false — workers will load ambient extensions/skills (non-default trust posture). Worker sessions can then persist user-tier config/agents (every future session). Re-enable hermetic spawns unless parity mode is specifically required.",
+			);
+		}
+	} catch {
+		/* config read failures surface through their own channel */
+	}
+
 	startRuntimeWarmup();
 	primePeerDep().catch(() => undefined);
 	deployBundledThemes();

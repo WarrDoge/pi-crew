@@ -25,7 +25,12 @@ import {
 	startWorkspaceLockHeartbeatRefresh,
 	WORKSPACE_LOCK_HEARTBEAT_REFRESH_MS,
 } from "../../../../src/runtime/goal-workflow/goal-loop-runner.ts";
-import { acquireWorkspaceLock, type StartTimeResolver, workspaceLockPath } from "../../../../src/runtime/workspace-lock.ts";
+import {
+	acquireWorkspaceLock,
+	refreshWorkspaceLockHeartbeat,
+	type StartTimeResolver,
+	workspaceLockPath,
+} from "../../../../src/runtime/workspace-lock.ts";
 import { clearProjectRootCache } from "../../../../src/utils/paths.ts";
 
 function makeTmpCwd(): string {
@@ -120,7 +125,7 @@ describe("startWorkspaceLockHeartbeatRefresh (goal-loop wiring seam, WI-2)", () 
 		const acquireIdx = src.indexOf("await acquireWorkspaceLock(goal.cwd");
 		assert.ok(acquireIdx > -1, "runGoalLoop must acquire the workspace lock");
 		// 2. ...then starts the heartbeat refresh (WI-2) — after acquire, before the loop body...
-		const startIdx = src.indexOf("startWorkspaceLockHeartbeatRefresh(workspaceLock)");
+		const startIdx = src.indexOf("startWorkspaceLockHeartbeatRefresh(workspaceLock");
 		assert.ok(startIdx > -1, "runGoalLoop must start the workspace-lock heartbeat refresh");
 		assert.ok(startIdx > acquireIdx, "refresh must start AFTER the lock is acquired");
 		// 3. ...and stops it in the same finally that releases the lock (the LAST finally of the fn).
@@ -131,5 +136,86 @@ describe("startWorkspaceLockHeartbeatRefresh (goal-loop wiring seam, WI-2)", () 
 		assert.ok(stopIdx > -1, "release finally must stop the heartbeat refresh");
 		assert.ok(releaseIdx > -1, "release finally must release the workspace lock");
 		assert.ok(stopIdx < releaseIdx, "refresh stops BEFORE the lock is released (no window where a released lock is refreshed)");
+	});
+});
+
+// R3-M-B1 (Wave-3): refresh()===false (ownership lost — lock stolen/reclaimed)
+// must STOP the heartbeat loop and surface via onOwnershipLost exactly once;
+// the goal loop wires that to blocked + a goal.workspace_lock_lost event.
+describe("startWorkspaceLockHeartbeatRefresh ownership-lost handling (R3-M-B1)", () => {
+	let cwd: string;
+	beforeEach(() => {
+		cwd = makeTmpCwd();
+	});
+	afterEach(() => {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	});
+
+	it("refresh()===false → stops the loop and fires onOwnershipLost exactly once", async () => {
+		let refreshCalls = 0;
+		let ownershipLostCalls = 0;
+		const hb = startWorkspaceLockHeartbeatRefresh(
+			{ lockPath: workspaceLockPath(cwd), goalId: "goal_lost" },
+			{
+				refreshMs: 10,
+				refresh: () => {
+					refreshCalls += 1;
+					return false; // ownership lost every tick
+				},
+				onOwnershipLost: () => {
+					ownershipLostCalls += 1;
+				},
+			},
+		);
+		try {
+			await new Promise((r) => setTimeout(r, 60));
+			assert.equal(ownershipLostCalls, 1, "onOwnershipLost fired exactly once");
+			assert.equal(refreshCalls, 1, "the loop stopped itself — no further refresh ticks");
+		} finally {
+			hb.stop();
+		}
+	});
+
+	it("refresh()===true keeps the loop alive and never fires onOwnershipLost", async () => {
+		let refreshCalls = 0;
+		let ownershipLostCalls = 0;
+		const hb = startWorkspaceLockHeartbeatRefresh(
+			{ lockPath: workspaceLockPath(cwd), goalId: "goal_ok" },
+			{
+				refreshMs: 10,
+				refresh: () => {
+					refreshCalls += 1;
+					return true;
+				},
+				onOwnershipLost: () => {
+					ownershipLostCalls += 1;
+				},
+			},
+		);
+		try {
+			await new Promise((r) => setTimeout(r, 60));
+			assert.ok(refreshCalls > 1, "loop keeps ticking");
+			assert.equal(ownershipLostCalls, 0);
+		} finally {
+			hb.stop();
+		}
+	});
+
+	it("real refresh on a STOLEN lock reports false (foreign owner never clobbered)", async () => {
+		const resolver = undefinedStartTimeResolver();
+		const ours = await acquireWorkspaceLock(cwd, "goal_mine", { startTimeResolver: resolver, pollMs: 5 });
+		assert.ok(ours);
+		// A second goal steals the (stale-able) lock by rewriting the file foreign.
+		const lockPath = workspaceLockPath(cwd);
+		const foreignJson = JSON.stringify({
+			goalId: "goal_stealer",
+			pid: process.pid + 1,
+			acquiredAt: new Date().toISOString(),
+			heartbeat: Date.now(),
+		});
+		fs.writeFileSync(lockPath, foreignJson);
+		const ok = refreshWorkspaceLockHeartbeat(lockPath, "goal_mine");
+		assert.equal(ok, false, "refresh refuses a foreign-owned lock");
+		assert.equal(fs.readFileSync(lockPath, "utf-8"), foreignJson, "foreign lockfile left untouched");
 	});
 });

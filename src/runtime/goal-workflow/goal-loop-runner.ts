@@ -586,6 +586,10 @@ export interface StartWorkspaceLockHeartbeatRefreshOptions {
 	refreshMs?: number;
 	/** Test injection: override the refresh implementation (default: refreshWorkspaceLockHeartbeat). */
 	refresh?: (lockPath: string, goalId: string) => boolean;
+	/** R3-M-B1 (Wave-3): fires ONCE when a refresh returns false — the lock
+	 * was lost (stolen/reclaimed by another goal or unwritable). The heartbeat
+	 * loop STOPS itself before invoking this; wire it to block the goal loop. */
+	onOwnershipLost?: () => void;
 }
 
 /**
@@ -609,7 +613,17 @@ export function startWorkspaceLockHeartbeatRefresh(
 	const refresh = opts.refresh ?? refreshWorkspaceLockHeartbeat;
 	const timer = setInterval(() => {
 		try {
-			refresh(handle.lockPath, handle.goalId);
+			// R3-M-B1 (Wave-3): a false refresh means OWNERSHIP LOST (lock stolen,
+			// reclaimed, or unwritable — workspace-lock.ts contract :191-201).
+			// Previously the return value was discarded and the loop kept
+			// heartbeating a lock another goal now owned → both owners mutated the
+			// same cwd (lost writes, corrupted verification snapshots). Stop the
+			// loop and hand the loss to the caller (goal-loop blocks + exits).
+			if (refresh(handle.lockPath, handle.goalId) === false) {
+				clearInterval(timer);
+				opts.onOwnershipLost?.();
+				return;
+			}
 		} catch (error) {
 			// Never throw into the loop (interval callbacks crashing node:test aside,
 			// an escaping throw here would kill the background goal process).
@@ -668,7 +682,30 @@ export async function runGoalLoop(input: RunGoalLoopInput): Promise<RunGoalLoopR
 		// without this, isLockStale clause (b) force-steals the lock after 60s even
 		// though this pid is alive (multi-goal clobber). Started immediately after
 		// acquire; the timer is unref()-ed and never throws into the loop.
-		lockHeartbeat = startWorkspaceLockHeartbeatRefresh(workspaceLock);
+		lockHeartbeat = startWorkspaceLockHeartbeatRefresh(workspaceLock, {
+			// R3-M-B1 (Wave-3): refresh()===false → ownership lost. Block the goal +
+			// emit an event + stop heartbeating; the while-loop's `goal.state !==
+			// "running"` check then exits ("break") BEFORE spawning/mutating further
+			// turns against a cwd another goal now owns. Idempotent — the interval
+			// fires once (it clears itself) and runGoalLoop's own failures can set
+			// blocked again harmlessly.
+			onOwnershipLost: () => {
+				try {
+					goal = safeSetStatus(store, goal.goalId, "blocked", goal, eventsPath);
+				} catch (error) {
+					logInternalError("goal-loop.workspaceLockLost.setStatus", error, `goalId=${goal.goalId}`, "warn");
+				}
+				appendEventBuffered(eventsPath, {
+					type: "goal.workspace_lock_lost",
+					runId: manifest.runId,
+					data: {
+						goalId: goal.goalId,
+						message:
+							"Workspace lock heartbeat refresh returned false — ownership lost (stolen/reclaimed). Goal blocked; no further turns were run against this cwd.",
+					},
+				}).catch((e) => logInternalError("goal-loop.buffered", e, "type=goal.workspace_lock_lost"));
+			},
+		});
 	} catch (error) {
 		logInternalError("goal-loop.workspaceLock", error, `goalId=${goal.goalId} cwd=${goal.cwd}`);
 		goal = safeSetStatus(store, goal.goalId, "blocked", goal, eventsPath);

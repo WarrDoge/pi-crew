@@ -104,8 +104,9 @@ RULES:
 Respond with ONLY a single JSON object, no prose, no markdown fences:
 {"achieved": <true|false>, "reason": "<one concise sentence>", "evidenceRefs": ["<artifact path or transcript quote>", ...]}`;
 
-/** Build the judge task prompt: objective + scope + verification + evidence. */
-function buildJudgeTask(input: EvaluateGoalInput): string {
+/** Build the judge task prompt: objective + scope + verification + evidence.
+ * @internal — exported for the R3-M-B2 fence-spoof pinning test. */
+export function buildJudgeTask(input: EvaluateGoalInput): string {
 	const lines: string[] = ["# Goal to evaluate", input.objective];
 	if (input.scope) lines.push("", "# Scope (allowed changes)", input.scope);
 	if (input.verification?.commands?.length) {
@@ -144,14 +145,38 @@ function buildJudgeTask(input: EvaluateGoalInput): string {
 		lines.push(...summary);
 	}
 	lines.push("", "## Worker transcript tail (bounded ~8 KiB)");
-	lines.push("```");
+	// R3-M-B2 (Wave-3): the fence must be LONGER than any backtick run inside
+	// the (redacted) transcript tail — a ``` run in worker-authored output
+	// previously closed the fence early, letting worker-forged text after the
+	// run read as loop-authored (false `achieved:true`). Compute the longest
+	// run and emit max(3, longestRun+1) backticks.
+	const redactedSlice = redactSecretString(input.evidence.transcriptSlice || "(no transcript available)");
+	const fence = "`".repeat(Math.max(3, longestBacktickRun(redactedSlice) + 1));
+	lines.push(fence);
 	// P1f (RFC v0.5 §P1f): redact the 8 KiB transcript slice — this path is NOT truncated,
 	// so it catches long secrets (JWT, GH PAT, AWS, etc.) fully. This is an existing leak path
 	// Phase 1 leaves unchanged today; v0.5 closes it.
-	lines.push(redactSecretString(input.evidence.transcriptSlice || "(no transcript available)"));
-	lines.push("```");
+	lines.push(redactedSlice);
+	lines.push(fence);
 	lines.push("", "Now respond with the JSON verdict per the system prompt.");
 	return lines.join("\n");
+}
+
+/** R3-M-B2 (Wave-3): length of the longest consecutive backtick run — the
+ * transcript fence must exceed it so worker-authored backtick runs can never
+ * close the fence early. Exported for the fence-spoof pinning test. */
+export function longestBacktickRun(text: string): number {
+	let longest = 0;
+	let current = 0;
+	for (const ch of text) {
+		if (ch === "`") {
+			current += 1;
+			if (current > longest) longest = current;
+		} else {
+			current = 0;
+		}
+	}
+	return longest;
 }
 
 function truncate(s: string, n: number): string {

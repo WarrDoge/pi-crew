@@ -549,6 +549,21 @@ export function clearLiveAgentsForTest(): void {
 	invalidateSortedLiveAgents();
 }
 
+/**
+ * R2-M-B3 (Wave-3): fence UNTRUSTED peer message content before it enters a
+ * recipient session. Peer DMs/broadcasts cross trust tiers (e.g. an
+ * explorer-mapped worker injecting into a writer session) and were previously
+ * delivered with only a `[DM from X]` prefix — raw, unfenced. Wrap in an
+ * `<untrusted-peer-message>` fence and strip any literal closing-tag
+ * occurrences from BOTH the content and the sender id so worker-authored
+ * text cannot escape the fence and pose as session-authored instructions.
+ */
+function fencePeerMessage(from: string, content: string): string {
+	const safeFrom = String(from).split("</untrusted-peer-message").join("");
+	const safeContent = String(content).split("</untrusted-peer-message").join("");
+	return `<untrusted-peer-message from="${safeFrom}">\n${safeContent}\n</untrusted-peer-message>`;
+}
+
 /** Phase 7/G4: Send an IRC message to a specific live agent (DM).
  * Uses non-blocking delivery via sendCustomMessage when available.
  * Falls back to session.prompt (blocking) when not.
@@ -569,7 +584,7 @@ export function sendIrcMessage(targetAgentId: string, message: IrcMessage): void
 			(session.sendCustomMessage as (msg: unknown, opts?: unknown) => void)(
 				{
 					customType: "irc",
-					content: `[DM from ${message.from}] ${message.content}`,
+					content: `[DM from ${message.from}] ${fencePeerMessage(message.from, message.content)}`,
 					display: "collapsed",
 				},
 				{ deliverAs: "followUp", triggerTurn: false },
@@ -581,7 +596,7 @@ export function sendIrcMessage(targetAgentId: string, message: IrcMessage): void
 	}
 	// Fallback: inject as prompt (blocking)
 	if (typeof handle.session.prompt === "function") {
-		const ircPrompt = `[Message from ${message.from}] ${message.content}`;
+		const ircPrompt = `[Message from ${message.from}] ${fencePeerMessage(message.from, message.content)}`;
 		void handle.session
 			.prompt(ircPrompt, { source: "api", expandPromptTemplates: false, streamingBehavior: "followUp" })
 			.catch((error) => logInternalError("live-agent-manager.irc-deliver", error, `agentId=${handle.agentId}`));
@@ -610,7 +625,7 @@ export function broadcastIrcMessage(fromAgentId: string, message: IrcMessage): s
 				(session.sendCustomMessage as (msg: unknown, opts?: unknown) => void)(
 					{
 						customType: "irc",
-						content: `[Broadcast from ${message.from}] ${message.content}`,
+						content: `[Broadcast from ${message.from}] ${fencePeerMessage(message.from, message.content)}`,
 						display: "collapsed",
 					},
 					{ deliverAs: "followUp", triggerTurn: false },
@@ -623,7 +638,7 @@ export function broadcastIrcMessage(fromAgentId: string, message: IrcMessage): s
 		}
 		// Fallback: inject as prompt
 		if (typeof handle.session.prompt === "function") {
-			const ircPrompt = `[Broadcast from ${message.from}] ${message.content}`;
+			const ircPrompt = `[Broadcast from ${message.from}] ${fencePeerMessage(message.from, message.content)}`;
 			void handle.session
 				.prompt(ircPrompt, {
 					source: "api",
@@ -706,7 +721,7 @@ export async function respondAsBackground(
 
 	// --- Non-blocking delivery -------------------------------------------
 	const session = handle.session as Record<string, unknown>;
-	const deliveredTag = `[DM from ${fromId}] ${message}`;
+	const deliveredTag = `[DM from ${fromId}] ${fencePeerMessage(fromId, message)}`;
 	let delivered = false;
 	if (typeof session.sendCustomMessage === "function") {
 		try {

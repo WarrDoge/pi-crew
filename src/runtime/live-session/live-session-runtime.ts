@@ -911,6 +911,16 @@ function faultPathUsage(session: LiveSessionLike | undefined): UsageState | unde
 	}
 }
 
+/**
+ * R1-M2 part 2 (Wave-3): pure fail-closed decision — when G2 MCP enforcement
+ * could not be armed (SDK loader missing / degraded), a NON-PERMITTED role
+ * must ABORT the live-session spawn instead of warn+proceed (fail-open);
+ * permitted roles keep the warn+proceed behavior (their access is intended).
+ */
+export function shouldFailClosedMcpEnforcement(mcpPermitted: boolean, degradationReason: string | undefined): boolean {
+	return degradationReason !== undefined && !mcpPermitted;
+}
+
 export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<LiveSessionRunResult> {
 	// Cold-start race fix: ensure the hot module graph is warm before touching
 	// any module. Under tsx, concurrent first-imports race module-record
@@ -1213,16 +1223,36 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 					resourceLoaderAvailable: Boolean(mod.DefaultResourceLoader && agentDir),
 				});
 		if (g2DegradationReason) {
+			// R1-M2 part 2 (Wave-3): FAIL CLOSED. Previously the degradation only
+			// warned and proceeded — a version-drifted SDK silently re-exposed the
+			// parent's MCP servers to a NON-PERMITTED (read-only) role. MCP-permitted
+			// roles keep the warn+proceed behavior (their access is intended); every
+			// other role ABORTS the spawn with a typed error so the drift is loud.
+			const failClosedCode = "mcp-enforcement-fail-closed";
 			appendEventFireAndForget(input.manifest.eventsPath, {
-				type: "task.mcp_enforcement_degraded",
+				type: mcpPermitted ? "task.mcp_enforcement_degraded" : "task.mcp_enforcement_fail_closed",
 				runId: input.manifest.runId,
 				taskId: input.task.id,
-				message: `G2 MCP policy NOT enforced for role "${input.task.role ?? "unknown"}": pi SDK resource loader unavailable (${g2DegradationReason}) — this worker may inherit the parent's MCP servers.`,
+				message: mcpPermitted
+					? `G2 MCP policy NOT enforced for role "${input.task.role ?? "unknown"}": pi SDK resource loader unavailable (${g2DegradationReason}) — this worker may inherit the parent's MCP servers.`
+					: `G2 MCP policy ABORTED live-session spawn for role "${input.task.role ?? "unknown"}" (${failClosedCode}): enforcement (MCP extension stripping) could not be armed (${g2DegradationReason}) — refusing fail-open inheritance of the parent's MCP servers.`,
 				data: {
 					role: input.task.role ?? null,
 					reason: g2DegradationReason,
+					code: failClosedCode,
 				},
 			});
+			if (g2DegradationReason && shouldFailClosedMcpEnforcement(mcpPermitted, g2DegradationReason)) {
+				const message = `[${failClosedCode}] Live-session spawn refused for role "${input.task.role ?? "unknown"}": MCP enforcement degraded (${g2DegradationReason}) and the role is not MCP-permitted — fail-closed instead of inheriting the parent's MCP servers.`;
+				return {
+					available: true,
+					exitCode: 1,
+					stdout: "",
+					stderr: message,
+					jsonEvents: 0,
+					error: message,
+				};
+			}
 		}
 		const effectiveParentModel = resolveParentModelFromRegistry(input.modelRegistry, input.parentModel);
 		const modelRouting = buildConfiguredModelRouting({

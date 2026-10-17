@@ -169,12 +169,29 @@ interface RpcPoolEntry {
 	proc: ChildProcess;
 	/** True while the pooled process is idle between runs (reusable). */
 	idle: boolean;
+	/** R2-M-A5 (Wave-3): the run that pinned this process. Reuse re-validates
+	 * the requesting run matches — a pooled worker (its env, session dir,
+	 * transcript paths) is run-scoped and must NEVER cross run boundaries. */
+	pinnedRunId: string;
 }
 
 const rpcPool = new Map<string, RpcPoolEntry>();
 
-function poolKeyFor(input: ChildPiRunInput): string {
-	return input.agentId ?? input.agent.name;
+/** @internal — exported for the R2-M-A5 run-identity pinning test. */
+export function poolKeyFor(input: ChildPiRunInput): string {
+	// R2-M-A5 (Wave-3): the pool key is RUN-SCOPED. The old key (agentId only)
+	// let two DIFFERENT runs with the same agent id reuse one process — a
+	// worker's env/session/transcript state leaking across runs (and stale
+	// run-scoped registrations pointing at the wrong run).
+	const runId = input.runId ?? "untracked";
+	const agentId = input.agentId ?? "-";
+	return `${runId}:${agentId}:${input.agent.name}`;
+}
+
+/** R2-M-A5 (Wave-3): the run id a pool lookup must match for reuse. */
+/** @internal — exported for the R2-M-A5 run-identity pinning test. */
+export function requestingRunIdFor(input: ChildPiRunInput): string {
+	return input.runId ?? "untracked";
 }
 
 /**
@@ -187,9 +204,19 @@ function poolKeyFor(input: ChildPiRunInput): string {
  * evicted (the watchdog owns their failure); busy entries are left in place
  * and the caller falls back to a fresh spawn.
  */
-function acquirePooledRpcClient(key: string): RpcPoolEntry | undefined {
+function acquirePooledRpcClient(key: string, requestingRunId?: string): RpcPoolEntry | undefined {
 	const entry = rpcPool.get(key);
 	if (!entry) return undefined;
+	// R2-M-A5 (Wave-3): belt-and-braces identity re-validation — even if the
+	// key were ever reused across runs, a pinned-runId mismatch evicts the
+	// entry (stop best-effort) and forces a fresh spawn.
+	if (requestingRunId !== undefined && entry.pinnedRunId !== requestingRunId) {
+		rpcPool.delete(key);
+		void entry.client.stop().catch(() => {
+			/* identity eviction best-effort */
+		});
+		return undefined;
+	}
 	const stdin = entry.proc.stdin;
 	const procAlive = entry.proc.exitCode === null && entry.proc.signalCode === null && !!stdin && !stdin.destroyed;
 	if (!procAlive) {
@@ -319,7 +346,10 @@ export async function tryChildPiRpcRun(plan: ChildPiRpcRunPlan): Promise<ChildPi
 	// resolves in ~0ms; only a cold standalone test pays module load.
 	// LAZY: registered with scripts/check-lazy-imports.mjs (runtime dynamic import)
 	const { RpcClient } = await import("@earendil-works/pi-coding-agent");
-	const pooled = resolveChildPiRpcPoolEnabled() ? acquirePooledRpcClient(poolKeyFor(plan.input)) : undefined;
+	// R2-M-A5 (Wave-3): pass the requesting run id so reuse re-validates the pinned run.
+	const pooled = resolveChildPiRpcPoolEnabled()
+		? acquirePooledRpcClient(poolKeyFor(plan.input), requestingRunIdFor(plan.input))
+		: undefined;
 	const Ctor = RpcClient as unknown as new (options: unknown) => RpcClientInstance;
 	return runRpcSession(Ctor, plan, cliPath, pooled);
 }
@@ -781,7 +811,8 @@ async function runRpcSession(
 					child.stdin &&
 					!child.stdin.destroyed
 				) {
-					poolEntry = { client, proc: child, idle: false };
+					// R2-M-A5 (Wave-3): pin the registering run — reuse re-validates.
+					poolEntry = { client, proc: child, idle: false, pinnedRunId: requestingRunIdFor(input) };
 					rpcPool.set(poolKey, poolEntry);
 					attachPoolExitHook(poolKey, child);
 				}

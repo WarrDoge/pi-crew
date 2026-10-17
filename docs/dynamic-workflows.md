@@ -25,6 +25,9 @@ export default async function (ctx) {
   const synth = await ctx.agent({ role: "analyst", prompt: "Merge + dedupe findings", inputs: reports.map(r => r.artifactPath) });
 
   ctx.phase("Review");
+  // NOTE (R2-M-B5): the identical-call cache is RESUME-ONLY — every
+  // ctx.review / ctx.retry iteration really re-runs the task (fixed
+  // semantics; see the caveat under WorkflowCtx API below).
   for (let i = 0; i < 3; i++) {
     const review = await ctx.review(synth.taskId, "reviewer");
     if (review.outcome === "accept") break;
@@ -52,8 +55,8 @@ Slash command: `/workflows` lists all workflows (static + dynamic).
 | `ctx.agent({role, prompt, model?, skill?, maxTurns?, inputs?, schema?, worktree?})` | Spawn one agent, await `{ok, text, structured, artifactPath, usage}`. Concurrency enforced by `ctx.semaphore`. `schema?` (round-13) is a TypeBox schema — when set, output is validated and mismatch yields `ok:false`. `worktree?` (round-17) spawns the agent in an isolated git worktree (default false; falls back to normal cwd + warning in a non-git repo). |
 | `ctx.fanOut(items, limit, fn)` | Bounded parallel fan-out (wraps `mapConcurrent`). |
 | `ctx.pipeline(items, ...stages)` | **round-16.** Multi-stage pipeline: each item passes through all stages sequentially; different items run concurrently (bounded by `ctx.semaphore`). A failed stage yields `null` for that item (logged via `ctx.log`) and other items continue. Aborts propagate. Returns `(TResult\|null)[]`. |
-| `ctx.review(taskId, reviewerRole?)` | Run a reviewer; parse `{outcome, feedback}`. |
-| `ctx.retry(taskId, {feedback?})` | Re-run with feedback (wraps `executeWithRetry`). |
+| `ctx.review(taskId, reviewerRole?)` | Run a reviewer; parse `{outcome, feedback}`. Re-runs the task every call (see the identical-call cache caveat below). |
+| `ctx.retry(taskId, {feedback?})` | Re-run with feedback (wraps `executeWithRetry`). Always re-spawns (never cached). |
 | `ctx.mail(to, body, opts?)` | Mailbox message to another agent/leader. |
 | `ctx.gatherReplies(ids, deadlineMs)` | Block until N replies arrive or deadline. |
 | `ctx.renderTemplate(name, vars)` | Render a built-in plan template. |
@@ -67,6 +70,15 @@ Slash command: `/workflows` lists all workflows (static + dynamic).
 `ctx.agent({role})` resolves the role to an `AgentConfig` via 4-tier precedence:
 explicit `agent` name → `team.roles[].agent` → `discoverAgents` by name → synthesize
 minimal (`source:'dynamic'`).
+
+> **Identical-call cache caveat (R2-M-B5, fixed semantics).** The
+> completed-calls cache is consulted ONLY for calls hydrated from a resumed
+> checkpoint — identical call options within a LIVE run always re-spawn.
+> Historically the cache also hit within a run, which made
+> `while(true){review; if accept break; retry}` loops replay round-1 verdicts
+> forever (stale verdicts until the agent-call cap aborted the run). If you
+> need true idempotency within a run, structure the workflow to call each
+> distinct step once and rely on resume for crash recovery.
 
 ### Pipeline (round-16 P2-1)
 

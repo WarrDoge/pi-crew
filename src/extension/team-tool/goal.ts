@@ -14,6 +14,7 @@
  *       §0c C11 (control path: cooperative flag + handleCancel(currentRunId) via abortOwned).
  */
 
+import { LIMIT_CEILINGS } from "../../config/config-validation.ts";
 import { spawnBackgroundTeamRun } from "../../runtime/async-runner.ts";
 import { GoalStore } from "../../runtime/goal-workflow/goal-state-store.ts";
 import { captureRunModelContext } from "../../runtime/model/session-model.ts";
@@ -76,6 +77,17 @@ function formatGoalStatus(goal: GoalLoopState): string {
 		.join("\n");
 }
 
+/**
+ * R3-SEC-1 rider (Wave-3): clamp worker-supplied maxTurns to the SAME runtime
+ * ceiling the config paths use (LIMIT_CEILINGS.runtimeMaxTurns — no dedicated
+ * goal ceiling exists; budgetTotal is already guarded in handleStart).
+ * @internal — exported for the clamp pinning test.
+ */
+export function clampGoalMaxTurns(raw: unknown): number {
+	const parsed = typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : 20; // Claude/Codex parity default
+	return Math.min(Math.floor(parsed), LIMIT_CEILINGS.runtimeMaxTurns);
+}
+
 /** `goal start` — create state + spawn background process (P0: writes state; spawn wiring TBD per host). */
 async function handleStart(input: GoalSubActionInput): Promise<ReturnType<typeof result>> {
 	const { params, ctx, store } = input;
@@ -86,7 +98,7 @@ async function handleStart(input: GoalSubActionInput): Promise<ReturnType<typeof
 		const goalId = store.createGoalId();
 		const ownerSessionId = ctx.sessionId ?? "unknown";
 		const now = new Date().toISOString();
-		const maxTurns = typeof params.config?.maxTurns === "number" && params.config.maxTurns > 0 ? params.config.maxTurns : 20; // Claude/Codex parity default
+		const maxTurns = clampGoalMaxTurns(params.config?.maxTurns);
 		// P1d (RFC v0.5 §P1d): budget is REQUIRED. Either an explicit budgetTotal (>=1000, enforced
 		// by schema) OR an explicit budgetUnlimited:true opt-out (audit-logged). No silent unbounded
 		// default — without a cap the loop could spend unboundedly across many turns × workers.

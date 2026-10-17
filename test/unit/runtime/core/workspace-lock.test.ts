@@ -527,3 +527,78 @@ describe("reclaimStaleLocks", () => {
 		assert.deepEqual(reclaimStaleLocks("/nonexistent/dir/xyz"), []);
 	});
 });
+
+// ---------------------------------------------------------------------------
+// R3-M-B1 / FS4 (Wave-3): ownership verification after stale-steal claims and
+// heartbeat refreshes — a claim only succeeds when the lockfile provably holds
+// the claimer's goalId+pid; refresh never silently clobbers a foreign lock.
+// ---------------------------------------------------------------------------
+
+describe("Wave-3 ownership verification (R3-M-B1/FS4)", () => {
+	it("stale-steal claim verifies the lockfile holds OUR goalId+pid afterwards", async () => {
+		const cwd = makeTmpCwd();
+		try {
+			const lockPath = workspaceLockPath(cwd);
+			// A stale foreign lock (ancient heartbeat + mtime).
+			const stale = {
+				goalId: "goal_dead",
+				pid: 999_999,
+				startTime: undefined,
+				acquiredAt: new Date(0).toISOString(),
+				heartbeat: 1000,
+			};
+			fs.writeFileSync(lockPath, JSON.stringify(stale));
+			fs.utimesSync(lockPath, new Date(0), new Date(0));
+			const resolver: StartTimeResolver = () => undefined;
+			const handle = await acquireWorkspaceLock(cwd, "goal_new", { startTimeResolver: resolver, pollMs: 5 });
+			assert.ok(handle);
+			const onDisk = JSON.parse(fs.readFileSync(lockPath, "utf-8")) as { goalId: string; pid: number };
+			assert.equal(onDisk.goalId, "goal_new", "claimed lock provably owned (goalId)");
+			assert.equal(onDisk.pid, process.pid, "claimed lock provably owned (pid)");
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("refresh on our lock updates the heartbeat and returns true; the lock keeps our identity", async () => {
+		const cwd = makeTmpCwd();
+		try {
+			const resolver: StartTimeResolver = () => undefined;
+			await acquireWorkspaceLock(cwd, "goal_keep", { startTimeResolver: resolver, pollMs: 5 });
+			const lockPath = workspaceLockPath(cwd);
+			const before = JSON.parse(fs.readFileSync(lockPath, "utf-8")) as { heartbeat: number; goalId: string };
+			const ok = refreshWorkspaceLockHeartbeat(lockPath, "goal_keep", { now: () => before.heartbeat + 5000 });
+			assert.equal(ok, true);
+			const after = JSON.parse(fs.readFileSync(lockPath, "utf-8")) as { heartbeat: number; goalId: string };
+			assert.equal(after.heartbeat, before.heartbeat + 5000, "heartbeat re-stamped");
+			assert.equal(after.goalId, "goal_keep", "identity preserved");
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("refresh-mismatch returns false and NEVER writes (missing lock, foreign owner)", () => {
+		const cwd = makeTmpCwd();
+		try {
+			const lockPath = workspaceLockPath(cwd);
+			assert.equal(refreshWorkspaceLockHeartbeat(lockPath, "goal_x"), false, "missing lockfile → false");
+			const foreign = JSON.stringify({ goalId: "goal_other", pid: 1, acquiredAt: new Date().toISOString(), heartbeat: Date.now() });
+			fs.writeFileSync(lockPath, foreign);
+			assert.equal(refreshWorkspaceLockHeartbeat(lockPath, "goal_x"), false, "foreign owner → false");
+			assert.equal(fs.readFileSync(lockPath, "utf-8"), foreign, "foreign lockfile never clobbered");
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+// runGoalLoop wiring pin (R3-M-B1): ownership-lost → goal blocked + event + exit.
+it("runGoalLoop wiring pin: onOwnershipLost blocks the goal and emits goal.workspace_lock_lost", () => {
+	const src = fs.readFileSync(path.join(import.meta.dirname, "../../../../src/runtime/goal-workflow/goal-loop-runner.ts"), "utf-8");
+	const wiringIdx = src.indexOf("onOwnershipLost: () => {");
+	assert.ok(wiringIdx > -1, "runGoalLoop must wire onOwnershipLost");
+	const blockedIdx = src.indexOf('safeSetStatus(store, goal.goalId, "blocked"', wiringIdx);
+	const eventIdx = src.indexOf("goal.workspace_lock_lost", wiringIdx);
+	assert.ok(blockedIdx > -1, "ownership lost sets goal blocked");
+	assert.ok(eventIdx > -1, "ownership lost emits goal.workspace_lock_lost event");
+});

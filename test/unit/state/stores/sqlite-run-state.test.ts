@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
 	__test__closeAllSqliteStores,
@@ -299,5 +300,69 @@ test("U8 review fix: handle cache is LRU — a hit refreshes recency, hot run su
 	} finally {
 		__test__closeAllSqliteStores();
 		for (const root of roots) fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// ---------------------------------------------------------------------------
+// R3A-M2 (Wave-3): quarantine on corrupt/foreign state.sqlite — constructor
+// must NOT throw; the bad file is renamed aside and a fresh db serves the
+// store (reads fall through to the JSON mirrors while the db is empty).
+// ---------------------------------------------------------------------------
+
+test("R3A-M2: corrupt state.sqlite → quarantined, fresh db created, no throw, store functional", () => {
+	__test__closeAllSqliteStores();
+	const root = makeStateRoot();
+	try {
+		fs.writeFileSync(sqliteDbPath(root), "this is definitely not a sqlite database file", "utf-8");
+		let store: SqliteRunStateStore;
+		assert.doesNotThrow(() => {
+			store = new SqliteRunStateStore(root);
+		}, "constructor must survive a corrupt db by quarantining it");
+		const quarantined = fs.readdirSync(root).filter((f) => f.startsWith("state.sqlite") && f.includes(".corrupt-"));
+		assert.ok(quarantined.length >= 1, `corrupt file renamed aside (found: ${quarantined.join(",")})`);
+		assert.ok(fs.existsSync(sqliteDbPath(root)), "a fresh state.sqlite was created");
+		// Store is functional on the fresh db (JSON mirrors carry prior data —
+		// this store's manifest table starts empty and round-trips normally).
+		const m = makeManifest({ runId: "quarantine-run" });
+		store!.saveManifest(m);
+		assert.deepEqual(store!.loadManifest(), m, "fresh db round-trips after quarantine");
+		// user_version stamped on fresh create.
+		const probe = new DatabaseSync(sqliteDbPath(root));
+		const v = probe.prepare("PRAGMA user_version").get() as { user_version: number };
+		probe.close();
+		assert.equal(Number(v.user_version), 1, "fresh db stamped with user_version=1");
+	} finally {
+		__test__closeAllSqliteStores();
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("R3A-M2: pre-existing db with absent user_version (0) → treated as foreign → quarantined", () => {
+	__test__closeAllSqliteStores();
+	const root = makeStateRoot();
+	try {
+		// A VALID sqlite db created WITHOUT our user_version stamp (the
+		// pre-Wave-3 on-disk shape).
+		const legacy = new DatabaseSync(sqliteDbPath(root));
+		legacy.exec("CREATE TABLE tasks (id TEXT PRIMARY KEY, record TEXT NOT NULL)");
+		legacy.close();
+		let store: SqliteRunStateStore | undefined;
+		assert.doesNotThrow(() => {
+			store = new SqliteRunStateStore(root);
+		}, "foreign-version db quarantined, not thrown");
+		const quarantined = fs.readdirSync(root).filter((f) => f.includes(".corrupt-"));
+		assert.ok(quarantined.length >= 1, "legacy-version db renamed aside");
+		// And the JSON mirror path still works: state-store reads fall through
+		// to manifest.json when the (fresh, empty) db has no manifest row.
+		const probe = new DatabaseSync(sqliteDbPath(root));
+		const rows = probe.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='tasks'").get() as {
+			n: number;
+		};
+		probe.close();
+		assert.equal(Number(rows.n), 1, "fresh db re-created with the schema");
+		void store;
+	} finally {
+		__test__closeAllSqliteStores();
+		fs.rmSync(root, { recursive: true, force: true });
 	}
 });

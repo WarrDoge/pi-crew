@@ -1583,7 +1583,7 @@ test("R6-3: same prompt + different systemPrompt → two separate spawns", async
 	}
 });
 
-test("R6-3: identical call twice → ONE spawn; replay returns the same full result; inputs order normalized", async () => {
+test("R2-M-B5 (Wave-3): identical call twice in ONE run → TWO spawns (cache is resume-only); hydrated state replays with 0 spawns", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -1599,15 +1599,23 @@ test("R6-3: identical call twice → ONE spawn; replay returns the same full res
 			maxTurns: 2,
 		};
 		const r1 = await withJsonSuccessMock(() => ctx.agent({ ...call }));
+		// R2-M-B5: within a LIVE run the identical-call cache is NOT consulted —
+		// the same call options re-spawn (the old within-run hit made the
+		// documented review/retry loop replay round-1 verdicts forever).
 		const r2 = await withJsonSuccessMock(() => ctx.agent({ ...call }));
 		assert.equal(r1.ok && r2.ok, true, "both succeed");
-		assert.equal(r2.artifactPath, r1.artifactPath, "identical call replays the cached result (same artifact)");
-		assert.equal(r2.text, r1.text, "cached text is returned verbatim");
-		assert.equal(countArtifacts(manifest.artifactsRoot), 1, "exactly one spawn — second call was a cache hit");
-		// Array-field normalization: same inputs in a different order → same key.
+		assert.notEqual(r2.artifactPath, r1.artifactPath, "second identical call re-spawned (no within-run cache hit)");
+		assert.equal(countArtifacts(manifest.artifactsRoot), 2, "exactly two spawns — live-run identical calls are NOT cached");
+		// The results ARE still recorded for a future resume's checkpoint…
+		const cp = getWorkflowCheckpoint(ctx);
+		// Both live-run calls ran; the RECORD is keyed by callId, so identical
+		// calls collapse to one entry (latest result wins — resume replays that).
+		assert.equal(Object.keys(cp.completedAgentCalls ?? {}).length, 1, "live-run call recorded for future resume (keyed, deduped)");
+		// …and reordered inputs (same normalized key) also re-spawn in-run.
 		const r3 = await withJsonSuccessMock(() => ctx.agent({ ...call, inputs: ["y.md", "x.md"] }));
-		assert.equal(r3.artifactPath, r1.artifactPath, "sorted inputs normalization: reordered array still hits the cache");
-		assert.equal(countArtifacts(manifest.artifactsRoot), 1, "still one spawn after the reordered replay");
+		assert.equal(r3.ok, true);
+		assert.notEqual(r3.artifactPath, r1.artifactPath, "sorted-inputs normalization still does not hit within-run");
+		assert.equal(countArtifacts(manifest.artifactsRoot), 3, "three spawns total");
 	} finally {
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}

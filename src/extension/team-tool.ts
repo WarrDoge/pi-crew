@@ -66,6 +66,7 @@ import {
 	handleRunDomain,
 	handleStatusDomain,
 } from "./team-tool/dispatch/index.ts";
+import { rootGateBlockReason } from "./team-tool/root-gate.ts";
 import { RUN_NOT_FOUND_HINT } from "./team-tool/run-not-found.ts";
 
 export { handleApi } from "./team-tool/api.ts";
@@ -1225,6 +1226,15 @@ export async function handleTeamTool(params: TeamToolParamsValue, ctx: TeamConte
 	// numbers before domain routers read them. See normalizeLooseNumericFields.
 	params = normalizeLooseNumericFields(params);
 	const action = params.action ?? "list";
+	// Wave-3 root-gate (R2-M-B1/R3-SEC-1/R5-M-B1/B2): user-tier persistent
+	// actions (schedule mutations, goal start/force, user-scope config/settings/
+	// create/update, autonomy, settings theme) are reserved for the user's
+	// ROOT session. Non-root callers (workers) can still write project scope.
+	// Single chokepoint: every domain router dispatch passes through here.
+	const rootGateReason = rootGateBlockReason(params);
+	if (rootGateReason) {
+		return result(rootGateReason, { action: String(action), status: "error" }, true);
+	}
 	const domain = domainForAction(action);
 	switch (domain) {
 		case "run":

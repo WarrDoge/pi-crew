@@ -203,6 +203,14 @@ export function refreshWorkspaceLockHeartbeat(lockPath: string, goalId: string, 
 		if (current.goalId !== goalId || current.pid !== pid) return false;
 		const now = opts.now ?? Date.now;
 		writeLock(lockPath, { ...current, heartbeat: now() });
+		// R3-M-B1/FS4 (Wave-3): writeLock is temp+rename (NOT atomic against a
+		// concurrent stale-steal's unlink→O_EXCL) — a stealer may have replaced
+		// the lock between our read and our rename, and our rename then clobbered
+		// THEIR file. Re-read and verify: if the file no longer holds our
+		// goalId+pid we lost ownership — return false so the heartbeat loop blocks
+		// the goal (never silently keep refreshing a lock another goal owns).
+		const reread = readLock(lockPath);
+		if (!reread || reread.goalId !== goalId || reread.pid !== pid) return false;
 		return true;
 	} catch {
 		return false;
@@ -236,6 +244,13 @@ export function refreshWorkspaceLockHeartbeat(lockPath: string, goalId: string, 
 function claimLock(lockPath: string, contents: WorkspaceLockContents, staleReclaimMs: number, forceOverwrite = false): boolean {
 	mkdirSync(path.dirname(lockPath), { recursive: true });
 	const json = JSON.stringify(contents);
+	// R3-M-B1/FS4 (Wave-3): after a stale-steal claim (unlink→O_EXCL), re-read
+	// and VERIFY the lockfile still holds OUR goalId+pid. O_EXCL guarantees we
+	// created the file, but a concurrent reclaimer's refresh (temp+rename
+	// overwrite) can race in between; without verification two goals could both
+	// believe they own the lock. On mismatch: release best-effort (unlink ONLY
+	// the foreign-current file we observed — its owner's next refresh re-verifies
+	// and fails closed) and report NOT acquired.
 	const tryCreate = (): boolean => {
 		try {
 			const fd = openSync(lockPath, "wx"); // O_EXCL — throws EEXIST if it exists.
@@ -254,6 +269,19 @@ function claimLock(lockPath: string, contents: WorkspaceLockContents, staleRecla
 			return false;
 		}
 	};
+	const tryCreateVerified = (): boolean => {
+		if (!tryCreate()) return false;
+		const reread = readLock(lockPath);
+		if (reread && reread.goalId === contents.goalId && reread.pid === contents.pid) return true;
+		// A concurrent owner raced in (or the FS reordered the write) — release
+		// best-effort and fail the claim; never claim ownership we cannot prove.
+		try {
+			unlinkSync(lockPath);
+		} catch {
+			/* best-effort — the foreign owner's own refresh/verify owns the rest */
+		}
+		return false;
+	};
 	if (forceOverwrite) {
 		// Caller verified the existing lock is logically stale; remove it and claim. A concurrent
 		// reclaimer might re-create between our unlink and our open — that's fine, we lose the race
@@ -263,9 +291,22 @@ function claimLock(lockPath: string, contents: WorkspaceLockContents, staleRecla
 		} catch {
 			/* best-effort */
 		}
-		return tryCreate();
+		return tryCreateVerified();
 	}
-	if (tryCreate()) return true;
+	if (tryCreate()) {
+		// Fresh create won the O_EXCL race — same post-claim verification applies
+		// (cheap: one read) for uniform ownership proof.
+		const reread = readLock(lockPath);
+		if (!(reread && reread.goalId === contents.goalId && reread.pid === contents.pid)) {
+			try {
+				unlinkSync(lockPath);
+			} catch {
+				/* best-effort */
+			}
+			return false;
+		}
+		return true;
+	}
 	// Stale recovery by mtime age: if the lockfile is older than staleReclaimMs, force-delete + retry.
 	try {
 		const stat = statSync(lockPath);
@@ -275,7 +316,7 @@ function claimLock(lockPath: string, contents: WorkspaceLockContents, staleRecla
 			} catch {
 				/* fall through */
 			}
-			return tryCreate();
+			return tryCreateVerified();
 		}
 	} catch {
 		/* fall through to false */

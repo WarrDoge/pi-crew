@@ -16,6 +16,7 @@ import { allWorkflows, discoverWorkflows, invalidateWorkflowDiscoveryCache } fro
 import type { WorkflowConfig, WorkflowStep } from "../workflows/workflow-config.ts";
 import { serializeWorkflow } from "../workflows/workflow-serializer.ts";
 import { enforceDestructiveIntent } from "./team-tool/intent-policy.ts";
+import { assertRootOnlyAction } from "./team-tool/root-gate.ts";
 import type { TeamToolDetails } from "./team-tool-types.ts";
 import { type PiTeamsToolResult, toolResult } from "./tool-result.ts";
 
@@ -415,6 +416,12 @@ export function handleUpdate(params: TeamToolParamsValue, ctx: ManagementContext
 	if (parsed.error) return result(parsed.error, "error", true);
 	const cfg = parsed.value!;
 	const current = resolved.resource!;
+	// Wave-3 root-gate (R5-M-B2): the update path resolves its write scope from
+	// the MATCHED resource (params.scope may be undefined and match either
+	// tier), so the facade gate cannot decide — gate HERE on the resolved
+	// source. Non-root sessions may only rewrite project-tier resources.
+	const updateGate = assertRootOnlyAction("update", undefined, current.source === "project" ? "project" : "user");
+	if (updateGate) return result(updateGate.message, "error", true);
 	const nextName = hasOwn(cfg, "name") ? sanitizeName(String(cfg.name ?? "")) : current.name;
 	if (!nextName) return result("config.name is invalid after sanitization.", "error", true);
 	const source = current.source === "project" ? "project" : "user";

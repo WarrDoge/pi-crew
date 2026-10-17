@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { probeLiveSessionRuntime } from "../../../../src/runtime/live-session/live-session-runtime.ts";
+import { probeLiveSessionRuntime, shouldFailClosedMcpEnforcement } from "../../../../src/runtime/live-session/live-session-runtime.ts";
 
 // Note: runLiveSessionTask requires the @earendil-works/pi-coding-agent package
 // and a complex session setup, so we test probeLiveSessionRuntime which is
@@ -23,5 +23,19 @@ describe("probeLiveSessionRuntime", () => {
 	it("available is boolean", async () => {
 		const result = await probeLiveSessionRuntime();
 		assert.strictEqual(typeof result.available, "boolean");
+	});
+});
+
+// R1-M2 part 2 (Wave-3): when G2 MCP enforcement degrades (SDK loader missing)
+// and the role is NOT MCP-permitted, the live-session spawn must FAIL CLOSED
+// (abort) instead of warn+proceed. Permitted roles keep warn+proceed.
+describe("shouldFailClosedMcpEnforcement (R1-M2 part 2)", () => {
+	it("degraded + non-permitted role → fail closed (abort)", () => {
+		assert.equal(shouldFailClosedMcpEnforcement(false, "sdk_loader_missing"), true);
+		assert.equal(shouldFailClosedMcpEnforcement(false, undefined), false, "no degradation → proceed");
+	});
+	it("degraded + permitted role → warn+proceed (unchanged)", () => {
+		assert.equal(shouldFailClosedMcpEnforcement(true, "sdk_loader_missing"), false);
+		assert.equal(shouldFailClosedMcpEnforcement(true, undefined), false);
 	});
 });
