@@ -95,7 +95,9 @@ test("P2 (f): flag ON — read-only role with scratchpad:true frontmatter is NOT
 	// untouched (the lever must not add its own denylist entries either).
 	const explorer = makeAgent({ name: "explorer", scratchpad: true });
 	const policy = resolveToolPolicy(explorer, "explorer");
-	assert.notEqual(policy.scratchpad, true, "S-6: read-only role never scratchpad-armed");
+	// ResolvedToolPolicy carries no scratchpad field — S-6 (read-only roles are
+	// never scratchpad-armed) is enforced in isScratchpadEnabledForRole and
+	// pinned in its own suite; here we pin the lever's observable effect.
 	assert.deepEqual(
 		policy.tools,
 		["read", "grep", "find", "ls", "glob", "ask"],
