@@ -1345,6 +1345,11 @@ export class CrewBroker {
 		const v = params && typeof params === "object" && !Array.isArray(params) ? (params as Record<string, unknown>) : {};
 		const targetTaskId = typeof v.taskId === "string" ? v.taskId : undefined;
 		const body = typeof v.body === "string" ? v.body : undefined;
+		// R2-L-A4 (2026-10-17): optional client requestId — mirrors msg.send's U5
+		// dedup. An orchestrator retry after ack-loss used to DUPLICATE the steer
+		// (mailbox append + steering file); a stable requestId makes the resend a
+		// no-op.
+		const requestId = typeof v.requestId === "string" && v.requestId.length > 0 ? v.requestId.slice(0, 128) : undefined;
 		if (!targetTaskId || body === undefined) {
 			this.sendError(conn, id, "bad-params", "steer.push: taskId and body are required");
 			return;
@@ -1367,39 +1372,61 @@ export class CrewBroker {
 
 			const messageId = `steer_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 			// Write 1: mailbox — live broker fanout + persistent inbox read.
-			await appendMailboxMessageAsync(loaded.manifest, {
-				id: messageId,
-				direction: "inbox",
-				from: conn.taskId ?? conn.runId,
-				to: targetTaskId,
-				taskId: targetTaskId,
-				body,
-				kind: "steer",
-				priority: (v.priority as "urgent" | "normal" | "low" | undefined) ?? "urgent",
-				deliveryMode: "interrupt",
-			});
+			// R2-L-A4: idempotent append when the client supplied a requestId —
+			// resend-after-ack-loss dedupes instead of duplicating the steer.
+			let deduped = false;
+			if (requestId) {
+				const outcome = await appendMailboxMessageIdempotentAsync(loaded.manifest, {
+					id: messageId,
+					direction: "inbox",
+					from: conn.taskId ?? conn.runId,
+					to: targetTaskId,
+					taskId: targetTaskId,
+					body,
+					kind: "steer",
+					priority: (v.priority as "urgent" | "normal" | "low" | undefined) ?? "urgent",
+					deliveryMode: "interrupt",
+					requestId,
+				});
+				deduped = outcome.deduped;
+			} else {
+				await appendMailboxMessageAsync(loaded.manifest, {
+					id: messageId,
+					direction: "inbox",
+					from: conn.taskId ?? conn.runId,
+					to: targetTaskId,
+					taskId: targetTaskId,
+					body,
+					kind: "steer",
+					priority: (v.priority as "urgent" | "normal" | "low" | undefined) ?? "urgent",
+					deliveryMode: "interrupt",
+				});
+			}
 			// Write 2: steering file — durable fallback so pollSteering() picks
 			// up the steer even when the recipient child's broker connection is down. Matches the
 			// JSONL format of appendSteeringAsync in task-runner.ts.
 			// Best-effort: a failure here must NOT fail the push (mailbox write
 			// already succeeded).
-			try {
-				const steeringDir = `${loaded.manifest.artifactsRoot}/steering`;
-				const steeringPath = resolveRealContainedPath(loaded.manifest.artifactsRoot, `steering/${targetTaskId}.jsonl`);
-				const line =
-					JSON.stringify({
-						type: "steer",
-						message: body,
-						id: messageId,
-						ts: new Date().toISOString(),
-					}) + "\n";
-				await fsp.mkdir(steeringDir, { recursive: true });
-				await fsp.appendFile(steeringPath, line, "utf-8");
-			} catch (fileErr) {
-				const safeMessage = fileErr instanceof Error ? redactSecretString(fileErr.message) : "";
-				logInternalError("crew-broker.steer-file-write-failed", new Error(safeMessage), `taskId=${targetTaskId}`);
+			// R2-L-A4: a deduped resend must NOT re-append the steering file either.
+			if (!deduped) {
+				try {
+					const steeringDir = `${loaded.manifest.artifactsRoot}/steering`;
+					const steeringPath = resolveRealContainedPath(loaded.manifest.artifactsRoot, `steering/${targetTaskId}.jsonl`);
+					const line =
+						JSON.stringify({
+							type: "steer",
+							message: body,
+							id: messageId,
+							ts: new Date().toISOString(),
+						}) + "\n";
+					await fsp.mkdir(steeringDir, { recursive: true });
+					await fsp.appendFile(steeringPath, line, "utf-8");
+				} catch (fileErr) {
+					const safeMessage = fileErr instanceof Error ? redactSecretString(fileErr.message) : "";
+					logInternalError("crew-broker.steer-file-write-failed", new Error(safeMessage), `taskId=${targetTaskId}`);
+				}
 			}
-			this.sendResult(conn, id, { messageId, taskId: targetTaskId, durable: true });
+			this.sendResult(conn, id, { messageId, taskId: targetTaskId, durable: true, ...(requestId ? { requestId, deduped } : {}) });
 		} catch (err) {
 			this.sendError(conn, id, "steer-failed", (err as Error).message);
 		}
@@ -1940,7 +1967,7 @@ export class CrewBroker {
 			const updatedManifest = {
 				...fresh.manifest,
 				// manifest.status stays "running" — park NEVER flips run status (ADR item 3).
-				waitState: { taskId, questionId, askedAt },
+				waitState: { taskId, questionId, askedAt, deadline }, // R2-M-A2: mirror task.waiting.deadline for shield expiry
 				updatedAt: askedAt,
 			};
 			saveRunTasks(updatedManifest, updatedTasks);

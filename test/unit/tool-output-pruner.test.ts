@@ -278,7 +278,13 @@ describe("pruneToolOutputs — digest notices", () => {
 		const result = pruneToolOutputs(results, AGGRESSIVE_CONFIG);
 		assert.ok(result.prunedCount >= 1);
 		const pruned = result.results[0]!;
-		assert.match(pruned.content, /\[Output pruned — \d+ tokens\]/);
+		// R2-L-B7 PIN UPDATE (wave-4 run C, 2026-10-17): tools without a dedicated
+		// digest format now fall back to the generic head-2/tail-2 line digest
+		// (was: bare `[Output pruned — N tokens]` with zero content signal —
+		// dependency-context consumers lost edit/read evidence, SEV-12). The
+		// digest still must NOT use the bash/search key=value formats.
+		assert.match(pruned.content, /\[Output pruned — \d+ tokens; /);
+		assert.match(pruned.content, /line\(s\)|head=/);
 		// read has no digest → should NOT have the semicolon-separated digest format.
 		assert.doesNotMatch(pruned.content, /exit=|matches=|files=/);
 	});

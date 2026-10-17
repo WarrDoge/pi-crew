@@ -223,6 +223,13 @@ export class CrewBrokerClient {
 			Math.max(1, Math.floor(timeoutMs)),
 		);
 		if (entry) entry.timer = requestTimer;
+		// R2-L-A3 (2026-10-17): unref the per-request timer (mirror the hello/
+		// backoff timers at :466-474) — a stranded in-flight request must not
+		// hold a finishing child's event loop open for up to timeoutMs. The
+		// typeof guard keeps injected test timer fakes (no unref) working.
+		if (requestTimer && typeof (requestTimer as { unref?: () => void }).unref === "function") {
+			(requestTimer as { unref?: () => void }).unref?.();
+		}
 		try {
 			const frame = encodeBrokerFrame({ id, method, params });
 			// Write may emit EPIPE etc. We don't await drain here — the response

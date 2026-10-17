@@ -385,6 +385,11 @@ export interface TeamRunManifest {
 		taskId: string;
 		questionId: string;
 		askedAt: string;
+		/** R2-M-A2 (2026-10-17): ms-epoch ask deadline (mirrors the parked task's
+		 * `waiting.deadline`, server-clamped ≤1h). Lets the parked-ask shield
+		 * expire at deadline+grace instead of the legacy 24h TTL. Absent on
+		 * pre-fix manifests → consumers fall back to WAITING_TTL_MS. */
+		deadline?: number;
 	};
 	/** Pi session that created the run, when available. Used to prevent cross-session destructive actions. */
 	ownerSessionId?: string;

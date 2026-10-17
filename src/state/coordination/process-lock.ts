@@ -105,6 +105,52 @@ function socketAddress(name: string): SocketAddress {
 	return { address: fileSocketAddress(key), file: true };
 }
 
+/** R9-OPS2 (2026-10-17): age threshold for the stale-socket sweep (mtime). */
+export const STALE_SOCKET_SWEEP_AGE_MS = 24 * 60 * 60 * 1000;
+
+let staleSocketSweepDone = false;
+
+/** R9-OPS2: sweep stale pi-crew/pc socket FILES from a directory (default
+ * os.tmpdir()). Only entries that lstat as actual unix socket files, older
+ * than STALE_SOCKET_SWEEP_AGE_MS, and not the excluded current path are
+ * unlinked. Best-effort throughout — a sweep failure never breaks the lock
+ * path. Returns the number of files removed (tests). */
+export function sweepStaleSocketFiles(options?: { now?: number; tmpDir?: string; excludePath?: string }): number {
+	const tmpDir = options?.tmpDir ?? os.tmpdir();
+	const now = options?.now ?? Date.now();
+	let removed = 0;
+	try {
+		for (const name of fs.readdirSync(tmpDir)) {
+			if (!name.endsWith(".sock")) continue;
+			if (!name.startsWith("pi-crew-") && !name.startsWith("pc-")) continue;
+			const full = path.join(tmpDir, name);
+			if (options?.excludePath !== undefined && full === options.excludePath) continue;
+			try {
+				const stat = fs.lstatSync(full);
+				if (!stat.isSocket()) continue; // socket FILES only — never touch anything else
+				if (now - stat.mtimeMs < STALE_SOCKET_SWEEP_AGE_MS) continue; // fresh — keep
+				fs.unlinkSync(full);
+				removed += 1;
+			} catch {
+				/* best-effort per file */
+			}
+		}
+	} catch {
+		/* best-effort: unreadable dir etc. */
+	}
+	if (removed > 0) {
+		// ONE line — R9-OPS2 explicitly asks for a single log line, not a flood.
+		console.warn(`[pi-crew] swept ${removed} stale socket file(s) older than 24h from ${tmpDir}`);
+	}
+	return removed;
+}
+
+function ensureStaleSocketSweep(currentSocketPath?: string): void {
+	if (staleSocketSweepDone) return;
+	staleSocketSweepDone = true;
+	sweepStaleSocketFiles(currentSocketPath !== undefined ? { excludePath: currentSocketPath } : undefined);
+}
+
 /**
  * Probe whether a live server accepts connections on `address` (leftover-corpse
  * check). A single refusal is NOT trusted on file-socket platforms: macOS can
@@ -149,6 +195,10 @@ async function accepting(address: string): Promise<boolean> {
  */
 export async function acquireProcessLock(name: string): Promise<ProcessLockHandle> {
 	const { address, file } = socketAddress(name);
+	// R9-OPS2 (2026-10-17): once per process, sweep stale socket FILES left
+	// behind by crashed sessions (observed: 299 stale pc-*.sock in /tmp). The
+	// CURRENT lock's own path is excluded; abstract sockets leave no file.
+	ensureStaleSocketSweep(file ? address : undefined);
 	const server = net.createServer((socket) => socket.end());
 	for (;;) {
 		try {

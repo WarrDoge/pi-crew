@@ -134,7 +134,15 @@ function normalizeEntry(value: unknown): ActiveRunRegistryEntry | undefined {
 	return { runId, cwd, stateRoot, manifestPath, updatedAt };
 }
 
-export function readActiveRunRegistry(maxEntries = DEFAULT_CACHE.manifestMaxEntries): ActiveRunRegistryEntry[] {
+/** FAMILY-2 (2026-10-17): fault-aware read — `readFault` is true when BOTH
+ * mirrors failed while at least one file EXISTS (existing-but-unreadable /
+ * corrupt). [] from a both-missing state is a legitimate fresh install;
+ * [] from a read fault must NOT be persisted back by RMW callers (that
+ * wipes every sibling entry). */
+export function readActiveRunRegistryWithFault(maxEntries = DEFAULT_CACHE.manifestMaxEntries): {
+	entries: ActiveRunRegistryEntry[];
+	readFault: boolean;
+} {
 	let parsed: unknown;
 	// 2.4 — prefer the binary mirror (JSON after header for schema-safe deserialization).
 	// Fall back to JSON when the binary is missing or corrupt; this lets a 2-release
@@ -159,7 +167,19 @@ export function readActiveRunRegistry(maxEntries = DEFAULT_CACHE.manifestMaxEntr
 		try {
 			parsed = JSON.parse(fs.readFileSync(registryPath(), "utf-8"));
 		} catch {
-			return [];
+			// FAMILY-2: BOTH mirrors failed. [] is legitimate ONLY when neither
+			// file exists; an existing-but-unreadable mirror is a READ FAULT — log
+			// loudly so RMW callers know to skip the rebuild persist.
+			const anyMirrorPresent = fs.existsSync(registryBinaryPath()) || fs.existsSync(registryPath());
+			if (anyMirrorPresent) {
+				logInternalError(
+					"active-run-registry",
+					new Error("both mirrors failed to read — returning [] with readFault=true; RMW callers must SKIP the rebuild persist"),
+					undefined,
+					"warn",
+				);
+			}
+			return { entries: [], readFault: anyMirrorPresent };
 		}
 	}
 	const entries = Array.isArray(parsed)
@@ -169,7 +189,11 @@ export function readActiveRunRegistry(maxEntries = DEFAULT_CACHE.manifestMaxEntr
 	for (const entry of entries.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""))) {
 		if (!byId.has(entry.runId)) byId.set(entry.runId, entry);
 	}
-	return [...byId.values()].slice(0, Math.max(0, maxEntries));
+	return { entries: [...byId.values()].slice(0, Math.max(0, maxEntries)), readFault: false };
+}
+
+export function readActiveRunRegistry(maxEntries = DEFAULT_CACHE.manifestMaxEntries): ActiveRunRegistryEntry[] {
+	return readActiveRunRegistryWithFault(maxEntries).entries;
 }
 
 /**
@@ -372,7 +396,21 @@ export function registerActiveRun(manifest: TeamRunManifest): void {
 		updatedAt: manifest.updatedAt,
 	};
 	withRegistryLock(() => {
-		const existing = readActiveRunRegistry().filter((item) => item.runId !== manifest.runId);
+		// FAMILY-2: on a both-mirror read fault, SKIP the persist — registering
+		// into a wiped [] would drop every sibling entry (orphaned live-claims).
+		const readOutcome = readActiveRunRegistryWithFault();
+		if (readOutcome.readFault && readOutcome.entries.length === 0) {
+			logInternalError(
+				"active-run-registry",
+				new Error(
+					`registerActiveRun: registry unreadable — SKIPPING persist for runId=${manifest.runId} (rebuild would wipe siblings)`,
+				),
+				undefined,
+				"warn",
+			);
+			return;
+		}
+		const existing = readOutcome.entries.filter((item) => item.runId !== manifest.runId);
 		// Inline cleanup: remove terminal-status and stale entries before writing.
 		// This prevents unbounded growth between sessions.
 		const { alive, terminalRunIds } = filterAliveEntries(existing);
@@ -398,9 +436,22 @@ export function unregisterActiveRun(runId: string): void {
 		return;
 	}
 	withRegistryLock(() => {
+		// FAMILY-2: on a both-mirror read fault, SKIP the persist — the []
+		// rebuild would wipe every sibling entry. The entry simply stays
+		// registered and a later purge retries.
+		const readOutcome = readActiveRunRegistryWithFault();
+		if (readOutcome.readFault && readOutcome.entries.length === 0) {
+			logInternalError(
+				"active-run-registry",
+				new Error(`unregisterActiveRun: registry unreadable — SKIPPING persist for runId=${runId} (rebuild would wipe siblings)`),
+				undefined,
+				"warn",
+			);
+			return;
+		}
 		// FIX Issue 1: Filter alive entries and pass terminal runIds to writeEntries,
 		// closing the TOCTOU race between status check and write (same pattern as registerActiveRun).
-		const { alive, terminalRunIds } = filterAliveEntries(readActiveRunRegistry().filter((entry) => entry.runId !== runId));
+		const { alive, terminalRunIds } = filterAliveEntries(readOutcome.entries.filter((entry) => entry.runId !== runId));
 		writeEntries(alive, terminalRunIds);
 	});
 }

@@ -813,8 +813,25 @@ async function runRpcSession(
 				) {
 					// R2-M-A5 (Wave-3): pin the registering run — reuse re-validates.
 					poolEntry = { client, proc: child, idle: false, pinnedRunId: requestingRunIdFor(input) };
-					rpcPool.set(poolKey, poolEntry);
-					attachPoolExitHook(poolKey, child);
+					// R2-M-A4 (2026-10-17): NEVER overwrite a live same-key entry — the
+					// previous unconditional rpcPool.set replaced (and orphaned) a live
+					// process: stdin open, unreachable, dead only at host shutdown. Skip
+					// registration instead (the run settles through the normal close path).
+					const existing = rpcPool.get(poolKey);
+					if (existing && existing !== poolEntry && existing.proc.exitCode === null) {
+						logInternalError(
+							"child-pi.rpc-pool-overwrite-guard",
+							new Error(
+								`rpcPool registration skipped: live entry already holds pool key ${poolKey} (pinnedRunId=${existing.pinnedRunId ?? "unknown"})`,
+							),
+							`pid=${existing.proc.pid}`,
+							"warn",
+						);
+						poolEntry = undefined;
+					} else {
+						rpcPool.set(poolKey, poolEntry);
+						attachPoolExitHook(poolKey, child);
+					}
 				}
 				if (poolEntry) {
 					// Warm path (acquired OR just registered): the process STAYS alive

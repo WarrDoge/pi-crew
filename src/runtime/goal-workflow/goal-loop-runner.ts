@@ -525,6 +525,24 @@ export function detectOscillation(verdicts: Array<{ reason: string }>, opts?: { 
 	return true;
 }
 
+/** R3-M-B4 (period-2 oscillation): A,B,A,B alternation never trips the
+ * pairwise window-3 detector — consecutive verdicts differ, yet the loop
+ * goes in circles with period 2. Detect lag-2 similarity: across a tail of
+ * `window + 1` verdicts, EVERY verdict is near-identical to the one two
+ * steps back. Exported for unit testing. */
+export function detectPeriod2Oscillation(verdicts: Array<{ reason: string }>, opts?: { window?: number; threshold?: number }): boolean {
+	const window = Math.max(2, opts?.window ?? 3);
+	const threshold = opts?.threshold ?? 0.8;
+	if (verdicts.length < window + 1) return false;
+	const tail = verdicts.slice(-(window + 1)).map((v) => normalizeForSimilarity(v.reason));
+	// Every verdict in the tail must match the one `lag` steps back, for BOTH
+	// parities of a period-2 cycle (even↔even, odd↔odd).
+	for (let i = 2; i < tail.length; i++) {
+		if (jaccardSimilarity(tail[i], tail[i - 2]) < threshold) return false;
+	}
+	return true;
+}
+
 function normalizeForSimilarity(s: string): Set<string> {
 	// Lowercase, split into word 3-shingles (trigrams of words). Skip non-word tokens.
 	const words = s
@@ -1024,7 +1042,9 @@ export async function runGoalLoop(input: RunGoalLoopInput): Promise<RunGoalLoopR
 			// 'stuck' is re-hintable via `goal resume config.hint=...` (no double-execution: the
 			// loop is single-threaded per goal; resume re-spawns it). Default metric: shingle-Jaccard
 			// (cheap, local). Env PI_CREW_GOAL_OSCILLATION_EMBEDDINGS=1 enables embedding-based (P1.5).
-			if (detectOscillation(goal.verdicts)) {
+			// R3-M-B4: period-2 alternation (A,B,A,B) — pairwise window-3 misses it,
+			// but every verdict matching the one two steps back is equally circular.
+			if (detectOscillation(goal.verdicts) || detectPeriod2Oscillation(goal.verdicts)) {
 				const stuck = store.compareAndSetStatus(goal.goalId, "running", "stuck", eventsPath);
 				if (stuck) {
 					goal = stuck;

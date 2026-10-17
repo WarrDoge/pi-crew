@@ -36,6 +36,10 @@ export interface CrewSchedulerOptions {
  * waits (e.g. a yearly cron) must be chained in hops below this ceiling. */
 const MAX_TIMER_DELAY_MS = 2_147_483_000;
 
+/** R2-M-B4 (SEV-4): retention cap for job.spawnedRunIds (bounded persisted JSON;
+ * remove() cancels at most this most-recent window). */
+const SPAWNED_RUN_IDS_CAP = 50;
+
 export class CrewScheduler {
 	private jobs = new Map<string, ScheduledJob>();
 	private timers = new Map<string, ReturnType<typeof setInterval | typeof setTimeout>>();
@@ -81,6 +85,12 @@ export class CrewScheduler {
 
 	add(job: ScheduledJob): void {
 		this.jobs.set(job.id, job);
+		// R2-M-B6 (SEV-11): a persisted nextRun in the past = occurrences missed
+		// while the host was down. Classic cron leaves mail; we leave a one-time
+		//	`skipped` event + log line on RELOAD (this path). No catch-up — firing a
+		//	stale queue at load would storm the host. Runtime re-arms go through
+		//	update() (never add()), so a normal fire's stale nextRun cannot reach here.
+		this.reportMissedCronOccurrences(job);
 		if (job.enabled) this.arm(job);
 		this.emit?.({ type: "added", job });
 	}
@@ -123,7 +133,13 @@ export class CrewScheduler {
 	recordSpawnedRun(jobId: string, runId: string): void {
 		const job = this.jobs.get(jobId);
 		if (!job) return;
-		const spawnedRunIds = [...(job.spawnedRunIds ?? []), runId];
+		// R2-M-B4 (SEV-4): cap spawnedRunIds. The unbounded append persisted the
+		// FULL array per fire (O(n²) writes — a 5-min job ≈ 8.6k entries/30d,
+		// ~300-350 KB) and remove() then cancelled ALL historical runIds. Keep the
+		// most recent SPAWNED_RUN_IDS_CAP; runs beyond the cap are long terminal,
+		// so not cancelling them is the natural no-op.
+		const appended = [...(job.spawnedRunIds ?? []), runId];
+		const spawnedRunIds = appended.length > SPAWNED_RUN_IDS_CAP ? appended.slice(-SPAWNED_RUN_IDS_CAP) : appended;
 		this.jobs.set(jobId, { ...job, spawnedRunIds });
 	}
 
@@ -148,6 +164,26 @@ export class CrewScheduler {
 		// time at its scheduled time — a one-shot executing twice.
 		if (job.scheduleType === "once") this.update(jobId, { enabled: false });
 		return { ok: true };
+	}
+
+	/** R2-M-B6: one-time missed-occurrence report for a reloaded cron job whose
+	 * persisted nextRun is in the past (bounded occurrence walk — no catch-up). */
+	private reportMissedCronOccurrences(job: ScheduledJob): void {
+		if (job.scheduleType !== "cron" || !job.nextRun) return;
+		const nowMs = this.now().getTime();
+		const persistedMs = new Date(job.nextRun).getTime();
+		if (!Number.isFinite(persistedMs) || persistedMs >= nowMs) return;
+		let missed = 0;
+		let cursor = new Date(persistedMs);
+		for (let i = 0; i < 10_000; i++) {
+			const next = nextRunTime({ kind: "cron", spec: job.schedule }, cursor);
+			if (!(next instanceof Date) || next.getTime() > nowMs) break;
+			missed += 1;
+			cursor = next;
+		}
+		const reason = `missed ${missed} occurrence(s) while host down (persisted nextRun ${job.nextRun} < now ${new Date(nowMs).toISOString()})`;
+		this.emit?.({ type: "skipped", jobId: job.id, reason });
+		console.warn(`[pi-crew scheduler] job ${job.id} (${job.name ?? job.id}) skipped: ${reason}`);
 	}
 
 	private arm(job: ScheduledJob): void {
@@ -445,46 +481,55 @@ function cronFieldCandidates(field: string, min: number, max: number, names?: Re
 	return matched;
 }
 
-/**
- * Match a single cron field value against a cron field expression.
- * Supports the standard cron grammar: wildcard, single N, range a-b, list
- * a,b,c, step syntax (wildcard-step, range-step, from-step), and named tokens
- * (MON, JAN) when a `names` map is passed. Fixes the prior matcher that
- * rejected step values and named DOW (parseInt returned NaN).
- */
-function cronFieldMatches(value: number, field: string, min: number, max: number, names?: Record<string, number>): boolean {
-	const candidates = cronFieldCandidates(field, min, max, names);
-	return candidates?.has(value) === true;
-}
-
 function nextCronDate(spec: string, from: Date): Date | { error: string } | null {
 	const parts = spec.split(/\s+/);
 	if (parts.length < 5) return { error: "Invalid cron expression" };
 	const [minStr, hourStr, domStr, monthStr, dowStr] = parts;
 
+	// R2-L-B5 (SEV-9): hoist the candidate Sets OUT of the scan loop. The old
+	// minute-by-minute scan rebuilt 5 Sets per step (sparse crons walked up to
+	// 527k iterations ≈ 309ms event-loop stall, re-run after every fire). The
+	// scan below keeps EXACTLY the same semantics (first matching minute in
+	// chronological order) but hops by hour/day when the coarse fields mismatch.
+	const minuteCandidates = cronFieldCandidates(minStr, 0, 59);
+	const hourCandidates = cronFieldCandidates(hourStr, 0, 23);
+	const domCandidates = cronFieldCandidates(domStr, 1, 31);
+	const monthCandidates = cronFieldCandidates(monthStr, 1, 12, CRON_MONTH_NAMES);
+	const dowCandidates = cronFieldCandidates(dowStr, 0, 6, CRON_DOW_NAMES);
+	if (!minuteCandidates || !hourCandidates || !domCandidates || !monthCandidates || !dowCandidates) {
+		return { error: "Invalid cron expression" };
+	}
+
 	let cursor = new Date(from.getTime());
 	cursor.setSeconds(0, 0);
 	cursor = new Date(cursor.getTime() + 60_000);
 
-	const maxIterations = 366 * 24 * 60;
-	for (let i = 0; i < maxIterations; i++) {
-		const min = cursor.getUTCMinutes();
-		const hour = cursor.getUTCHours();
-		const dom = cursor.getUTCDate();
-		const month = cursor.getUTCMonth() + 1;
-		const dow = cursor.getUTCDay();
-
+	// Search window: 366 days (the old 366*24*60 minute-step bound).
+	const deadlineMs = cursor.getTime() + 366 * 24 * 60 * 60_000;
+	while (cursor.getTime() <= deadlineMs) {
+		// Day-level filter: month/dom/dow — skip whole days on mismatch.
 		if (
-			cronFieldMatches(min, minStr, 0, 59) &&
-			cronFieldMatches(hour, hourStr, 0, 23) &&
-			cronFieldMatches(dom, domStr, 1, 31) &&
-			cronFieldMatches(month, monthStr, 1, 12, CRON_MONTH_NAMES) &&
-			cronFieldMatches(dow, dowStr, 0, 6, CRON_DOW_NAMES)
+			!monthCandidates.has(cursor.getUTCMonth() + 1) ||
+			!domCandidates.has(cursor.getUTCDate()) ||
+			!dowCandidates.has(cursor.getUTCDay())
 		) {
-			return cursor;
+			// Hop to 00:00 of the next UTC day (Date.UTC normalizes overflow).
+			cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), cursor.getUTCDate() + 1, 0, 0));
+			continue;
 		}
-
-		cursor = new Date(cursor.getTime() + 60_000);
+		// Hour-level filter: skip the rest of the hour on mismatch.
+		if (!hourCandidates.has(cursor.getUTCHours())) {
+			cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), cursor.getUTCDate(), cursor.getUTCHours() + 1, 0));
+			continue;
+		}
+		// Matching day + hour: scan the remaining minutes of THIS hour only.
+		for (let minute = cursor.getUTCMinutes(); minute <= 59; minute++) {
+			if (minuteCandidates.has(minute)) {
+				return new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), cursor.getUTCDate(), cursor.getUTCHours(), minute));
+			}
+		}
+		// No matching minute left in this hour → next hour boundary.
+		cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), cursor.getUTCDate(), cursor.getUTCHours() + 1, 0));
 	}
 
 	return { error: "No next cron occurrence found within search window" };

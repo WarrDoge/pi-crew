@@ -147,13 +147,20 @@ export async function sweepExpiredWaitingTasks(
 			if (task.status !== "waiting" || task.waiting === undefined) continue;
 			if (task.waiting.deadline > now) continue;
 			const questionId = task.waiting.questionId;
-			if (emittedAskTimedoutQuestionIds.has(questionId)) continue; // exactly-once per process
+			// FS6 (2026-10-17): liveness BEFORE the emittedAskTimedout exactly-once
+			// guard. The guard used to mark the questionId on the FIRST sweep
+			// regardless of liveness — a worker ALIVE at sweep 1 (event emitted, task
+			// left waiting) that DIED before sweep 2 was skipped forever by the guard
+			// and never requeued. Now only the alive-worker "surfaced in-tool"
+			// event is exactly-once; a dead worker always proceeds to the requeue
+			// (the status transition makes the next sweep a natural no-op).
+			const workerAlive = isWaitingWorkerAlive(task, now);
+			if (workerAlive && emittedAskTimedoutQuestionIds.has(questionId)) continue; // exactly-once per process (alive-worker events only)
 			if (emittedAskTimedoutQuestionIds.size >= MAX_EMITTED_ASK_TIMEDOUT) {
 				const oldest = emittedAskTimedoutQuestionIds.keys().next().value;
 				if (oldest !== undefined) emittedAskTimedoutQuestionIds.delete(oldest);
 			}
 			emittedAskTimedoutQuestionIds.add(questionId);
-			const workerAlive = isWaitingWorkerAlive(task, now);
 			timedOutQuestionIds.push(questionId);
 			pendingEvents.push({ taskId: task.id, questionId, workerAlive });
 			if (!workerAlive) {
@@ -1018,14 +1025,48 @@ export async function dispatchBatch(ctx: SchedulerContext, decision: DispatchBat
 			const freshTasks = fresh?.tasks ?? ctx.tasks;
 			const freshTask = freshTasks.find((item) => item.id === task.id) ?? task;
 			if (freshTask.status !== "queued" && freshTask.status !== "running") return { manifest: freshManifest, tasks: freshTasks };
-			return withCorrelation(childCorrelation(freshManifest.runId, task.id), () =>
-				runTeamTask({
-					...baseInput,
-					manifest: freshManifest,
-					tasks: freshTasks,
-					task: freshTask,
-				}),
-			);
+			// FS7 (2026-10-17): the final fallback attempt previously ran OUTSIDE the
+			// accounting/deadletter bookkeeping the retry-loop attempts get
+			// (onRetryGivenUp above) — a throw here escaped with NO deadletter, no
+			// metric, no event. Wrap it so a fallback failure lands in the SAME
+			// bookkeeping as the loop attempts.
+			try {
+				return await withCorrelation(childCorrelation(freshManifest.runId, task.id), () =>
+					runTeamTask({
+						...baseInput,
+						manifest: freshManifest,
+						tasks: freshTasks,
+						task: freshTask,
+					}),
+				);
+			} catch (fallbackError) {
+				const fallbackMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+				appendDeadletter(freshManifest, {
+					runId: freshManifest.runId,
+					taskId: task.id,
+					reason: "dispatch-fallback",
+					attempts: 1,
+					lastError: fallbackMessage,
+					timestamp: new Date().toISOString(),
+					agent: freshTask.agent,
+					role: freshTask.role,
+					modelAttempts: freshTask.modelAttempts?.length,
+					runStatus: freshManifest.status,
+				});
+				input.metricRegistry
+					?.counter("crew.task.deadletter_total", "Deadletter triggers by reason")
+					.inc({ reason: "dispatch-fallback" });
+				const nowIso = new Date().toISOString();
+				const failedTasks = freshTasks.map((item) =>
+					item.id === task.id && (item.status === "queued" || item.status === "running")
+						? { ...item, status: "failed" as const, finishedAt: nowIso, error: fallbackMessage }
+						: item,
+				);
+				return {
+					manifest: updateRunStatus(freshManifest, "failed", `dispatch fallback failed: ${fallbackMessage}`),
+					tasks: failedTasks,
+				};
+			}
 		}
 	};
 	// ── OPT-01 streaming dispatch: dispatch units into ctx.pendingUnits ──

@@ -145,6 +145,14 @@ export function createTmuxProvider(deps: TmuxProviderDeps = {}): SurfaceProvider
 		timer = null;
 	}
 
+	// R2-L-B4 (SEV-8): exited watchers were retained forever — no production
+	// caller of handle.dispose(). fire() now MOVES the entry into a bounded
+	// recently-exited ring (late subscribers still get their reason replayed,
+	// once) instead of leaking callbacks + reason per pane for the host
+	// session lifetime.
+	const exitedRecent = new Map<string, SurfaceExitReason>();
+	const EXITED_RECENT_CAP = 64;
+
 	/** Bắn reason MỘT lần cho mọi callback của pane (copy list — cb có thể dispose). */
 	function fire(paneId: string, reason: SurfaceExitReason): void {
 		const watcher = watchers.get(paneId);
@@ -152,6 +160,14 @@ export function createTmuxProvider(deps: TmuxProviderDeps = {}): SurfaceProvider
 		watcher.exited = true;
 		watcher.reason = reason;
 		for (const cb of [...watcher.callbacks]) cb(reason);
+		// R2-L-B4: free the watcher entry after the callbacks fired — keep only a
+		// bounded reason ring for late-subscriber replay (onExit below).
+		watchers.delete(paneId);
+		exitedRecent.set(paneId, reason);
+		if (exitedRecent.size > EXITED_RECENT_CAP) {
+			const oldest = exitedRecent.keys().next().value;
+			if (oldest !== undefined) exitedRecent.delete(oldest);
+		}
 		maybeStopTimer();
 	}
 
@@ -194,6 +210,14 @@ export function createTmuxProvider(deps: TmuxProviderDeps = {}): SurfaceProvider
 			kind: "tmux",
 			...(tabId ? { tabId } : {}),
 			onExit(cb) {
+				// R2-L-B4: late subscriber on an already-fired pane — replay the exit
+				// reason from the bounded ring, then serve it (single replay).
+				const exitedReason = exitedRecent.get(paneId);
+				if (exitedReason !== undefined) {
+					exitedRecent.delete(paneId);
+					cb(exitedReason);
+					return;
+				}
 				let watcher = watchers.get(paneId);
 				if (!watcher) {
 					watcher = { callbacks: [], exited: false };
@@ -209,10 +233,14 @@ export function createTmuxProvider(deps: TmuxProviderDeps = {}): SurfaceProvider
 			},
 			dispose() {
 				const watcher = watchers.get(paneId);
-				if (!watcher) return;
+				if (!watcher) {
+					exitedRecent.delete(paneId);
+					return;
+				}
 				// Host chủ động dispose khi pane còn sống → "detached" cho listener.
 				if (!watcher.exited) fire(paneId, "detached");
 				watchers.delete(paneId);
+				exitedRecent.delete(paneId);
 				maybeStopTimer();
 			},
 		};

@@ -36,13 +36,18 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-
+import { logInternalError } from "../../utils/internal-error.ts";
 import { killProcessTree } from "../child-pi/child-pi-kill.ts";
 import type { SurfaceDetection, SurfaceExitReason, SurfaceHandle, SurfaceProvider, SurfaceSpawnOpts } from "./surface-provider.ts";
 import { MAX_PANES_PER_TAB, splitDirectionFor } from "./surface-provider.ts";
 
 /** Grace window giữa SIGTERM worker pid và pane.close fallback (đối chiều tmux provider). */
 const GRACEFUL_TERM_WAIT_MS = 3000;
+
+/** R3-M-B3: per-request deadline on the one-connection-per-request `call()` —
+ * a wedged herdr server must fail the caller instead of hanging the host
+ * until some outer 600s deadline (gap caught in the E2E herdr battery). */
+const HERDR_REQUEST_TIMEOUT_MS = 10_000;
 
 /**
  * Socket abstraction injectable. Quy ước EOF/error: onLine được gọi đúng một
@@ -137,6 +142,11 @@ interface WireResponse {
 interface WireEvent {
 	event?: string;
 	data?: { pane_id?: string };
+	/** R3-M-B3: an error ACK carries the request id and an error object — no
+	 * `event` envelope (previously silently ignored, leaving watchers hung on
+	 * a subscription the server actually refused). */
+	id?: string;
+	error?: { code?: string; message?: string };
 }
 
 /** Watcher theo pane id — callback list + trạng thái exit cho replay. */
@@ -157,6 +167,10 @@ export function createHerdrProvider(deps: HerdrProviderDeps = {}): SurfaceProvid
 	let reqSeq = 0;
 	let subscription: HerdrSocket | null = null;
 	let subscriptionCb: ((line: string) => void) | null = null;
+	// R3-M-B3: id of the in-flight events.subscribe request — lets
+	// onSubscriptionLine recognize an error ACK (frame with id, no event) and
+	// treat the subscription as dead instead of waiting forever.
+	let subscriptionRequestId: string | null = null;
 
 	// Tab-layout (spec 2026-08-27-surface-tab-layout): tabKey(run) → {tabIds
 	// (MỌI tab của run), rootPaneId (tab đang nhận split), paneCount}. Tab mở
@@ -208,11 +222,22 @@ export function createHerdrProvider(deps: HerdrProviderDeps = {}): SurfaceProvid
 				return;
 			}
 			let settled = false;
+			// R3-M-B3: per-request deadline — see HERDR_REQUEST_TIMEOUT_MS. A wedged
+			// herdr server must fail the caller instead of hanging until an outer
+			// 600s deadline (gap caught in the E2E herdr battery).
+			const requestTimer = setTimeout(() => {
+				if (settled) return;
+				settled = true;
+				socket.close();
+				reject(new Error(`herdr request timeout: no response to ${id} (${method}) within ${HERDR_REQUEST_TIMEOUT_MS}ms`));
+			}, HERDR_REQUEST_TIMEOUT_MS);
+			requestTimer.unref?.();
 			socket.onLine((line) => {
 				if (settled) return;
 				if (!line) {
 					// EOF trước response — server chết giữa chừng.
 					settled = true;
+					clearTimeout(requestTimer);
 					socket.close();
 					reject(new Error(`herdr socket closed before response to ${id} (${method})`));
 					return;
@@ -225,6 +250,7 @@ export function createHerdrProvider(deps: HerdrProviderDeps = {}): SurfaceProvid
 				}
 				if (msg.id !== id) return;
 				settled = true;
+				clearTimeout(requestTimer);
 				socket.close();
 				if (msg.error) {
 					reject(new Error(`${msg.error.code ?? "herdr_error"}: ${msg.error.message ?? "unknown error"}`));
@@ -246,6 +272,7 @@ export function createHerdrProvider(deps: HerdrProviderDeps = {}): SurfaceProvid
 			// Server đóng subscription socket — mọi handle còn sống thành mux-dead.
 			subscription = null;
 			subscriptionCb = null;
+			subscriptionRequestId = null;
 			for (const paneId of [...watchers.keys()]) fire(paneId, "mux-dead");
 			return;
 		}
@@ -253,6 +280,31 @@ export function createHerdrProvider(deps: HerdrProviderDeps = {}): SurfaceProvid
 		try {
 			msg = JSON.parse(line) as WireEvent;
 		} catch {
+			return;
+		}
+		// R3-M-B3 (2026-10-17): error ACK for events.subscribe — a frame carrying
+		// the request id and an error object (NO event envelope) means the server
+		// refused the subscription (bad params / protocol drift). Previously this
+		// frame fell through the event filter below and was silently ignored,
+		// leaving every watcher hung until the 600s outer deadline. Treat it as
+		// mux-dead (same as EOF) so handles fail fast + the reason is logged.
+		if (msg.id !== undefined && msg.error !== undefined && msg.id === subscriptionRequestId) {
+			logInternalError(
+				"herdr-provider",
+				new Error(`events.subscribe rejected: ${msg.error.code ?? "herdr_error"}: ${msg.error.message ?? "unknown error"}`),
+				herdrSocketPath(env),
+				"warn",
+			);
+			const deadSubscription = subscription;
+			subscription = null;
+			subscriptionCb = null;
+			subscriptionRequestId = null;
+			try {
+				deadSubscription?.close();
+			} catch {
+				/* already closed */
+			}
+			for (const paneId of [...watchers.keys()]) fire(paneId, "mux-dead");
 			return;
 		}
 		// CẢ HAI loại event đều là "pane biến mất" cho pi-crew (verified live
@@ -285,6 +337,7 @@ export function createHerdrProvider(deps: HerdrProviderDeps = {}): SurfaceProvid
 		}
 		subscription = socket;
 		subscriptionCb = onSubscriptionLine;
+		subscriptionRequestId = id;
 		socket.onLine((line) => subscriptionCb?.(line));
 		// Frame nối \n bởi defaultConnect's write() wrapper — KHÔNG thêm \n ở
 		// đây (frame `\n\n` → server đóng subscription, xem comment trong call()).

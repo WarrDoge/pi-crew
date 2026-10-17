@@ -27,7 +27,12 @@ import type { ArtifactDescriptor, PolicyDecision, TeamRunManifest, TeamTaskState
 import { aggregateUsage, formatUsage } from "../state/usage.ts";
 import { logInternalError } from "../utils/internal-error.ts";
 import { checkBranchFreshness } from "../worktree/branch-freshness.ts";
-import { effectivenessPolicyDecision, evaluateRunEffectiveness, formatRunEffectivenessLines } from "./effectiveness.ts";
+import {
+	delegateCompletedTaskIdsFromEvents,
+	effectivenessPolicyDecision,
+	evaluateRunEffectiveness,
+	formatRunEffectivenessLines,
+} from "./effectiveness.ts";
 import { isRunTerminalPreserved } from "./merge-loop.ts";
 import { evaluateCrewPolicy, summarizePolicyDecisions } from "./policy-engine.ts";
 import { buildRecoveryLedger } from "./recovery/recovery-recipes.ts";
@@ -51,6 +56,8 @@ function runEffectivenessLines(
 			tasks,
 			executeWorkers,
 			runtimeConfig,
+			// R9-F3: same delegate.completed guard as the policy path (line ~374).
+			delegateCompleted: manifest.eventsPath ? delegateCompletedTaskIdsFromEvents(readEvents(manifest.eventsPath)) : undefined,
 		}),
 	);
 }
@@ -376,6 +383,10 @@ export async function finalizeRun(ctx: SchedulerContext): Promise<{ manifest: Te
 		tasks,
 		executeWorkers: input.executeWorkers,
 		runtimeConfig: input.runtimeConfig,
+		// R9-F3: count delegate.completed ok:true grandchild tasks as observable
+		// work — the events log is already read once at finalize (scratchpad
+		// summary); reuse it instead of a second pass.
+		delegateCompleted: manifest.eventsPath ? delegateCompletedTaskIdsFromEvents(readEvents(manifest.eventsPath)) : undefined,
 	});
 	const effectivenessDecision = effectivenessPolicyDecision(effectiveness);
 	if (effectivenessDecision) {

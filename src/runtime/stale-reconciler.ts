@@ -108,9 +108,27 @@ const WAITING_TTL_MS = 24 * 60 * 60 * 1000;
  * normal staleness repair paths apply (leak guard).
  */
 export function isWaitAnswerPending(manifest: TeamRunManifest, now = Date.now()): boolean {
-	const askedAtMs = manifest.waitState?.askedAt ? new Date(manifest.waitState.askedAt).getTime() : Number.NaN;
-	return Number.isFinite(askedAtMs) && now - askedAtMs <= WAITING_TTL_MS;
+	const waitState = manifest.waitState;
+	if (!waitState?.askedAt) return false;
+	const askedAtMs = new Date(waitState.askedAt).getTime();
+	if (!Number.isFinite(askedAtMs) || now - askedAtMs > WAITING_TTL_MS) return false;
+	// R2-M-A2 (2026-10-17): the parked-ask shield outlived the ask itself —
+	// WAITING_TTL_MS (24h) ≫ the server-clamped ask deadline (≤1h,
+	// request-parsers.ts WAIT_REQUEST_TIMEOUT_SEC_MAX), so a runner that died
+	// parked stayed shielded ~23h past its park deadline (dead parked runner
+	// blocked verdict tree/cancel/U9 fast-path). When the broker stamped a
+	// deadline on the park, the shield expires at deadline + grace; the 24h
+	// TTL above stays ONLY as the no-deadline fallback (pre-fix manifests).
+	if (typeof waitState.deadline === "number" && Number.isFinite(waitState.deadline)) {
+		return now <= waitState.deadline + PARKED_ASK_GRACE_MS;
+	}
+	return true;
 }
+
+/** R2-M-A2: grace past the ask deadline before a parked run loses
+ * reconciliation protection (buffer for the sweep cadence / in-tool
+ * surfacing — the deadline-owner sweep in dispatch-batch co-owns this). */
+const PARKED_ASK_GRACE_MS = 60 * 60 * 1000;
 
 /**
  * Generalized intentional-wait predicate (ADR-0 item 9, extended by ADR-4 §2):

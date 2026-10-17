@@ -275,6 +275,11 @@ export class WorkerRequestBookkeeper {
 			entry.timer = setTimeout(() => {
 				this.pending.delete(id);
 				entry.reject(new Error(`worker-atomic-writer: request timed out after ${this.timeoutMs}ms (id=${id})`));
+				// FS8 (2026-10-17): a timed-out request means the writer thread is
+				// WEDGED — every other pending/future request would time out too.
+				// Terminate the worker (existing kill util — drains the rest, frees
+				// the temp dir; the next write re-spawns a fresh worker).
+				terminateWorkerAtomicWriter();
 			}, this.timeoutMs);
 			entry.timer.unref();
 		}

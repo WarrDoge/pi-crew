@@ -168,9 +168,13 @@ export function resultDigest(toolName: string, content: string, isError?: boolea
 	return undefined;
 }
 
-function createPrunedNotice(tokens: number, entry: ToolResultEntry): string {
+export function createPrunedNotice(tokens: number, entry: ToolResultEntry): string {
 	const generic = `[Output pruned — ${tokens} tokens]`;
-	const digest = resultDigest(entry.toolName, entry.content, entry.isError, entry.exitCode);
+	// R2-L-B7 (SEV-12): tools without a known digest format (edit/write/read…)
+	// previously fell back to the content-free generic notice — dependency-context
+	// consumers lost ALL evidence the tool did anything. Generic head-2/tail-2
+	// digest keeps a bounded content signal for every tool.
+	const digest = resultDigest(entry.toolName, entry.content, entry.isError, entry.exitCode) ?? genericLineDigest(entry.content);
 	if (!digest) return generic;
 	const genericTokens = countTokens(generic);
 	const maxTokens = Math.max(genericTokens, Math.floor(genericTokens * DIGEST_NOTICE_TOKEN_CAP_MULTIPLIER));
@@ -178,6 +182,20 @@ function createPrunedNotice(tokens: number, entry: ToolResultEntry): string {
 	const suffix = "]";
 	const maxChars = Math.max(0, maxTokens * 4 - prefix.length - suffix.length);
 	return `${prefix}${truncateField(digest, maxChars)}${suffix}`;
+}
+
+/** R2-L-B7: generic digest for tools without a dedicated format — first two
+ * and last two non-empty lines, deduped when the content is short. Never
+ * empty (falls back to a line count) so the pruned notice always carries a
+ * content signal. */
+function genericLineDigest(content: string): string {
+	const lines = (content ?? "")
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter(Boolean);
+	if (lines.length === 0) return "empty output";
+	if (lines.length <= 4) return `${lines.length} line(s): ${lines.join(" ⏎ ")}`;
+	return `head=${lines.slice(0, 2).join(" ⏎ ")}; tail=${lines.slice(-2).join(" ⏎ ")}`;
 }
 
 // ---------------------------------------------------------------------------

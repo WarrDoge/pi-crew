@@ -74,18 +74,34 @@ export function ownershipMapPath(manifest: TeamRunManifest): string {
  */
 export function readOwnershipMap(manifest: TeamRunManifest): OwnershipMapFile {
 	try {
-		const raw = fs.readFileSync(ownershipMapPath(manifest), "utf-8");
-		const parsed = JSON.parse(raw) as unknown;
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return emptyOwnershipMap();
-		const entries = (parsed as { entries?: unknown }).entries;
-		if (!entries || typeof entries !== "object" || Array.isArray(entries)) return emptyOwnershipMap();
-		return { version: 1, entries: entries as Record<string, OwnershipEntry> };
+		return readOwnershipMapStrict(manifest);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
 			logInternalError("ownership-map.read", error, ownershipMapPath(manifest), "warn");
 		}
 		return emptyOwnershipMap();
 	}
+}
+
+/** FAMILY-2 (2026-10-17): strict variant — ENOENT still maps to the empty map
+ * (legitimate first write), but any OTHER read/parse fault THROWS. The locked
+ * upsert below uses this so a transient EACCES/EBUSY/corrupt read can never
+ * feed an empty map into the overwrite persist (that would wipe every
+ * ownership entry — steers and kills would lose their targets). */
+export function readOwnershipMapStrict(manifest: TeamRunManifest): OwnershipMapFile {
+	let raw: string;
+	try {
+		raw = fs.readFileSync(ownershipMapPath(manifest), "utf-8");
+	} catch (error) {
+		// ENOENT = no map yet — a legitimate empty state for the first write.
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyOwnershipMap();
+		throw error;
+	}
+	const parsed = JSON.parse(raw) as unknown; // corrupt JSON throws
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("ownership-map: unexpected JSON shape");
+	const entries = (parsed as { entries?: unknown }).entries;
+	if (!entries || typeof entries !== "object" || Array.isArray(entries)) throw new Error("ownership-map: missing entries object");
+	return { version: 1, entries: entries as Record<string, OwnershipEntry> };
 }
 
 /**
@@ -104,7 +120,10 @@ export function upsertOwnershipEntry(manifest: TeamRunManifest, entry: Ownership
 			// its flush-before-reload guard). The map is small, written at spawn /
 			// steer frequency (not a hot loop), and round-trip readers expect
 			// read-your-writes immediately after upsert returns.
-			const fresh = readOwnershipMap(manifest);
+			// FAMILY-2: STRICT read — a non-ENOENT fault throws, the outer catch
+			// logs it, and the OVERWRITE PERSIST IS SKIPPED (previously the
+			// masked-empty read wiped the whole map).
+			const fresh = readOwnershipMapStrict(manifest);
 			const prev = fresh.entries[entry.taskId] ?? {};
 			const merged: OwnershipEntry = {
 				...prev,

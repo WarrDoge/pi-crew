@@ -122,7 +122,8 @@ export function formatTranscriptEvent(event: unknown, themeLike: unknown = undef
 		if (text.startsWith("{") && text.endsWith("}")) {
 			return [header, ...highlightJson(text, theme).split(/\r?\n/).filter(Boolean)];
 		}
-		if (text.includes("```") && text.includes("```")) {
+		if (text.includes("```")) {
+			// R10-C1: was a duplicated identical includes() check — dropped the redundant twin
 			return [header, ...highlightCodeBlocks(text, theme)];
 		}
 		return [

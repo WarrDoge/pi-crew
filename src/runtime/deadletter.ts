@@ -5,7 +5,7 @@ import { logInternalError } from "../utils/internal-error.ts";
 import { projectCrewRoot } from "../utils/paths.ts";
 import { assertSafePathId } from "../utils/safe-paths.ts";
 
-export type DeadletterReason = "max-retries" | "heartbeat-dead" | "manual";
+export type DeadletterReason = "max-retries" | "heartbeat-dead" | "manual" | "dispatch-fallback"; // FS7: catch-fallback failure (dispatch-batch)
 
 export interface DeadletterEntry {
 	taskId: string;

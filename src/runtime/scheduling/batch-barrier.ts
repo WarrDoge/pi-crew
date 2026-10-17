@@ -55,8 +55,19 @@ export class BatchBarrier {
 		}
 	>();
 
-	/** Register a member at spawn time. Idempotent per (batchId, agentId). */
+	/** R2-L-B6 (SEV-10): consolidated-notified batches are FREED (member maps
+	 * dropped) and remembered here as tombstones so `alreadyNotified` stays
+	 * true and late `markTerminal`/`register` calls never re-notify. Bounded
+	 * (evict-oldest) — previously every batchId leaked its member maps for the
+	 * session lifetime (zero production callers of dispose()). */
+	private readonly notifiedTombstones = new Map<string, number>();
+	private static readonly TOMBSTONE_CAP = 256;
+
+	/** Register a member at spawn time. Idempotent per (batchId, agentId).
+	 * R2-L-B6: no-op for a tombstoned (already notified) batch — the member
+	 * map is intentionally gone and must not resurrect a re-notifiable batch. */
 	register(batchId: string, agentId: string, meta?: { description?: string; type?: string }): void {
+		if (this.notifiedTombstones.has(batchId)) return;
 		let batch = this.batches.get(batchId);
 		if (!batch) {
 			batch = {
@@ -83,6 +94,18 @@ export class BatchBarrier {
 	 * on-the-fly as a batch-of-one so its terminal state is not silently lost.
 	 */
 	markTerminal(batchId: string, member: BatchMember): BatchSnapshot {
+		// R2-L-B6: the batch already fired its consolidated notification and was
+		// freed — report notified:true so the caller NEVER re-notifies a late
+		// member (documented late-spawn semantics), without resurrecting the map.
+		if (this.notifiedTombstones.has(batchId)) {
+			return {
+				batchId,
+				members: [{ ...member }],
+				terminal: [{ ...member }],
+				allDone: true,
+				notified: true,
+			};
+		}
 		let batch = this.batches.get(batchId);
 		if (!batch) {
 			batch = {
@@ -117,13 +140,22 @@ export class BatchBarrier {
 
 	/** Has the consolidated notification already been emitted for this batch? */
 	alreadyNotified(batchId: string): boolean {
-		return this.batches.get(batchId)?.notified ?? false;
+		return this.batches.get(batchId)?.notified ?? this.notifiedTombstones.has(batchId);
 	}
 
-	/** Mark the consolidated notification as emitted. No-op if already set. */
+	/** Mark the consolidated notification as emitted. No-op if already set.
+	 * R2-L-B6: DISPOSE the batch here — once the consolidated notify fired, the
+	 * member maps are dead weight; keep only a bounded tombstone so
+	 * `alreadyNotified`/late `markTerminal` preserve their answers. */
 	markNotified(batchId: string): void {
 		const batch = this.batches.get(batchId);
 		if (batch) batch.notified = true;
+		this.batches.delete(batchId);
+		this.notifiedTombstones.set(batchId, Date.now());
+		if (this.notifiedTombstones.size > BatchBarrier.TOMBSTONE_CAP) {
+			const oldest = this.notifiedTombstones.keys().next().value;
+			if (oldest !== undefined) this.notifiedTombstones.delete(oldest);
+		}
 	}
 
 	/** Read-only snapshot (for tests / debugging). */
@@ -141,7 +173,12 @@ export class BatchBarrier {
 
 	/** Drop a batch (used on cleanup / test reset). */
 	dispose(batchId?: string): void {
-		if (batchId === undefined) this.batches.clear();
-		else this.batches.delete(batchId);
+		if (batchId === undefined) {
+			this.batches.clear();
+			this.notifiedTombstones.clear();
+		} else {
+			this.batches.delete(batchId);
+			this.notifiedTombstones.delete(batchId);
+		}
 	}
 }

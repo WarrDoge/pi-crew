@@ -174,31 +174,46 @@ function isValidId(id: string): boolean {
 	return true;
 }
 
-function readRegistry(): OrphanWorkerEntry[] {
+// FAMILY-2 (2026-10-17): strict read variant — ENOENT still maps to [] (a
+// missing registry is a legitimate empty state), but any OTHER fault
+// (EACCES/EBUSY/parse error/shape mismatch) THROWS. RMW callers
+// (registerWorker/unregisterWorker) must skip their write on a strict-read
+// fault: persisting the resulting [] would WIPE every sibling entry and
+// orphan those workers until host exit.
+function readRegistryStrict(): OrphanWorkerEntry[] {
 	const p = getRegistryPath();
+	// Atomic read: if file doesn't exist, readFileSync throws ENOENT
+	// which we handle explicitly. This eliminates the TOCTOU window
+	// between existsSync and readFileSync.
+	let raw: string;
 	try {
-		// Atomic read: if file doesn't exist, readFileSync throws ENOENT
-		// which we handle explicitly. This eliminates the TOCTOU window
-		// between existsSync and readFileSync.
-		const raw = fs.readFileSync(p, "utf-8");
-		const parsed = JSON.parse(raw);
-		if (!Array.isArray(parsed)) return [];
-		return parsed.filter(
-			(e): e is OrphanWorkerEntry =>
-				typeof e === "object" &&
-				e !== null &&
-				typeof e.pid === "number" &&
-				typeof e.sessionId === "string" &&
-				typeof e.runId === "string" &&
-				typeof e.registeredAt === "number" &&
-				typeof (e as OrphanWorkerEntry).parentPid === "number" &&
-				typeof (e as OrphanWorkerEntry).parentPidStartTime === "number" &&
-				typeof (e as OrphanWorkerEntry).startTime === "number",
-		);
+		raw = fs.readFileSync(p, "utf-8");
 	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-			return [];
-		}
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+		throw error;
+	}
+	const parsed: unknown = JSON.parse(raw); // corrupt JSON throws (strict)
+	if (!Array.isArray(parsed)) {
+		throw new Error(`orphan-worker-registry: expected array, got ${typeof parsed}`);
+	}
+	return parsed.filter(
+		(e): e is OrphanWorkerEntry =>
+			typeof e === "object" &&
+			e !== null &&
+			typeof e.pid === "number" &&
+			typeof e.sessionId === "string" &&
+			typeof e.runId === "string" &&
+			typeof e.registeredAt === "number" &&
+			typeof (e as OrphanWorkerEntry).parentPid === "number" &&
+			typeof (e as OrphanWorkerEntry).parentPidStartTime === "number" &&
+			typeof (e as OrphanWorkerEntry).startTime === "number",
+	);
+}
+
+function readRegistry(): OrphanWorkerEntry[] {
+	try {
+		return readRegistryStrict();
+	} catch (error) {
 		// Silent failure is deliberate for robustness (registry read failures
 		// shouldn't crash the process), but log at warning level to aid troubleshooting.
 		logInternalError("orphan-worker-registry", new Error(`readRegistry failed: ${error}`), undefined, "warn");
@@ -278,7 +293,20 @@ export function registerWorker(
 	const startTime = getProcessStartTime(pid) ?? 0;
 	const parentPidStartTime = Number.isFinite(parentPid) && parentPid > 0 ? (getProcessStartTime(parentPid) ?? 0) : 0;
 	withFileLockSync(getRegistryPath(), () => {
-		const entries = readRegistry();
+		// FAMILY-2: strict read — a read fault must SKIP the write (persisting
+		// the [] rebuild would wipe every sibling entry), not mask as empty.
+		let entries: OrphanWorkerEntry[];
+		try {
+			entries = readRegistryStrict();
+		} catch (error) {
+			logInternalError(
+				"orphan-worker-registry.register",
+				error instanceof Error ? error : new Error(String(error)),
+				`pid=${pid} runId=${runId} — skipping write (registry read fault)`,
+				"warn",
+			);
+			return;
+		}
 		// Dedupe by PID
 		const filtered = entries.filter((e) => e.pid !== pid);
 		filtered.push({
@@ -301,7 +329,19 @@ export function registerWorker(
 export function unregisterWorker(pid: number): void {
 	if (!Number.isFinite(pid) || pid <= 0) return;
 	withFileLockSync(getRegistryPath(), () => {
-		const entries = readRegistry();
+		// FAMILY-2: strict read — skip the write on a read fault (see registerWorker).
+		let entries: OrphanWorkerEntry[];
+		try {
+			entries = readRegistryStrict();
+		} catch (error) {
+			logInternalError(
+				"orphan-worker-registry.unregister",
+				error instanceof Error ? error : new Error(String(error)),
+				`pid=${pid} — skipping write (registry read fault)`,
+				"warn",
+			);
+			return;
+		}
 		const filtered = entries.filter((e) => e.pid !== pid);
 		if (filtered.length !== entries.length) {
 			writeRegistry(filtered);

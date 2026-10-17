@@ -16,6 +16,24 @@ export interface RunEffectivenessSummary {
 	severity: RunEffectivenessSeverity;
 }
 
+/** R9-F3 (2026-10-17): task ids with a `delegate.completed ok:true` event
+ * (data.subId). A completed grandchild delegate task carries no
+ * usage/transcript of its own — its real output flowed through the broker
+ * mailbox to the parent — so the guard previously misflagged it as
+ * "no observable worker activity" and escalated effective runs to blocked
+ * (R8-OPS M3 contributor). Callers pass this set in when events are
+ * available (finalize-run reads the log anyway). */
+export function delegateCompletedTaskIdsFromEvents(events: ReadonlyArray<{ type?: string; data?: unknown }>): Set<string> {
+	const ids = new Set<string>();
+	for (const event of events) {
+		if (event.type !== "delegate.completed") continue;
+		const data = (event.data ?? {}) as { subId?: unknown; ok?: unknown };
+		if (data.ok !== true) continue;
+		if (typeof data.subId === "string") ids.add(data.subId);
+	}
+	return ids;
+}
+
 export function taskHasObservableWorkerActivity(task: TeamTaskState): boolean {
 	return Boolean(
 		(task.agentProgress?.toolCount ?? 0) > 0 ||
@@ -68,13 +86,18 @@ export function evaluateRunEffectiveness(input: {
 	tasks: TeamTaskState[];
 	executeWorkers: boolean;
 	runtimeConfig?: CrewRuntimeConfig;
+	/** R9-F3: task ids with delegate.completed ok:true events — counted as
+	 * observable work (see delegateCompletedTaskIdsFromEvents). */
+	delegateCompleted?: ReadonlySet<string>;
 }): RunEffectivenessSummary {
 	const completedTasks = input.tasks.filter((task) => task.status === "completed");
 	// F4: a completed task with an EMPTY result artifact (0 bytes) is
 	// treated exactly like no-observed-work — the worker may have spun up
 	// and streamed transcript events, but it produced no real output
 	// (e.g. a 429 rate-limit absorbed by the fallback chain).
-	const noObservedWorkTasks = completedTasks.filter((task) => !taskHasObservableWorkerActivity(task) || taskHasEmptyResult(task));
+	const noObservedWorkTasks = completedTasks.filter(
+		(task) => (!input.delegateCompleted?.has(task.id) && !taskHasObservableWorkerActivity(task)) || taskHasEmptyResult(task),
+	);
 	const needsAttentionTasks = input.tasks.filter((task) => task.agentProgress?.activityState === "needs_attention");
 	const workerExecution: WorkerExecutionState = input.executeWorkers ? "enabled" : "disabled/scaffold";
 	const guardMode = resolveEffectivenessGuardMode(input.runtimeConfig, input.manifest);

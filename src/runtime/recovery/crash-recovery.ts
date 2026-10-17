@@ -700,6 +700,7 @@ export function purgeStaleActiveRunIndex(
 				// is fire-and-forget so it stays OUTSIDE the lock to avoid blocking the
 				// critical section on async IPC.
 				let abortedFreshLiveness = false;
+				let abortedIntentionalWait = false; // R2-M-A3: keep intentional-wait runs
 				try {
 					const fullLoaded = loadRunManifestById(entry.cwd, entry.runId);
 					if (fullLoaded) {
@@ -709,6 +710,14 @@ export function purgeStaleActiveRunIndex(
 							const fresh = loadRunManifestById(entry.cwd, entry.runId);
 							if (!fresh) return;
 							if (fresh.manifest.status !== "running") return;
+							// R2-M-A3 (2026-10-17): mirror :135/:329/:937 — purgeStaleActiveRunIndex
+							// was the only recovery path without an isIntentionalWait guard: a run
+							// parked on a plan approval / pending ask was purge-CANCELLED here even
+							// though every sibling recovery path preserves it. KEEP the entry.
+							if (isIntentionalWait(fresh.manifest, now)) {
+								abortedIntentionalWait = true;
+								return;
+							}
 							// R7-6 (2026-10-16): under-lock liveness revalidation — the pre-lock
 							// gate used inputs read BEFORE the lock; a concurrent `team resume`
 							// adoption may have rewritten them in that window (fresh
@@ -747,6 +756,14 @@ export function purgeStaleActiveRunIndex(
 								}
 							}
 							updateRunStatus(fresh.manifest, "cancelled", "Orphaned run: worker process dead and no recent activity");
+							// R2-M-A3: clear waitState on cancel (mirror cancelOrphanedRuns :431-438) —
+							// an orphan-cancelled run must not keep the park pointer shielding it
+							// from staleness repair for the full waiting TTL.
+							if (fresh.manifest.waitState) {
+								const cleared = { ...fresh.manifest, waitState: undefined, updatedAt: new Date(now).toISOString() };
+								saveRunManifest(cleared);
+								fresh.manifest = cleared;
+							}
 						});
 						// R7-6: only terminate live agents when the cancel actually landed —
 						// an aborted (fresh-evidence) run is alive; terminating it would kill
@@ -767,7 +784,9 @@ export function purgeStaleActiveRunIndex(
 				}
 				// R7-6: a fresh-evidence abort means the run is alive again — KEEP the
 				// registry entry (live-claim signal) instead of unregistering it.
-				if (abortedFreshLiveness) {
+				// R2-M-A3: an intentional-wait abort keeps the entry too (same reasoning —
+				// the run is parked on a human decision, not crashed).
+				if (abortedFreshLiveness || abortedIntentionalWait) {
 					kept.push(entry.runId);
 					continue;
 				}
@@ -794,12 +813,19 @@ export function purgeStaleActiveRunIndex(
 			if (!hasRecentLifeEvidence(entry, manifest.updatedAt, now, staleThresholdMs)) {
 				let cancelledUnderLock = false;
 				let abortedFreshLiveness = false;
+				let abortedIntentionalWait = false; // R2-M-A3: keep intentional-wait runs
 				try {
 					const fullLoaded = loadRunManifestById(entry.cwd, entry.runId);
 					if (fullLoaded && fullLoaded.manifest.status === "running") {
 						withRunLockSync(fullLoaded.manifest, () => {
 							const fresh = loadRunManifestById(entry.cwd, entry.runId);
 							if (fresh?.manifest.status !== "running") return;
+							// R2-M-A3 (2026-10-17): mirror the step-5 guard (and :135/:329/:937) — a
+							// parked run (plan approval / pending ask) is not an orphan. KEEP it.
+							if (isIntentionalWait(fresh.manifest, now)) {
+								abortedIntentionalWait = true;
+								return;
+							}
 							// R7-6 (2026-10-16): under-lock liveness revalidation — the pre-lock
 							// gate used inputs read BEFORE the lock; a concurrent `team resume`
 							// adoption may have rewritten them in that window (fresh
@@ -846,6 +872,12 @@ export function purgeStaleActiveRunIndex(
 									Math.round(staleThresholdMs / 60000) +
 									" minutes",
 							);
+							// R2-M-A3: clear waitState on cancel (mirror :431-438 + step 5 above).
+							if (fresh.manifest.waitState) {
+								const cleared = { ...fresh.manifest, waitState: undefined, updatedAt: new Date(now).toISOString() };
+								saveRunManifest(cleared);
+								fresh.manifest = cleared;
+							}
 							cancelledUnderLock = true;
 						});
 						// R7-1/R7-6: only terminate live agents when the cancel actually landed
@@ -867,7 +899,8 @@ export function purgeStaleActiveRunIndex(
 				}
 				// R7-1/R7-6: a fresh-evidence abort means the run is alive again — KEEP
 				// the registry entry (live-claim signal) instead of unregistering it.
-				if (abortedFreshLiveness) {
+				// R2-M-A3: an intentional-wait abort keeps the entry too.
+				if (abortedFreshLiveness || abortedIntentionalWait) {
 					kept.push(entry.runId);
 					continue;
 				}
