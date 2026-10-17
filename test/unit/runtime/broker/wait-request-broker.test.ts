@@ -310,10 +310,13 @@ test("wait.request: compound-key token parks task+manifest (status unchanged, cl
 		assert.deepEqual(task.waiting?.options, ["yes", "no"]);
 		assert.equal(task.waiting?.askedAt, res.result?.askedAt);
 		// manifest.waitState pointer set; manifest.status NEVER flips (ADR item 3).
+		// R2-M-A2 (wave-4): the broker also stamps the (clamped) deadline onto the
+		// manifest pointer so the stale-reconciler shield derives from it.
 		assert.deepEqual(reloaded.manifest.waitState, {
 			taskId: scaff.taskId,
 			questionId: res.result?.questionId,
 			askedAt: res.result?.askedAt,
+			deadline,
 		});
 		assert.equal(reloaded.manifest.status, "running");
 

@@ -17,13 +17,14 @@ export interface RoleToolConfig {
 }
 
 export const ROLE_TOOL_CONFIGS: Record<string, RoleToolConfig> = {
-	// Explorer - Read-only exploration; bash is included for git log/show
-	// (decisions stream needs commit-history mining) but edit/write stay
-	// excluded. State-mutation safety is enforced separately by
-	// READ_ONLY_ROLES in role-permission.ts.
+	// Explorer - Read-only exploration. Wave-3 (Chain A cheapest cut, deep review
+	// 2026-10-16/17): bash REMOVED from the enforced allowlist — the advertised
+	// read-only contract is now the enforceable one (READ_ONLY_ROLES state-mutation
+	// gating cannot stop host-level persistence via arbitrary commands, e.g.
+	// `git config --global` or writes to ~/.pi/agent). Frontmatter mirrors this.
 	explorer: {
-		tools: ["read", "grep", "find", "ls", "glob", "bash", "ask"],
-		excludeTools: ["edit", "write", "web"],
+		tools: ["read", "grep", "find", "ls", "glob", "ask"],
+		excludeTools: ["edit", "write", "bash", "web"],
 	},
 
 	// Analyst - Read and analyze, limited execution
