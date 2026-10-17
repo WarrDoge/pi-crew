@@ -166,6 +166,7 @@ export const TEAM_EVENT_TYPES = [
 	"goal.turn_evaluated",
 	"goal.budget_warning",
 	"goal.loop_end",
+	"goal.workspace_lock_lost", // Wave-3 R3-M-B1/FS4: ownership lost → blocked
 	"goal.loop_error",
 	"goal.feedback_steered",
 	"goal.state_changed",
@@ -289,6 +290,7 @@ export const TEAM_EVENT_TYPES = [
 	"task.budget_fair_share",
 	"task.model_dropped",
 	"task.mcp_enforcement_degraded",
+	"task.mcp_enforcement_fail_closed", // Wave-3 R1-M2: fail-closed abort
 	"task.output_validation",
 	// U13/U6B (upgrade wave 3, 2026-10-10): deterministic verifier pre-gate
 	// decision — emitted by verify-gate/classifier-pre-gate when a task's
