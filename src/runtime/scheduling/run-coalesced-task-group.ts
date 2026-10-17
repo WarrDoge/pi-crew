@@ -61,7 +61,9 @@ export async function runCoalescedTaskGroup(input: CoalescedTaskGroupInput): Pro
 		}
 		return t;
 	});
-	await saveRunTasksAsync(manifest, updatedTasks);
+	// R3-H1 (fix): fresh-read group-scoped merge — never persist the dispatch-time
+	// full-array snapshot over concurrent sibling state changes.
+	await repairGroupTerminalWrite(manifest, taskIds, updatedTasks);
 	await appendEventAsync(manifest.eventsPath, {
 		type: "task.coalesced_dispatch_start",
 		runId: manifest.runId,
@@ -86,7 +88,9 @@ export async function runCoalescedTaskGroup(input: CoalescedTaskGroupInput): Pro
 			heartbeat: t.heartbeat ?? createWorkerHeartbeat(t.id),
 		};
 	});
-	await saveRunTasksAsync(manifest, updatedTasks);
+	// R3-H1 (fix): fresh-read group-scoped merge — never persist the dispatch-time
+	// full-array snapshot over concurrent sibling state changes.
+	await repairGroupTerminalWrite(manifest, taskIds, updatedTasks);
 
 	let rawOutput = "";
 	let success = false;
@@ -398,7 +402,9 @@ export async function runCoalescedTaskGroup(input: CoalescedTaskGroupInput): Pro
 			if (drainTimeout !== undefined) clearTimeout(drainTimeout);
 		}
 	}
-	await saveRunTasksAsync(manifest, updatedTasks);
+	// R3-H1 (fix): fresh-read group-scoped merge — never persist the dispatch-time
+	// full-array snapshot over concurrent sibling state changes.
+	await repairGroupTerminalWrite(manifest, taskIds, updatedTasks);
 	let updatedManifest: TeamRunManifest = {
 		...manifest,
 		artifacts: mergeArtifacts([...manifest.artifacts, ...newArtifacts]),

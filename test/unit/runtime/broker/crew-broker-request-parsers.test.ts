@@ -24,8 +24,12 @@ import test from "node:test";
 
 import {
 	BROKER_PROTOCOL,
+	DELEGATE_BUDGET_TOKENS_CEILING,
+	DELEGATE_MAX_TURNS_CEILING,
+	DELEGATE_PROMPT_MAX_CHARS,
 	isHelloParams,
 	isRequestObject,
+	parseDelegateRequestParams,
 	parseMsgInboxParams,
 	parseMsgSendParams,
 	parseWaitRequestParams,
@@ -322,6 +326,90 @@ test("parseWaitResolveParams accepts valid shapes and rejects boundaries", () =>
 		{ name: "non-string questionId", value: { to: "l", questionId: 42 } },
 	]) {
 		assert.equal(parseWaitResolveParams(c.value), undefined, `must reject: ${c.name}`);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// parseDelegateRequestParams — R7-H1 (deep-review round-8/wave-1) edge matrix
+// ---------------------------------------------------------------------------
+
+test("delegate limits are pinned (R7-H1 server-side ceilings)", () => {
+	assert.equal(DELEGATE_MAX_TURNS_CEILING, 200);
+	assert.equal(DELEGATE_BUDGET_TOKENS_CEILING, 100_000_000);
+	assert.equal(DELEGATE_PROMPT_MAX_CHARS, 100_000);
+});
+
+test("parseDelegateRequestParams admits a well-formed request (baseline)", () => {
+	const parsed = parseDelegateRequestParams({ prompt: "do the thing" });
+	assert.ok(parsed);
+	assert.equal(parsed.prompt, "do the thing");
+	assert.equal(parsed.maxTurns, undefined);
+});
+
+test("parseDelegateRequestParams rejects malformed envelopes", () => {
+	for (const [name, value] of [
+		["null", null],
+		["array", ["x"]],
+		["string", "prompt"],
+		["number", 42],
+	] as const) {
+		assert.equal(parseDelegateRequestParams(value), undefined, `must reject envelope: ${name}`);
+	}
+});
+
+test("parseDelegateRequestParams rejects prompt shape violations (R7-H1)", () => {
+	for (const [name, value] of [
+		["missing prompt", {}],
+		["non-string prompt", { prompt: 42 }],
+		["whitespace-only prompt", { prompt: "   " }],
+		["oversize prompt >100k chars", { prompt: "x".repeat(DELEGATE_PROMPT_MAX_CHARS + 1) }],
+	] as const) {
+		assert.equal(parseDelegateRequestParams(value), undefined, `must reject prompt: ${name}`);
+	}
+});
+
+test("parseDelegateRequestParams rejects bad maxTurns (R7-H1 edge matrix)", () => {
+	// {0.5, 0, 201, -1, Infinity}: non-integer / below-min / over-ceiling /
+	// negative / non-finite — all must die at the parser boundary, BEFORE the
+	// budget reservation write (durable tokensSpent escape).
+	for (const maxTurns of [0.5, 0, 201, -1, Number.POSITIVE_INFINITY]) {
+		assert.equal(parseDelegateRequestParams({ prompt: "e", maxTurns }), undefined, `must reject maxTurns=${maxTurns}`);
+	}
+	// In-range boundaries admit: 1 and the ceiling 200.
+	for (const maxTurns of [1, DELEGATE_MAX_TURNS_CEILING]) {
+		const parsed = parseDelegateRequestParams({ prompt: "e", maxTurns });
+		assert.ok(parsed, `must admit maxTurns=${maxTurns}`);
+		assert.equal(parsed.maxTurns, maxTurns);
+	}
+});
+
+test("parseDelegateRequestParams rejects bad budgetTokens (R7-H1 edge matrix)", () => {
+	// {0.5, -1, 100000001, Infinity}: non-integer (client Type.Integer parity,
+	// R8 lane-B correction) / negative / over-ceiling / non-finite. The -1e9
+	// raw-wire poison historically minted durable negative tokensSpent.
+	for (const budgetTokens of [0.5, -1, DELEGATE_BUDGET_TOKENS_CEILING + 1, Number.POSITIVE_INFINITY]) {
+		assert.equal(parseDelegateRequestParams({ prompt: "e", budgetTokens }), undefined, `must reject budgetTokens=${budgetTokens}`);
+	}
+	// In-range boundaries admit: 0 and the ceiling 100_000_000.
+	for (const budgetTokens of [0, DELEGATE_BUDGET_TOKENS_CEILING]) {
+		const parsed = parseDelegateRequestParams({ prompt: "e", budgetTokens });
+		assert.ok(parsed, `must admit budgetTokens=${budgetTokens}`);
+		assert.equal(parsed.budgetTokens, budgetTokens);
+	}
+});
+
+test("parseDelegateRequestParams rejects non-finite timeoutSec and foreign role", () => {
+	// timeoutSec 1e999 on the raw wire arrives as Infinity → reject here; the
+	// 1..MAX range enforcement stays in spawn-policy §7 (admission).
+	assert.equal(parseDelegateRequestParams({ prompt: "e", timeoutSec: Number.POSITIVE_INFINITY }), undefined);
+	// role must be one of the grandchild lanes when present.
+	for (const role of ["worker", "leader", ""] as const) {
+		assert.equal(parseDelegateRequestParams({ prompt: "e", role }), undefined, `must reject role=${JSON.stringify(role)}`);
+	}
+	for (const role of ["explorer", "analyst", "executor"] as const) {
+		const parsed = parseDelegateRequestParams({ prompt: "e", role });
+		assert.ok(parsed, `must admit role=${role}`);
+		assert.equal(parsed.role, role);
 	}
 });
 

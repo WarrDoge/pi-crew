@@ -24,7 +24,20 @@ const SRC_PATH = "src/runtime/scheduling/run-coalesced-task-group.ts";
 test("E1 structural: the repair-terminal-write catch logs a warn with runId/taskIds context", () => {
 	const src = fs.readFileSync(SRC_PATH, "utf-8");
 
-	const callIdx = src.indexOf("await repairGroupTerminalWrite(manifest, taskIds, updatedTasks)");
+	// R3-H1 fix companion: the terminal write + pre-dispatch saves now also call
+	// repairGroupTerminalWrite, so anchor on the HEARTBEAT-TICK occurrence — the
+	// one whose window carries the warn-logged catch (scope below).
+	let callIdx = -1;
+	let scanFrom = 0;
+	while (callIdx < 0) {
+		const idx = src.indexOf("await repairGroupTerminalWrite(manifest, taskIds, updatedTasks)", scanFrom);
+		if (idx < 0) break;
+		if (src.slice(idx, idx + 900).includes('"run-coalesced.repair-terminal-write"')) {
+			callIdx = idx;
+			break;
+		}
+		scanFrom = idx + 1;
+	}
 	assert.ok(callIdx >= 0, "the heartbeat repair call must exist (source drifted?)");
 	// Window from the repair call through the following catch block.
 	const region = src.slice(callIdx, callIdx + 900);

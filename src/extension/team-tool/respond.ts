@@ -327,12 +327,14 @@ export function handleRespond(params: TeamToolParamsValue, ctx: TeamContext): Pi
 		if (requeuedIds.length > 0) {
 			try {
 				const existingRuntimes = new Map(readCrewAgents(fresh.manifest).map((a) => [a.taskId, a.runtime]));
-				saveCrewAgents(
-					fresh.manifest,
-					updatedTasks
-						.filter((task) => requeuedIds.includes(task.id))
-						.map((task) => recordFromTask(fresh.manifest, task, existingRuntimes.get(task.id) ?? "child-process")),
-				);
+				// R4-A1 (fix): merge requeued records into the existing index — the
+				// subset-only save wiped sibling agent records (team-runner.ts:525 pattern).
+				const mergedById = new Map(readCrewAgents(fresh.manifest).map((record) => [record.id, record] as const));
+				for (const task of updatedTasks.filter((task) => requeuedIds.includes(task.id))) {
+					const record = recordFromTask(fresh.manifest, task, existingRuntimes.get(task.id) ?? "child-process");
+					mergedById.set(record.id, record);
+				}
+				saveCrewAgents(fresh.manifest, [...mergedById.values()]);
 			} catch (error) {
 				logInternalError("team-tool.handleRespond.crewAgents", error, `runId=${fresh.manifest.runId}`);
 			}

@@ -713,7 +713,10 @@ export function reconcileOrphanedTempWorkspaces(
 						const result = reconcileStaleRun(manifest, tasks, now);
 						if (result.repaired && result.repairedTasks) {
 							// Persist repaired tasks (atomic — temp+rename to survive mid-write crash)
-							atomicWriteJson(tasksPath, result.repairedTasks);
+							// R2-H1 (fix): persist the FULL array (NEW-1 persistTasks), not the filtered
+							// stale subset — the subset write destroyed every sibling record (mirror
+							// crash-recovery.ts:1066).
+							atomicWriteJson(tasksPath, result.persistTasks ?? result.repairedTasks);
 							// Update manifest status
 							const updated = {
 								...manifest,

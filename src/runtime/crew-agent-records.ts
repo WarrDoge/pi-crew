@@ -698,6 +698,21 @@ function writeSeqToSidecar(filePath: string, seq: number): void {
 	}
 }
 
+function scanMaxAgentEventSeq(filePath: string): number {
+	let max = 0;
+	for (const line of fs.readFileSync(filePath, "utf-8").split(/\r?\n/)) {
+		if (!line.trim()) continue;
+		try {
+			const parsed = JSON.parse(line) as { seq?: unknown };
+			if (typeof parsed.seq === "number" && Number.isFinite(parsed.seq)) max = Math.max(max, parsed.seq);
+			else max += 1;
+		} catch {
+			max += 1;
+		}
+	}
+	return max;
+}
+
 function nextAgentEventSeq(filePath: string): number {
 	if (!fs.existsSync(filePath)) {
 		// Clean up stale sidecar when main file is gone.
@@ -714,24 +729,21 @@ function nextAgentEventSeq(filePath: string): number {
 	// FIX: Try sidecar file for O(1) lookup before falling back to O(n) scan.
 	const sidecarSeq = readSeqFromSidecar(filePath);
 	if (sidecarSeq !== undefined) {
+		// FS1 (fix, EL-1 port from event-log sequence-cache.ts): a REGRESSED
+		// sidecar (crash between append and sidecar advance, or lost best-effort
+		// durability) must never re-mint used seqs — trust it only as
+		// max(sidecar, tail-scan), else cursor consumers (seq > sinceSeq)
+		// permanently drop the duplicate-seq events.
+		const safeSeq = Math.max(sidecarSeq, scanMaxAgentEventSeq(filePath));
 		setAgentEventSeqCache(filePath, {
 			size: stat.size,
 			mtimeMs: stat.mtimeMs,
-			seq: sidecarSeq,
+			seq: safeSeq,
 		});
-		return sidecarSeq + 1;
+		if (safeSeq !== sidecarSeq) writeSeqToSidecar(filePath, safeSeq);
+		return safeSeq + 1;
 	}
-	let max = 0;
-	for (const line of fs.readFileSync(filePath, "utf-8").split(/\r?\n/)) {
-		if (!line.trim()) continue;
-		try {
-			const parsed = JSON.parse(line) as { seq?: unknown };
-			if (typeof parsed.seq === "number" && Number.isFinite(parsed.seq)) max = Math.max(max, parsed.seq);
-			else max += 1;
-		} catch {
-			max += 1;
-		}
-	}
+	const max = scanMaxAgentEventSeq(filePath);
 	setAgentEventSeqCache(filePath, {
 		size: stat.size,
 		mtimeMs: stat.mtimeMs,

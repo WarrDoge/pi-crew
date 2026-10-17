@@ -73,6 +73,7 @@ import {
 	BROKER_PROTOCOL,
 	isHelloParams,
 	isRequestObject,
+	parseDelegateRequestParams,
 	parseMsgSendParams,
 	parseWaitRequestParams,
 	safeStringify,
@@ -1455,28 +1456,16 @@ export class CrewBroker {
 			this.sendError(conn, id, "forbidden", "delegate requires a task-scoped token; re-dispatch with PI_CREW_BROKER_TASK_ID");
 			return;
 		}
-		const p = (params ?? {}) as {
-			description?: unknown;
-			prompt?: unknown;
-			role?: unknown;
-			model?: unknown;
-			maxTurns?: unknown;
-			budgetTokens?: unknown;
-			timeoutSec?: unknown;
-		};
-		if (typeof p.prompt !== "string" || p.prompt.trim().length === 0) {
-			this.sendError(conn, id, "bad-params", "delegate.request: 'prompt' (non-empty string) is required");
+		// R7-H1 fix: parse params through the protocol-level parser (mirrors
+		// parseWaitRequestParams discipline) — non-integer/non-finite/negative/
+		// over-ceiling maxTurns/budgetTokens never reach admission or the
+		// budget reservation (durable-negative tokensSpent escape).
+		const parsed = parseDelegateRequestParams(params);
+		if (!parsed) {
+			this.sendError(conn, id, "bad-params", "delegate.request: invalid params");
 			return;
 		}
-		const requested = {
-			prompt: p.prompt,
-			...(typeof p.description === "string" ? { description: p.description } : {}),
-			...(typeof p.role === "string" ? { role: p.role } : {}),
-			...(typeof p.model === "string" ? { model: p.model } : {}),
-			...(typeof p.maxTurns === "number" ? { maxTurns: p.maxTurns } : {}),
-			...(typeof p.budgetTokens === "number" ? { budgetTokens: p.budgetTokens } : {}),
-			...(typeof p.timeoutSec === "number" ? { timeoutSec: p.timeoutSec } : {}),
-		};
+		const requested = parsed;
 		const cwd = this.options.cwd;
 		if (!cwd) {
 			this.sendError(conn, id, "no-manifest", "broker has no cwd configured");

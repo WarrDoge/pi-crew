@@ -142,11 +142,23 @@ export function parentAlive(pid: number, expectedStartTime: string | undefined, 
 			}
 		});
 	let stat: string | undefined;
+	let readerThrew = false;
 	try {
 		stat = reader(pid);
 	} catch {
-		stat = undefined;
+		// R7-P1 guard-gate fix (deep-review round 7/9): a THROWING/unreadable
+		// stat reader (macOS-shaped: /proc absent → read error) with NO
+		// recorded expectedStartTime cannot PROVE the parent died. The doc
+		// contract above ("Never kills on … an unreadable clock field — a
+		// false 'alive' falls back to the host watchdog") demands the
+		// alive-with-caveat tolerance here; the pre-fix code fell through to
+		// `return false` BEFORE the tolerance check and killed healthy
+		// workers at the first 5s tick.
+		readerThrew = true;
 	}
+	if (readerThrew) return expectedStartTime ? false : true;
+	// Reader returned "no entry" (default /proc reader ENOENT = dead on
+	// Linux) — dead-parent detection stays intact.
 	if (stat === undefined) return false;
 	if (!expectedStartTime) return true;
 	const observed = procStartTimeTicks(stat);

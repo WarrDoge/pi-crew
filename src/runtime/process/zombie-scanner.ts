@@ -179,8 +179,12 @@ function isPidAlive(pid: number): boolean {
 		// process.kill(pid, 0) throws if the pid is not alive (or not ours).
 		process.kill(pid, 0);
 		return true;
-	} catch {
-		return false;
+	} catch (error) {
+		// R7-A2 (2026-10-17): only ESRCH/ENOENT mean the process is gone.
+		// EPERM means the process is alive but protected (different security
+		// context); treat as alive — mirror of active-run-registry.ts fix.
+		const code = (error as NodeJS.ErrnoException).code;
+		return code !== "ESRCH" && code !== "ENOENT";
 	}
 }
 

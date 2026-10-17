@@ -137,7 +137,7 @@ function scheduleBackgroundEarlyExitGuard(cwd: string, runId: string, pid: numbe
 					runId: failed.runId,
 					message,
 					data: { pid, detail: liveness.detail },
-				});
+				}).catch((error) => logInternalError("team-tool.run.asyncFailedEvent", error, `runId=${failed.runId}`)); // R5-M-B3 (fix)
 			});
 		} catch (error) {
 			// One-shot unref'd timer — a lock-contention error must not escape and
@@ -589,7 +589,7 @@ export async function handleRun(params: TeamToolParamsValue, ctx: TeamContext): 
 						envTeams: getCrewEnv("PI_TEAMS_EXECUTE_WORKERS"),
 					},
 				},
-			});
+			}).catch((error) => logInternalError("team-tool.run.blockedEvent", error, `runId=${blocked.runId}`)); // R5-M-B3 (fix)
 			unregisterActiveRun(blocked.runId);
 			return result(
 				[
@@ -622,7 +622,7 @@ export async function handleRun(params: TeamToolParamsValue, ctx: TeamContext): 
 			type: "async.spawned",
 			runId: effectiveManifest.runId,
 			data: { pid: spawned.pid, logPath: spawned.logPath },
-		});
+		}).catch((error) => logInternalError("team-tool.run.asyncSpawnedEvent", error, `runId=${effectiveManifest.runId}`)); // R5-M-B3 (fix)
 		ctx.onRunStarted?.(effectiveManifest.runId);
 		scheduleBackgroundEarlyExitGuard(resolvedCtx.cwd, effectiveManifest.runId, spawned.pid, spawned.logPath);
 		// CORE-8: unified deadline for waitForRun timeout (background process is detached).
@@ -684,7 +684,7 @@ export async function handleRun(params: TeamToolParamsValue, ctx: TeamContext): 
 					envTeams: getCrewEnv("PI_TEAMS_EXECUTE_WORKERS"),
 				},
 			},
-		});
+		}).catch((error) => logInternalError("team-tool.run.blockedEvent", error, `runId=${blocked.runId}`)); // R5-M-B3 (fix)
 		unregisterActiveRun(blocked.runId);
 		return result(
 			[

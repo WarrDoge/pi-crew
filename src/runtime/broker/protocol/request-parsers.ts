@@ -176,6 +176,74 @@ export function parseWaitRequestParams(value: unknown): WaitRequestParams | unde
 	};
 }
 
+// ============================================================================
+// R7-H1 fix (deep-review round 8): delegate.request parameter parser.
+// Mirrors parseWaitRequestParams discipline — the handler previously spread
+// `typeof x === "number"` values straight into `requested`, so non-integer,
+// non-finite, negative and over-ceiling maxTurns/budgetTokens reached
+// admission (e.g. raw-wire -1e9 budget → durable negative tokensSpent;
+// 1e999 → Infinity maxTurns → dead child-pi turn caps).
+// ============================================================================
+
+/** Server-side ceiling for grandchild turn caps (client tool schema: 1..200). */
+export const DELEGATE_MAX_TURNS_CEILING = 200;
+/** Server-side ceiling for grandchild token budgets (client schema: <=100M). */
+export const DELEGATE_BUDGET_TOKENS_CEILING = 100_000_000;
+/** Bounded delegate prompt (defense-in-depth under the frame cap). */
+export const DELEGATE_PROMPT_MAX_CHARS = 100_000;
+
+export interface DelegateRequestParams {
+	prompt: string;
+	description?: string;
+	role?: string;
+	model?: string;
+	maxTurns?: number;
+	budgetTokens?: number;
+	timeoutSec?: number;
+}
+
+export function parseDelegateRequestParams(value: unknown): DelegateRequestParams | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const v = value as Record<string, unknown>;
+	if (typeof v.prompt !== "string" || v.prompt.trim().length === 0 || v.prompt.length > DELEGATE_PROMPT_MAX_CHARS) {
+		return undefined;
+	}
+	if (v.description !== undefined && typeof v.description !== "string") return undefined;
+	if (v.role !== undefined && !(typeof v.role === "string" && ["explorer", "analyst", "executor"].includes(v.role))) {
+		return undefined;
+	}
+	if (v.model !== undefined && typeof v.model !== "string") return undefined;
+	if (v.maxTurns !== undefined) {
+		if (typeof v.maxTurns !== "number" || !Number.isInteger(v.maxTurns) || v.maxTurns < 1 || v.maxTurns > DELEGATE_MAX_TURNS_CEILING) {
+			return undefined;
+		}
+	}
+	if (v.budgetTokens !== undefined) {
+		if (
+			typeof v.budgetTokens !== "number" ||
+			!Number.isInteger(v.budgetTokens) || // R8 lane-B correction: client Type.Integer parity (0.5/3.5 pass isFinite)
+			v.budgetTokens < 0 ||
+			v.budgetTokens > DELEGATE_BUDGET_TOKENS_CEILING
+		) {
+			return undefined;
+		}
+	}
+	// timeoutSec stays finite-only here; the 1..MAX range enforcement remains
+	// in spawn-policy §7 (evaluateDelegateAdmission).
+	if (v.timeoutSec !== undefined && (typeof v.timeoutSec !== "number" || !Number.isFinite(v.timeoutSec))) {
+		return undefined;
+	}
+	return {
+		prompt: v.prompt,
+		...(typeof v.description === "string" ? { description: v.description } : {}),
+		...(typeof v.role === "string" ? { role: v.role } : {}),
+		...(typeof v.model === "string" ? { model: v.model } : {}),
+		...(v.maxTurns !== undefined ? { maxTurns: v.maxTurns as number } : {}),
+		...(v.budgetTokens !== undefined ? { budgetTokens: v.budgetTokens as number } : {}),
+		...(v.timeoutSec !== undefined ? { timeoutSec: v.timeoutSec as number } : {}),
+	};
+}
+
 export interface WaitResolveParams {
 	to: string;
 	questionId: string;

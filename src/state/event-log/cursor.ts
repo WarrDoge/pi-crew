@@ -522,7 +522,15 @@ function cursorResultFromEvents(
 	// streaming consumers. No-rotation case: no archives exist → behavior is
 	// byte-identical to before (mergeArchiveTailEvents returns liveEvents).
 	const merged = mergeArchiveTailEvents(readArchiveTailEvents(eventsPath, sinceSeq), filtered);
-	const events = limit !== undefined ? merged.slice(0, limit) : merged;
+	// FS3 (fix): seq-sort before the limit slice. File-order slicing on a
+	// documented non-monotonic log can deliver an early high seq inside the
+	// first `limit` events; nextSeq=max-delivered then permanently skips every
+	// undelivered lower-seq event for paging consumers resuming from nextSeq.
+	// Sort ONLY under a limit: the no-limit path delivers every event (nextSeq
+	// = true max ⇒ nothing skippable) and keeps its historical FILE-order
+	// contract (pinned by event-log-torn-poison.test.ts AC7, U22 Phase 1).
+	const events =
+		limit !== undefined ? [...merged].sort((a, b) => (a.metadata?.seq ?? 0) - (b.metadata?.seq ?? 0)).slice(0, limit) : merged;
 	const returnedMaxSeq = events.reduce((max, event) => Math.max(max, event.metadata?.seq ?? 0), sinceSeq);
 	return {
 		events,
@@ -782,7 +790,11 @@ export function readEventsCursor(eventsPath: string, options: EventCursorOptions
 		const filtered = safeItems.filter((event) => (event.metadata?.seq ?? 0) > sinceSeq);
 		const merged = mergeArchiveTailEvents(drainedArchiveEvents, filtered);
 		const limit = positiveInteger(options.limit);
-		const events = limit !== undefined ? merged.slice(0, limit) : merged;
+		// FS3 (fix): seq-sort before the limit slice — see cursorResultFromEvents.
+		// Sort ONLY under a limit (no-limit keeps the historical file-order
+		// contract; nothing is skippable when everything is delivered).
+		const events =
+			limit !== undefined ? [...merged].sort((a, b) => (a.metadata?.seq ?? 0) - (b.metadata?.seq ?? 0)).slice(0, limit) : merged;
 		const returnedMaxSeq = events.reduce((max, event) => Math.max(max, event.metadata?.seq ?? 0), sinceSeq);
 		// BR-08: `read.state.byteOffset` sits past the ENTIRE delta read above —
 		// including the events the `limit` slice just dropped. Handing that back

@@ -178,7 +178,9 @@ function appendRawLines(eventsPath: string, lines: string[]): number {
 
 /** Ground truth: the full-file parse with the exact readEventsCursor
  *  ordering — the 5000-event TAIL cap slices the parsed events BEFORE the
- *  sinceSeq filter, then limit is a head cap (slice(0, limit)) after it. */
+ *  sinceSeq filter, then (FS3) events are seq-SORTED before limit is applied
+ *  as a head cap (slice(0, limit)). Sort is a no-op on monotonic files; it
+ *  matters exactly on out-of-order re-append shapes. */
 function parseGroundTruth(eventsPath: string, sinceSeq: number, limit?: number): TeamEvent[] {
 	const parsed: TeamEvent[] = [];
 	for (const line of fs.readFileSync(eventsPath, "utf-8").split("\n")) {
@@ -192,7 +194,12 @@ function parseGroundTruth(eventsPath: string, sinceSeq: number, limit?: number):
 	}
 	const capped = parsed.length > 5000 ? parsed.slice(-5000) : parsed;
 	const filtered = capped.filter((event) => (event.metadata?.seq ?? 0) > sinceSeq);
-	return limit !== undefined ? filtered.slice(0, limit) : filtered;
+	// FS3: seq-sort before the limit slice (cursor.ts cursorResultFromEvents) —
+	// ONLY when a limit is set; the no-limit path keeps file order (pinned by
+	// event-log-torn-poison.test.ts AC7).
+	if (limit === undefined) return filtered;
+	const seqSorted = [...filtered].sort((a, b) => (a.metadata?.seq ?? 0) - (b.metadata?.seq ?? 0));
+	return seqSorted.slice(0, limit);
 }
 
 function tmpDir(prefix: string): string {
@@ -204,26 +211,40 @@ function tmpDir(prefix: string): string {
 	return dir;
 }
 
-test("repro: out-of-order file [1..200, 5000, 201..1700] keeps event 5000 (no order assumption)", () => {
+test("repro: out-of-order file [1..200, 5000, 201..1700] delivers seq order and keeps event 5000 reachable (FS3)", () => {
 	const dir = tmpDir("pi-crew-cursor-repro-");
 	try {
 		const eventsPath = writeOutOfOrderFixture(dir);
 		assert.ok(fs.statSync(eventsPath).size < 4 * 1024 * 1024, "fixture must fit the wide window so ground truth is exact");
 		const expected = parseGroundTruth(eventsPath, 1600, 50);
-		// Old wide behavior: [5000, 1601..1650] — the re-appended event 5000
-		// (seq > sinceSeq, earlier in file order than 1601) MUST be present.
+		// FS3 contract: seq-SORT before the limit slice. The filtered set is
+		// {5000, 1601..1700}; sorted, the first 50 are 1601..1650 — the
+		// re-appended 5000 rides the LAST page instead of jumping the queue.
 		assert.equal(expected.length, 50);
-		assert.equal(expected[0]?.metadata?.seq, 5000, "ground truth starts at the re-appended 5000");
-		assert.equal(expected[1]?.metadata?.seq, 1601);
+		assert.equal(expected[0]?.metadata?.seq, 1601, "ground truth starts at the lowest undelivered seq (FS3 seq-order)");
+		assert.equal(expected[1]?.metadata?.seq, 1602);
 
 		const cursor = readEventsCursor(eventsPath, { sinceSeq: 1600, limit: 50 });
 		assert.deepEqual(cursor.events, expected, "watermark-cache result must equal the full-parse result");
-		assert.equal(cursor.events[0]?.metadata?.seq, 5000, "event 5000 must NOT be silently dropped");
-		assert.equal(cursor.events[1]?.metadata?.seq, 1601);
+		assert.equal(cursor.events[0]?.metadata?.seq, 1601, "first page delivers the lowest seqs (FS3 seq-order)");
+		assert.equal(cursor.events[1]?.metadata?.seq, 1602);
 		assert.equal(cursor.total, 101, "total = 1 re-appended + 100 post-1600 events");
-		// nextSeq is the max seq of the returned events — 5000 here, exactly
-		// like the old wide path (it is a high-water mark, not a tail seq).
-		assert.equal(cursor.nextSeq, 5000);
+		// FS3: nextSeq is the max seq of the DELIVERED events — 1650 here. A
+		// paging consumer resuming from nextSeq still reaches 5000 (below).
+		assert.equal(cursor.nextSeq, 1650);
+
+		// Paging continuation: the remaining pages must deliver 1651..1700 and
+		// finally the re-appended 5000 — never silently dropped.
+		let seen: number[] = cursor.events.map((event) => event.metadata?.seq ?? 0);
+		let since = cursor.nextSeq;
+		for (let guard = 0; guard < 10; guard++) {
+			const page = readEventsCursor(eventsPath, { sinceSeq: since, limit: 50 });
+			if (page.events.length === 0) break;
+			seen = seen.concat(page.events.map((event) => event.metadata?.seq ?? 0));
+			since = page.nextSeq;
+		}
+		assert.ok(seen.includes(5000), "event 5000 must remain reachable via paging (never dropped)");
+		assert.equal(seen.at(-1), 5000, "seq-order pages end at the re-appended 5000");
 
 		// Second call on the unchanged file: the unverified lineage still
 		// answers from the offset-0 ring (whole file) and stays exact.
@@ -378,12 +399,10 @@ test("reject: mid-delta seq violation (compaction-recovery re-append) rebuilds a
 		// The delta check (first seq >= lastSeq, non-decreasing) must fail.
 		appendEvents(eventsPath, [10_001, 900, 10_002]);
 		const expected = parseGroundTruth(eventsPath, 899, 10_000);
-		// File order is preserved: [.., 10000, 10001, 900, 10002] — the
-		// re-appended 900 (seq > 899) must be visible, duplicate seq and all.
-		assert.ok(
-			expected.some((event, i) => event.metadata?.seq === 900 && i > 0),
-			"re-appended 900 must be present",
-		);
+		// FS3 contract: delivery is seq-ORDERED — [900, 1000..10002] (the
+		// re-appended 900 (seq > 899) sorts to the FRONT, duplicate seq and
+		// all, and 10002 closes the page).
+		assert.equal(expected[0]?.metadata?.seq, 900, "re-appended 900 must be present (sorted to the front)");
 		assert.equal(expected.at(-1)?.metadata?.seq, 10_002);
 
 		const cursor = readEventsCursor(eventsPath, { sinceSeq: 899, limit: 10_000 });

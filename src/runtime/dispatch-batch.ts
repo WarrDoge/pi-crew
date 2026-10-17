@@ -202,12 +202,15 @@ export async function sweepExpiredWaitingTasks(
 		}
 		try {
 			const existingRuntimes = new Map(readCrewAgents(fresh.manifest).map((a) => [a.taskId, a.runtime]));
-			saveCrewAgents(
-				fresh.manifest,
-				tasks
-					.filter((t) => requeuedTaskIds.includes(t.id))
-					.map((t) => recordFromTask(fresh.manifest, t, existingRuntimes.get(t.id) ?? "child-process")),
-			);
+			// R4-A1 (fix): agents.json is a full-index overwrite — merge the requeued
+			// records into the existing set (team-runner.ts:525 pattern) instead of
+			// persisting the subset alone (siblings incl. RUNNING agents were wiped).
+			const mergedById = new Map(readCrewAgents(fresh.manifest).map((record) => [record.id, record] as const));
+			for (const task of tasks.filter((t) => requeuedTaskIds.includes(t.id))) {
+				const record = recordFromTask(fresh.manifest, task, existingRuntimes.get(task.id) ?? "child-process");
+				mergedById.set(record.id, record);
+			}
+			saveCrewAgents(fresh.manifest, [...mergedById.values()]);
 		} catch (error) {
 			logInternalError("dispatch-batch.ask-timeout.crewAgents", error, `runId=${runId}`);
 		}
