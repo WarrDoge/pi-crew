@@ -79,17 +79,24 @@ function openSqliteStateDb(stateRoot: string): DatabaseSync {
 	const preExisting = fs.existsSync(dbPath);
 	try {
 		const db = new DatabaseSync(dbPath);
-		const version = readSqliteUserVersion(db);
-		if (preExisting && version !== SQLITE_STATE_USER_VERSION) {
+		try {
+			const version = readSqliteUserVersion(db);
+			if (preExisting && version !== SQLITE_STATE_USER_VERSION) {
+				throw new Error(`state.sqlite user_version=${version} (expected ${SQLITE_STATE_USER_VERSION}) — foreign or corrupt db`);
+			}
+			if (!preExisting) db.exec(`PRAGMA user_version = ${SQLITE_STATE_USER_VERSION}`);
+			return db;
+		} catch (error) {
+			// Windows EBUSY (CI 39067136160): close the handle on EVERY failure
+			// path after open — a leaked handle held the renamed .corrupt-<ts> file
+			// locked (readSqliteUserVersion throwing skipped the old close).
 			try {
 				db.close();
 			} catch {
-				/* best-effort */
+				/* best-effort — the throw below is the real signal */
 			}
-			throw new Error(`state.sqlite user_version=${version} (expected ${SQLITE_STATE_USER_VERSION}) — foreign or corrupt db`);
+			throw error;
 		}
-		if (!preExisting) db.exec(`PRAGMA user_version = ${SQLITE_STATE_USER_VERSION}`);
-		return db;
 	} catch (error) {
 		quarantineSqliteState(stateRoot, error);
 		// Retry ONCE on a fresh file. If the quarantine rename failed the retry
