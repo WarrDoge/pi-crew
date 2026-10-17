@@ -57,6 +57,7 @@ import { waitForRun } from "../runtime/run-tracker.ts";
 import { normalizeSkillOverride } from "../runtime/skill-instructions.ts";
 import { formatActionSuggestion } from "./action-suggestions.ts";
 import { type CacheControlDeps, invalidateSnapshot } from "./team-tool/cache-control.ts";
+import { rootGateBlockReason } from "./team-tool/destructive-gate.ts";
 // API-5 facade dispatch: domain routers replace the former 54-case switch.
 import {
 	domainForAction,
@@ -66,7 +67,6 @@ import {
 	handleRunDomain,
 	handleStatusDomain,
 } from "./team-tool/dispatch/index.ts";
-import { rootGateBlockReason } from "./team-tool/root-gate.ts";
 import { RUN_NOT_FOUND_HINT } from "./team-tool/run-not-found.ts";
 
 export { handleApi } from "./team-tool/api.ts";

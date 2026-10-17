@@ -15,8 +15,8 @@ import { projectCrewRoot, userPiRoot } from "../utils/paths.ts";
 import { allWorkflows, discoverWorkflows, invalidateWorkflowDiscoveryCache } from "../workflows/discover-workflows.ts";
 import type { WorkflowConfig, WorkflowStep } from "../workflows/workflow-config.ts";
 import { serializeWorkflow } from "../workflows/workflow-serializer.ts";
+import { assertRootOnlyAction } from "./team-tool/destructive-gate.ts";
 import { enforceDestructiveIntent } from "./team-tool/intent-policy.ts";
-import { assertRootOnlyAction } from "./team-tool/root-gate.ts";
 import type { TeamToolDetails } from "./team-tool-types.ts";
 import { type PiTeamsToolResult, toolResult } from "./tool-result.ts";
 

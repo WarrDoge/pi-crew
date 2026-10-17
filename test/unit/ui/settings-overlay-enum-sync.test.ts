@@ -17,7 +17,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseConfig } from "../../../src/config/config-validation.ts";
-import { SETTINGS_ENUM_VALUES } from "../../../src/ui/settings-enum-source.ts";
+import { SETTINGS_ENUM_VALUES } from "../../../src/ui/settings-overlay.ts";
 
 /** Build the nested patch the overlay save path builds, then parseConfig it. */
 function parseSingle(key: string, value: string): Record<string, unknown> {
