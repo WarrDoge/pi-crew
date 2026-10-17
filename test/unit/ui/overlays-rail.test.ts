@@ -25,7 +25,7 @@ import { CURSOR_MARKER } from "@earendil-works/pi-tui";
 import { saveCrewAgents } from "../../../src/runtime/crew-agent-records.ts";
 import type { LiveAgentHandle } from "../../../src/runtime/live-session/live-agent-manager.ts";
 import { appendMailboxMessage } from "../../../src/state/coordination/mailbox.ts";
-import { createRunManifest } from "../../../src/state/stores/state-store.ts";
+import { createRunManifest, loadRunManifestById } from "../../../src/state/stores/state-store.ts";
 import { LiveConversationOverlay } from "../../../src/ui/live-conversation-overlay.ts";
 import { AgentPickerOverlay } from "../../../src/ui/overlays/agent-picker-overlay.ts";
 import { ConfirmOverlay } from "../../../src/ui/overlays/confirm-overlay.ts";
@@ -47,6 +47,7 @@ const ANSI = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 const CURSOR_MARKER_RE = /\u001b_pi:c\u0007/g;
 
 const theme = asCrewTheme({});
+const ESC = "\u001b";
 
 /** Strip ANSI so the assertions run on the glyphs a terminal shows. */
 function plain(lines: readonly string[]): string[] {
@@ -344,6 +345,35 @@ test("mailbox-detail: two-column body keeps `│` as an INNER separator only", (
 				joined(overlay.render(width)).includes(formatHint([["escape", "close"]])),
 				`@${width}: the close hint must survive the leader collapse`,
 			);
+		}
+	});
+});
+
+test("mailbox-detail: worker-sourced bodies render ESC-INERT (R4-B1 wave-2b gap)", () => {
+	// The wave-2a sanitizeUntrustedLine sweep claimed the mailbox detail
+	// overlay but the code still rendered bodies RAW (A1 gap). A worker
+	// mailbox body carrying OSC-52/OSC-8 must render with no escape byte
+	// surviving.
+	withRun(({ cwd, runId, taskId }) => {
+		const poisoned = `${ESC}]52;c;${Buffer.from("rm -rf ~").toString("base64")}${ESC}\\ visible${ESC}]8;;file:///etc/passwd${ESC}\\click${ESC}]8;;${ESC}\\`;
+		const loaded = loadRunManifestById(cwd, runId);
+		assert.ok(loaded, "fixture manifest must load");
+		appendMailboxMessage(loaded.manifest, {
+			direction: "inbox",
+			from: taskId,
+			to: runId,
+			body: poisoned,
+			taskId,
+		});
+		const overlay = new MailboxDetailOverlay({ runId, cwd, done: () => undefined, theme });
+		// Expand the selected message so the raw body lines render.
+		overlay.handleInput("\r");
+		for (const width of WIDTHS) {
+			const out = plain(overlay.render(width)).join("\n");
+			assert.ok(!out.includes(ESC), `@${width}: no escape byte may survive: ${JSON.stringify(out)}`);
+			assert.ok(!out.includes("]52"), "OSC-52 payload must be stripped");
+			assert.ok(!out.includes("]8;"), "OSC-8 link must be stripped");
+			assert.ok(out.includes("visible") && out.includes("click"), "visible label text survives");
 		}
 	});
 });

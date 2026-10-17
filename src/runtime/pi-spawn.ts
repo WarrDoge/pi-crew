@@ -96,7 +96,10 @@ function isWithinAllowedPrefixes(resolvedPath: string): boolean {
 		}
 	}
 
-	return allowedPrefixes.some((prefix) => normalized.startsWith(prefix));
+	// R2-L-A9 (wave-2b): a bare startsWith accepts sibling-name escapes
+	// (prefix "/opt/pi" also matches "/opt/pwned"). The prefix must match the
+	// path itself or a path-separator-bounded descendant.
+	return allowedPrefixes.some((prefix) => normalized === prefix || normalized.startsWith(prefix + path.sep));
 }
 
 function resolvePiPackageRoot(): string | undefined {

@@ -40,6 +40,21 @@ export function resolveEmbeddedFaultThreshold(policy: CrewRuntimeConfig["embedde
  *   (the same depth>0 rule is applied to the embedded upgrade itself).
  * - Otherwise, use `isolationPolicy.defaultRuntime` when configured, then fall back to globalKind.
  */
+/**
+ * wave-2b (mock double-gate): PI_CREW_MOCK_LIVE_SESSION is a test seam that
+ * flips production runtime selection (policy + resolver) and fabricates a
+ * mock session — single-gated, an env var inherited from a hostile parent
+ * would silently downgrade a worker to a mock. Mirror the existing
+ * double-gated seams (PI_CREW_TEST_ASYNC_INLINE + PI_CREW_ALLOW_MOCK in
+ * async-runner.ts; PI_TEAMS_MOCK_CHILD_PI + PI_CREW_ALLOW_MOCK in
+ * mock-fixtures.ts): the mock only engages when PI_CREW_ALLOW_MOCK is ALSO
+ * set, and PI_CREW_ALLOW_MOCK is filtered from child envs.
+ */
+export function mockLiveSessionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+	if (env.PI_CREW_MOCK_LIVE_SESSION !== "success") return false;
+	return env.PI_CREW_ALLOW_MOCK === "1" || env.PI_CREW_ALLOW_MOCK === "true";
+}
+
 export function resolveTaskRuntimeKind(
 	globalKind: CrewRuntimeKind,
 	role: string,
@@ -51,22 +66,21 @@ export function resolveTaskRuntimeKind(
 	// Safety: when already inside a pi-crew worker (depth > 0), never nest live-session.
 	// Live-session creates in-process Pi agent sessions, which would recursively
 	// try to use pi-crew, leading to "Cannot read properties of undefined" errors.
-	// Exception: when PI_CREW_MOCK_LIVE_SESSION is set, we're in a test harness
-	// that mocks the live-session path — forcing child-process would spawn a real
-	// pi process and hang the test.
-	if (globalKind === "live-session" && currentCrewDepth(env) > 0 && env.PI_CREW_MOCK_LIVE_SESSION !== "success") return "child-process";
+	// Exception: the double-gated mock seam (mockLiveSessionEnabled) — forcing
+	// child-process would spawn a real pi process and hang the test harness.
+	if (globalKind === "live-session" && currentCrewDepth(env) > 0 && !mockLiveSessionEnabled(env)) return "child-process";
 	const isolatedRoles = isolationPolicy?.isolatedRoles ?? [];
 	if (isolatedRoles.includes(role)) return "child-process";
 	// U11 embedded-tier upgrade (DEFAULT-OFF). Guards mirror the depth guard
 	// above: an in-process embedded session has the SAME nesting hazard, so
 	// depth>0 keeps the task on child-process regardless of which kind the
 	// caller resolved — the guard is EXTENDED to the embedded path, never
-	// weakened (PI_CREW_MOCK_LIVE_SESSION keeps its test-harness exception).
+	// weakened (the double-gated mock seam keeps its test-harness exception).
 	if (
 		embedded?.policy?.enabled === true &&
 		(embedded.policy.roles ?? []).includes(role) &&
 		(embedded.faultCount ?? 0) < resolveEmbeddedFaultThreshold(embedded.policy) &&
-		(currentCrewDepth(env) <= 0 || env.PI_CREW_MOCK_LIVE_SESSION === "success")
+		(currentCrewDepth(env) <= 0 || mockLiveSessionEnabled(env))
 	) {
 		return "live-session";
 	}

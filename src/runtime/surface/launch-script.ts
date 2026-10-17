@@ -99,13 +99,19 @@ export function buildLaunchScript(input: BuildLaunchScriptInput): string {
 	assertSafeTaskId(input.taskId);
 	const depth = currentCrewDepth(input.callerEnv ?? input.env);
 	if (depth > 0) throw new SurfaceDepthGuardError(depth);
-
 	// path.resolve (không phải path.join): script path phải ABSOLUTE — `rm -f
 	// -- "$0"` chạy trong pane SAU dòng `cd <cwd>`, nên $0 relative sẽ trỏ sai
 	// chỗ và self-delete thành no-op (T7 obs, fixed ở T14).
 	const scriptPath = path.resolve(input.baseDir, `pi-crew-launch-${input.taskId}-${process.pid}.sh`);
 	const lines: string[] = ["#!/bin/bash"];
 	for (const [key, value] of Object.entries(input.env)) {
+		// R2-L-B2 (wave-2b): env KEYS interpolate into the script UNQUOTED
+		// (`export KEY=...`) — only VALUES were shellEscape'd. A task-sourced
+		// key like `FOO; curl evil` or `A=b` would inject script lines. Keys must
+		// be valid POSIX identifiers.
+		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+			throw new Error(`buildLaunchScript: invalid env key ${JSON.stringify(key)} (must match /^[A-Za-z_][A-Za-z0-9_]*$/)`);
+		}
 		lines.push(`export ${key}=${shellEscape(value)}`);
 	}
 	lines.push(`cd ${shellEscape(input.cwd)}`);

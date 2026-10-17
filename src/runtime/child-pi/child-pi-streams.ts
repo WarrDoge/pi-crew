@@ -14,6 +14,7 @@ import type { ChildPiRunInput } from "./child-pi.ts";
 import {
 	MAX_ASSISTANT_TEXT_CHARS,
 	MAX_LINE_BUFFER_BYTES,
+	MAX_PERSISTED_LINE_BYTES,
 	MAX_THINKING_CHARS,
 	MAX_TOOL_INPUT_CHARS,
 	MAX_TOOL_RESULT_CHARS,
@@ -85,7 +86,11 @@ export function compactChildPiEvent(event: unknown): unknown | undefined {
 		return {
 			type: record.type,
 			toolName: record.toolName,
-			args: record.args,
+			// R3A-M3 (wave-2b): tool args were passed through RAW — a single
+			// tool_execution carrying a 1 MB arg (e.g. an edit diff or base64
+			// blob) landed whole in the agent event log. Route through the same
+			// compaction as message content parts.
+			args: compactValue(record.args),
 		};
 	}
 	if (record.type === "tool_result_end" || record.type === "message_end" || record.type === "message") {
@@ -124,7 +129,10 @@ export function compactChildPiEvent(event: unknown): unknown | undefined {
 			taskId: record.taskId,
 			reason: record.reason,
 			message: record.message,
-			data: record.data,
+			// R3A-M3 (wave-2b): the "full payload" pass-through kept `data` raw —
+			// compact it too (the P2-25 intent was feature fidelity, not unbounded
+			// payload retention).
+			data: compactValue(record.data),
 		};
 	}
 	return record.type ? { type: record.type } : undefined;
@@ -178,7 +186,15 @@ function nonJsonLineResult(line: string): {
 	displayLine?: string;
 	json: boolean;
 } {
-	return { json: false, persistedLine: line, displayLine: line };
+	// R3A-M3 (wave-2b): non-JSON lines persist VERBATIM — cap them so a
+	// force-flushed mega-line (up to MAX_LINE_BUFFER_BYTES) or a binary dump
+	// cannot balloon the transcript. JSON lines go through compactChildPiEvent
+	// (bounded per-field); this is the unbounded escape hatch.
+	const capped =
+		line.length > MAX_PERSISTED_LINE_BYTES
+			? `${line.slice(0, MAX_PERSISTED_LINE_BYTES)}[pi-crew truncated ${line.length - MAX_PERSISTED_LINE_BYTES} chars]`
+			: line;
+	return { json: false, persistedLine: capped, displayLine: capped };
 }
 
 function compactChildPiLine(

@@ -112,6 +112,7 @@ test("faux E2E ok: real in-process worker completes a scripted text turn key-fre
 	});
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const previousMock = process.env.PI_CREW_MOCK_LIVE_SESSION;
+	const previousAllowMock = process.env.PI_CREW_ALLOW_MOCK; // wave-2b
 	try {
 		activateRealSessionEnv(scenario.agentDir);
 		const result = await scenario.run();
@@ -124,6 +125,7 @@ test("faux E2E ok: real in-process worker completes a scripted text turn key-fre
 	} finally {
 		restoreEnv("PI_CODING_AGENT_DIR", previousAgentDir);
 		restoreEnv("PI_CREW_MOCK_LIVE_SESSION", previousMock);
+		restoreEnv("PI_CREW_ALLOW_MOCK", previousAllowMock);
 		removeTrackedTempDir(scenario.cwd);
 	}
 });
@@ -143,6 +145,7 @@ test("faux E2E tool-use: scripted submit_result tool call yields a structured re
 	);
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const previousMock = process.env.PI_CREW_MOCK_LIVE_SESSION;
+	const previousAllowMock = process.env.PI_CREW_ALLOW_MOCK; // wave-2b
 	try {
 		activateRealSessionEnv(scenario.agentDir);
 		const result = await scenario.run();
@@ -156,6 +159,7 @@ test("faux E2E tool-use: scripted submit_result tool call yields a structured re
 	} finally {
 		restoreEnv("PI_CODING_AGENT_DIR", previousAgentDir);
 		restoreEnv("PI_CREW_MOCK_LIVE_SESSION", previousMock);
+		restoreEnv("PI_CREW_ALLOW_MOCK", previousAllowMock);
 		removeTrackedTempDir(scenario.cwd);
 	}
 });
@@ -172,6 +176,7 @@ test("faux E2E error: assistant stopReason error flows through the real session 
 	);
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const previousMock = process.env.PI_CREW_MOCK_LIVE_SESSION;
+	const previousAllowMock = process.env.PI_CREW_ALLOW_MOCK; // wave-2b
 	try {
 		activateRealSessionEnv(scenario.agentDir);
 		const result = await scenario.run();
@@ -190,6 +195,7 @@ test("faux E2E error: assistant stopReason error flows through the real session 
 	} finally {
 		restoreEnv("PI_CODING_AGENT_DIR", previousAgentDir);
 		restoreEnv("PI_CREW_MOCK_LIVE_SESSION", previousMock);
+		restoreEnv("PI_CREW_ALLOW_MOCK", previousAllowMock);
 		removeTrackedTempDir(scenario.cwd);
 	}
 });
@@ -207,6 +213,7 @@ test("faux E2E retry: yield reminder loop retries and the second scripted respon
 	);
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const previousMock = process.env.PI_CREW_MOCK_LIVE_SESSION;
+	const previousAllowMock = process.env.PI_CREW_ALLOW_MOCK; // wave-2b
 	try {
 		activateRealSessionEnv(scenario.agentDir);
 		const result = await scenario.run();
@@ -219,6 +226,7 @@ test("faux E2E retry: yield reminder loop retries and the second scripted respon
 	} finally {
 		restoreEnv("PI_CODING_AGENT_DIR", previousAgentDir);
 		restoreEnv("PI_CREW_MOCK_LIVE_SESSION", previousMock);
+		restoreEnv("PI_CREW_ALLOW_MOCK", previousAllowMock);
 		removeTrackedTempDir(scenario.cwd);
 	}
 });

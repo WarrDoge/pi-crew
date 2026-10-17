@@ -29,6 +29,7 @@ test("wait returns completed for child-process mock run", async () => {
 	const prevAllowMock = process.env.PI_CREW_ALLOW_MOCK;
 
 	process.env.PI_CREW_MOCK_LIVE_SESSION = "success";
+	process.env.PI_CREW_ALLOW_MOCK = "1"; // wave-2b: mock seam double-gated
 	process.env.PI_CREW_DEPTH = "0";
 	process.env.PI_CREW_ALLOW_MOCK = "1";
 	process.env.PI_TEAMS_MOCK_CHILD_PI = "success";

@@ -183,6 +183,37 @@ describe("workspace-lock heartbeat staleness", () => {
 		handleB.release();
 		handleA.release();
 	});
+
+	it("R7-C2 (wave-2b): non-numeric heartbeat is a CORRUPT lockfile, not an immortal lock", async () => {
+		// A hand-edited/corrupt lockfile with heartbeat: "not-a-number" used to
+		// make `now - lock.heartbeat` NaN and every staleness comparison false —
+		// nothing could ever steal the lock. readLock now type-validates the
+		// heartbeat (non-finite → corrupt → steal path), same as unparseable JSON.
+		const { resolver, set } = mockStartTimes();
+		set(FIXED_PID, 1000);
+		const now = 1_000_000;
+		fs.mkdirSync(path.dirname(workspaceLockPath(cwd)), { recursive: true });
+		fs.writeFileSync(
+			workspaceLockPath(cwd),
+			JSON.stringify({
+				pid: FIXED_PID,
+				startTime: 1000,
+				heartbeat: "not-a-number",
+				goalId: "corrupt_goal",
+				acquiredAt: new Date(now).toISOString(),
+			}),
+		);
+		const handle = await acquireWorkspaceLock(cwd, "goal_rescuer", {
+			startTimeResolver: resolver,
+			pid: FIXED_PID,
+			now: () => now,
+			heartbeatStaleMs: 60_000,
+			pollMs: 5,
+		});
+		const contents = JSON.parse(fs.readFileSync(workspaceLockPath(cwd), "utf-8"));
+		assert.equal(contents.goalId, "goal_rescuer", "corrupt-heartbeat lock must be stealable");
+		handle.release();
+	});
 });
 
 describe("workspace-lock contention policy", () => {

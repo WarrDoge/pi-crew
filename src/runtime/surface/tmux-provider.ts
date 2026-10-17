@@ -58,7 +58,9 @@ function defaultHasCommand(bin: string): boolean {
 	if (cached !== undefined) return cached;
 	let available = false;
 	try {
-		execFileSync("sh", ["-c", `command -v ${bin}`], { stdio: "ignore" });
+		// R2-L-B3 (wave-2b): positional-arg probe — see resolve-surface.ts
+		// hasBinary; `bin` must never splice into the shell command string.
+		execFileSync("sh", ["-c", 'command -v "$1"', "sh", bin], { stdio: "ignore" });
 		available = true;
 	} catch {
 		available = false;

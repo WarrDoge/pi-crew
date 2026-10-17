@@ -34,6 +34,7 @@
 import type { MetricRegistry } from "../../observability/metric-registry.ts";
 import { appendEventAsync } from "../../state/event-log/event-log.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
+import { redactSecrets } from "../../utils/redaction.ts";
 import { classifyBool } from "./classifier-service.ts";
 
 export interface AmbientNoiseGateArgs {
@@ -88,7 +89,10 @@ export async function classifyAmbientNoiseGate(args: AmbientNoiseGateArgs): Prom
 		state: {
 			// Cap the summary: classifiers reason over small JSON state — the raw
 			// error can carry multi-KB stderr tails (same cap as retry-triage).
-			failureSummary: args.failureSummary.slice(0, 2000),
+			// R2-L-B8 (wave-2b): redact BEFORE the summary (and its slice) reaches
+			// classifier state — provider/API-key echoes in an auth failure would
+			// otherwise ride into the model prompt and the observed telemetry.
+			failureSummary: String(redactSecrets(args.failureSummary)).slice(0, 2000),
 			attempt: args.attempt,
 			maxAttempts: args.maxAttempts,
 		},

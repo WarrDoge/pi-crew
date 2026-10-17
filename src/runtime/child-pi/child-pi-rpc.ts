@@ -357,6 +357,20 @@ async function runRpcSession(
 	}
 
 	// ── start (fresh spawns only) ─────────────────────────────────────────
+	// R2-L-A5 rider (wave-2b): every early-failure return below (spawn-error,
+	// no-process, canary-kill) bypasses the settle/finally tempDir cleanup at
+	// the bottom of this function — a leaked per-run scratch dir each time.
+	// finally-equivalent cleanup right before each return (fresh spawns only:
+	// a pooled reuse must not delete another task's scratch dir).
+	const cleanupFreshTempDir = (): void => {
+		if (!pooled && ctx.tempDir) {
+			try {
+				cleanupTempDir(ctx.tempDir);
+			} catch {
+				/* cleanup never masks the start failure */
+			}
+		}
+	};
 	if (!pooled) {
 		// Env-splice: RpcClient spawns with `{...process.env, ...options.env}`
 		// (rpc-client.js start()) — WITHOUT this splice the child would inherit
@@ -397,6 +411,7 @@ async function runRpcSession(
 			} catch {
 				/* listener errors never mask the start failure */
 			}
+			cleanupFreshTempDir();
 			return {
 				exitCode: null,
 				stdout: "",
@@ -425,6 +440,7 @@ async function runRpcSession(
 	// runtime (rpc-client.js field) — hence the structural cast.
 	const child = (client as unknown as { process: ChildProcess | null }).process;
 	if (!child) {
+		cleanupFreshTempDir();
 		return {
 			exitCode: null,
 			stdout: "",
@@ -458,6 +474,7 @@ async function runRpcSession(
 		} catch {
 			/* listener errors never mask the leak failure */
 		}
+		cleanupFreshTempDir();
 		return {
 			exitCode: null,
 			stdout: "",

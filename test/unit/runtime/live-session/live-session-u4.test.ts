@@ -381,7 +381,9 @@ test("U4 acceptance (d): steer in the planning window is queued and replayed to 
 
 test("U4 mock path: placeholder session cannot swallow steers and the handle terminates on dispose", async () => {
 	const previousMock = process.env.PI_CREW_MOCK_LIVE_SESSION;
+	const previousAllowMock = process.env.PI_CREW_ALLOW_MOCK; // wave-2b
 	process.env.PI_CREW_MOCK_LIVE_SESSION = "success";
+	process.env.PI_CREW_ALLOW_MOCK = "1"; // wave-2b: mock seam double-gated
 	const cwd = createTrackedTempDir("pi-crew-u4-mock-");
 	try {
 		const { manifest, tasks } = createRunManifest({ cwd, team, workflow, goal: "u4 mock" });
@@ -412,6 +414,7 @@ test("U4 mock path: placeholder session cannot swallow steers and the handle ter
 		);
 	} finally {
 		restoreEnv("PI_CREW_MOCK_LIVE_SESSION", previousMock);
+		restoreEnv("PI_CREW_ALLOW_MOCK", previousAllowMock);
 		removeTrackedTempDir(cwd);
 	}
 });

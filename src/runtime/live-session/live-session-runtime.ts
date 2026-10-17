@@ -944,7 +944,13 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 	// G1: Capture yield result from custom tool callback
 	let customToolYieldResult: YieldResult | undefined;
 	let customToolYieldResolved = false;
-	if (getCrewEnv("PI_CREW_MOCK_LIVE_SESSION") === "success") {
+	// wave-2b (mock double-gate): the mock session fabricates a success event
+	// for the whole run — single-gated, inherited env would silently neuter a
+	// worker. Double-gate with PI_CREW_ALLOW_MOCK (mirror mock-fixtures.ts).
+	if (
+		getCrewEnv("PI_CREW_MOCK_LIVE_SESSION") === "success" &&
+		(getCrewEnv("PI_CREW_ALLOW_MOCK") === "1" || getCrewEnv("PI_CREW_ALLOW_MOCK") === "true")
+	) {
 		const agentId = `${input.manifest.runId}:${input.task.id}`;
 		const inherited =
 			input.runtimeConfig?.inheritContext === true && input.parentContext ? ` with inherited context: ${input.parentContext}` : "";

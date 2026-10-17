@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import test from "node:test";
+import { getCrewEnvInt } from "../../../../src/config/env-vars.ts";
 import { createMetricRegistry } from "../../../../src/observability/metric-registry.ts";
 import {
 	createSubprocessVerifyGateExecutor,
@@ -208,11 +209,28 @@ test("resolveVerifyGateEnabled/TimeoutMs: env precedence + safe defaults", () =>
 		assert.equal(resolveVerifyGateEnabled(false), true);
 		delete process.env.PI_CREW_VERIFY_GATE_TIMEOUT_MS;
 		assert.equal(resolveVerifyGateTimeoutMs(), 120_000);
-		assert.equal(resolveVerifyGateTimeoutMs(5_000), 5_000);
+		// wave-2b pin update: the registry default is NUMERIC on the int parser,
+		// so getCrewEnvInt yields 120_000 when unset — the registry default now
+		// BEATS the explicit arg (env > registry-default > explicit > const).
+		// Deliberate, same-value: the registry and the call-site constant agree.
+		assert.equal(resolveVerifyGateTimeoutMs(5_000), 120_000);
 		process.env.PI_CREW_VERIFY_GATE_TIMEOUT_MS = "300000";
 		assert.equal(resolveVerifyGateTimeoutMs(5_000), 300_000);
 		process.env.PI_CREW_VERIFY_GATE_TIMEOUT_MS = "-1";
 		assert.equal(resolveVerifyGateTimeoutMs(), 120_000); // invalid → default
+		// wave-2b pin (drifted-key behavior, verify-gate.ts:134): the registry
+		// default is now NUMERIC on the int parser. Before, an unparseable env
+		// value fell back to the STRING "120000", and `Number.isFinite(raw)`'s
+		// coercion let the string survive — the "number" was a string. Now the
+		// fallback is a real number and the unparseable key resolves to the
+		// numeric default.
+		process.env.PI_CREW_VERIFY_GATE_TIMEOUT_MS = "abc";
+		const drifted = resolveVerifyGateTimeoutMs();
+		assert.equal(drifted, 120_000);
+		assert.equal(typeof drifted, "number");
+		assert.strictEqual(getCrewEnvInt("PI_CREW_VERIFY_GATE_TIMEOUT_MS"), 120_000);
+		delete process.env.PI_CREW_VERIFY_GATE_TIMEOUT_MS;
+		assert.strictEqual(getCrewEnvInt("PI_CREW_VERIFY_GATE_TIMEOUT_MS"), 120_000);
 	} finally {
 		if (prevGate === undefined) delete process.env.PI_CREW_VERIFY_GATE;
 		else process.env.PI_CREW_VERIFY_GATE = prevGate;

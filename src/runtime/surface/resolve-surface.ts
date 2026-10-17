@@ -58,7 +58,10 @@ function hasBinary(bin: string): boolean {
 	if (cached !== undefined) return cached;
 	let available = false;
 	try {
-		execFileSync("sh", ["-c", `command -v ${bin}`], { stdio: "ignore" });
+		// R2-L-B3 (wave-2b): `bin` interpolates into a shell command — pass it
+		// as a POSITIONAL ARG to `command -v "$1"` instead of splicing it into
+		// the command string (shell-injection-proof probe).
+		execFileSync("sh", ["-c", 'command -v "$1"', "sh", bin], { stdio: "ignore" });
 		available = true;
 	} catch {
 		available = false;

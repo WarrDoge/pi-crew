@@ -423,11 +423,12 @@ if (shardSpec) {
 // The flake only surfaced after the Round 13/14 test additions pushed the
 // runners past their timing threshold. Capping cross-file concurrency at 2
 // across ALL platforms gives the FS room to flush and eliminates the storm.
-// Local dev is unaffected (developers pass --test-concurrency=4 explicitly
-// and run on idle machines). This only clamps the CI-requested value.
+// R4-B3 (wave-2b): the clamp is now CI-ONLY (process.env.CI) — local dev
+// machines are not contended runners, and halving every local full-suite run
+// (~2x wall-clock on the ~15-min battery) was an unconditional tax.
 finalArgs = finalArgs.map((arg) => {
 	const m = /^(--test-concurrency)=(\d+)$/.exec(arg);
-	return m && Number(m[2]) > 2 ? `${m[1]}=2` : arg;
+	return process.env.CI && m && Number(m[2]) > 2 ? `${m[1]}=2` : arg;
 });
 
 // Detect --watch. Node's --watch keeps the process alive and re-runs on file

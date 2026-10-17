@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { TeamRunManifest } from "../state/types.ts";
 import { logInternalError } from "../utils/internal-error.ts";
 import { projectCrewRoot } from "../utils/paths.ts";
+import { assertSafePathId } from "../utils/safe-paths.ts";
 
 export type DeadletterReason = "max-retries" | "heartbeat-dead" | "manual";
 
@@ -35,6 +36,9 @@ export function deadletterPath(manifest: TeamRunManifest): string {
  * this is the durable out-of-band record for post-mortem analysis.
  */
 export function deadletterIndexPath(manifest: TeamRunManifest): string {
+	// R2-L-A8 (wave-2b): runId is interpolated into a project-level path —
+	// a manifest with ".."-bearing runId would escape the deadletter dir.
+	assertSafePathId("runId", manifest.runId);
 	return path.join(projectCrewRoot(manifest.cwd), "state", "deadletter", `${manifest.runId}.jsonl`);
 }
 

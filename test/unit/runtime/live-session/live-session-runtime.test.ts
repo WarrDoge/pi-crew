@@ -37,7 +37,9 @@ test.afterEach(() => clearLiveAgentsForTest());
 
 test("mock live-session suppresses owner callbacks when stale", async () => {
 	const previousMock = process.env.PI_CREW_MOCK_LIVE_SESSION;
+	const previousAllowMock = process.env.PI_CREW_ALLOW_MOCK; // wave-2b
 	process.env.PI_CREW_MOCK_LIVE_SESSION = "success";
+	process.env.PI_CREW_ALLOW_MOCK = "1"; // wave-2b: mock seam double-gated
 	const cwd = createTrackedTempDir("pi-crew-live-session-stale-");
 	const events: unknown[] = [];
 	const outputs: string[] = [];
@@ -67,13 +69,16 @@ test("mock live-session suppresses owner callbacks when stale", async () => {
 		assert.equal(outputs.length, 0);
 	} finally {
 		restoreEnv("PI_CREW_MOCK_LIVE_SESSION", previousMock);
+		restoreEnv("PI_CREW_ALLOW_MOCK", previousAllowMock);
 		removeTrackedTempDir(cwd);
 	}
 });
 
 test("live task production path passes stale owner guard", async () => {
 	const previousMock = process.env.PI_CREW_MOCK_LIVE_SESSION;
+	const previousAllowMock = process.env.PI_CREW_ALLOW_MOCK; // wave-2b
 	process.env.PI_CREW_MOCK_LIVE_SESSION = "success";
+	process.env.PI_CREW_ALLOW_MOCK = "1"; // wave-2b: mock seam double-gated
 	const cwd = createTrackedTempDir("pi-crew-live-task-stale-");
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -104,13 +109,16 @@ test("live task production path passes stale owner guard", async () => {
 		assert.equal(result.task.agentProgress, undefined);
 	} finally {
 		restoreEnv("PI_CREW_MOCK_LIVE_SESSION", previousMock);
+		restoreEnv("PI_CREW_ALLOW_MOCK", previousAllowMock);
 		removeTrackedTempDir(cwd);
 	}
 });
 
 test("mock live-session keeps terminal live agents for resume but excludes them from active API", async () => {
 	const previousMock = process.env.PI_CREW_MOCK_LIVE_SESSION;
+	const previousAllowMock = process.env.PI_CREW_ALLOW_MOCK; // wave-2b
 	process.env.PI_CREW_MOCK_LIVE_SESSION = "success";
+	process.env.PI_CREW_ALLOW_MOCK = "1"; // wave-2b: mock seam double-gated
 	const cwd = createTrackedTempDir("pi-crew-live-session-cleanup-");
 	try {
 		const result = await runLiveSessionTask({
@@ -135,6 +143,7 @@ test("mock live-session keeps terminal live agents for resume but excludes them 
 		assert.equal(listLiveAgents()[0]?.status, "completed");
 	} finally {
 		restoreEnv("PI_CREW_MOCK_LIVE_SESSION", previousMock);
+		restoreEnv("PI_CREW_ALLOW_MOCK", previousAllowMock);
 		removeTrackedTempDir(cwd);
 	}
 });
@@ -142,9 +151,11 @@ test("mock live-session keeps terminal live agents for resume but excludes them 
 test("run can use experimental live-session runtime with durable transcript hooks", async () => {
 	const previousEnable = process.env.PI_CREW_ENABLE_EXPERIMENTAL_LIVE_SESSION;
 	const previousMock = process.env.PI_CREW_MOCK_LIVE_SESSION;
+	const previousAllowMock = process.env.PI_CREW_ALLOW_MOCK; // wave-2b
 	const previousDepth = process.env.PI_CREW_DEPTH;
 	process.env.PI_CREW_ENABLE_EXPERIMENTAL_LIVE_SESSION = "1";
 	process.env.PI_CREW_MOCK_LIVE_SESSION = "success";
+	process.env.PI_CREW_ALLOW_MOCK = "1"; // wave-2b: mock seam double-gated
 	process.env.PI_CREW_DEPTH = "0";
 	const cwd = createTrackedTempDir("pi-crew-live-session-");
 	try {
@@ -184,6 +195,7 @@ test("run can use experimental live-session runtime with durable transcript hook
 	} finally {
 		restoreEnv("PI_CREW_ENABLE_EXPERIMENTAL_LIVE_SESSION", previousEnable);
 		restoreEnv("PI_CREW_MOCK_LIVE_SESSION", previousMock);
+		restoreEnv("PI_CREW_ALLOW_MOCK", previousAllowMock);
 		restoreEnv("PI_CREW_DEPTH", previousDepth);
 		removeTrackedTempDir(cwd);
 	}

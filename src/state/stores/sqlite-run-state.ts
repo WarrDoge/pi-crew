@@ -89,6 +89,19 @@ export class SqliteRunStateStore {
 		// mkdirs it first), but be defensive — sqlite does not create dirs.
 		fs.mkdirSync(stateRoot, { recursive: true });
 		this.db = new DatabaseSync(sqliteDbPath(stateRoot));
+		// wave-2b (sqlite 0600): DatabaseSync creates the file with the process
+		// umask — a permissive umask (0022→0644) left run state (manifest, tasks,
+		// worker records) group/world-readable, unlike the JSON backend's 0600
+		// atomic writes. Explicit chmod AFTER open, best-effort (never block the
+		// store on it); WAL/SHM companions are created lazily by the pragma below.
+		for (const suffix of ["", "-wal", "-shm"]) {
+			try {
+				fs.chmodSync(`${sqliteDbPath(stateRoot)}${suffix}`, 0o600);
+			} catch {
+				// companion not created yet (no write since open) — the pragma or a
+				// later write may create it; next constructor open re-chmods.
+			}
+		}
 		// Durability combo live-proven by the round-10 kill -9 harness
 		// (/tmp/pi-crew-verify10-crash/): WAL journal + synchronous=1
 		// (NORMAL). busy_timeout rides out cross-process writer contention

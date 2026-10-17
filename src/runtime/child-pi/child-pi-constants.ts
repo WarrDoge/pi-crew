@@ -31,6 +31,15 @@ export const RESPONSE_TIMEOUT_MS = DEFAULT_CHILD_PI.responseTimeoutMs;
  */
 export const MAX_LINE_BUFFER_BYTES = 1024 * 1024; // 1 MB
 
+/**
+ * R3A-M3 (wave-2b): byte cap for a single persisted transcript line. The
+ * buffer force-flush can hand the pipeline a raw "line" of up to 1 MB, and
+ * non-JSON lines are persisted VERBATIM (no compact stage) — a worker that
+ * base64-dumps a binary into its stdout would write it whole into the
+ * transcript. Lines beyond this cap are truncated with an explicit marker.
+ */
+export const MAX_PERSISTED_LINE_BYTES = 64 * 1024; // 64 KiB
+
 /** Maximum characters for assistant text fragments in compacted events. */
 export const MAX_ASSISTANT_TEXT_CHARS = DEFAULT_CHILD_PI.maxAssistantTextChars;
 

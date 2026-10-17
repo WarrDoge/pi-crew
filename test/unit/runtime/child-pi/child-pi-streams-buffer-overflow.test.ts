@@ -16,7 +16,7 @@
 import assert from "node:assert";
 import { describe, test } from "node:test";
 import type { AgentConfig } from "../../../../src/agents/agent-config.ts";
-import { MAX_LINE_BUFFER_BYTES } from "../../../../src/runtime/child-pi/child-pi-constants.ts";
+import { MAX_LINE_BUFFER_BYTES, MAX_PERSISTED_LINE_BYTES } from "../../../../src/runtime/child-pi/child-pi-constants.ts";
 import { ChildPiLineObserver } from "../../../../src/runtime/child-pi/child-pi-streams.ts";
 
 const MINIMAL_AGENT: AgentConfig = {
@@ -109,10 +109,19 @@ describe("RT-9: buffer-overflow splits complete lines (no merge)", () => {
 		const huge = "X".repeat(MAX_LINE_BUFFER_BYTES + 1024);
 		observer.observe(huge);
 
-		// Non-JSON → 0 json events, 1 stdout line (the whole huge line).
+		// Non-JSON → 0 json events, 1 stdout line (the capped huge line).
 		assert.equal(captured.events.length, 0, "non-JSON huge line yields no json events");
 		assert.equal(captured.stdout.length, 1, "single huge line force-flushed as one line");
-		assert.equal(captured.stdout[0], huge, "force-flush preserves the single line verbatim");
+		// wave-2b (R3A-M3) pin update: non-JSON lines are no longer persisted
+		// VERBATIM — a 1MB force-flush line is truncated to MAX_PERSISTED_LINE_BYTES
+		// with an explicit marker (the old "verbatim" pin was the unbounded case
+		// the fix removes). Prefix + marker + length are all asserted.
+		const capped = captured.stdout[0]!;
+		assert.ok(capped.startsWith("X".repeat(MAX_PERSISTED_LINE_BYTES)), "first 64KiB preserved");
+		assert.ok(
+			capped.endsWith(`[pi-crew truncated ${huge.length - MAX_PERSISTED_LINE_BYTES} chars]`),
+			`marker expected: ${capped.slice(-80)}`,
+		);
 	});
 
 	test("trailing-newline overflow: empty trailing element is a no-op (not a spurious event)", () => {

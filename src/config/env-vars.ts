@@ -78,7 +78,10 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		name: "PI_CREW_DEPTH",
 		mirror: "PI_TEAMS_DEPTH",
 		mirrorPrecedence: "crew",
-		default: "0",
+		// wave-2b: default was the STRING "0" on an int parser — getCrewEnvParsed
+		// returned the raw string from the fallback, so typed readers (getCrewEnvInt)
+		// saw undefined instead of 0. Numeric default routes through the parser.
+		default: 0,
 		parser: "int",
 		doc: "current crew depth (pi-args.ts:72 reads CREW ?? TEAMS ?? '0')",
 	},
@@ -86,7 +89,7 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		name: "PI_TEAMS_DEPTH",
 		mirror: "PI_CREW_DEPTH",
 		mirrorPrecedence: "crew",
-		default: "0",
+		default: 0, // wave-2b: numeric default on int parser (was string "0")
 		parser: "int",
 		doc: "crew depth mirror (fallback of PI_CREW_DEPTH)",
 	},
@@ -508,7 +511,7 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 	PI_CREW_VERIFY_GATE_TIMEOUT_MS: {
 		name: "PI_CREW_VERIFY_GATE_TIMEOUT_MS",
 		parser: "int",
-		default: "120000",
+		default: 120_000, // wave-2b: numeric default (was string "120000" — fallback bypassed the parser)
 		doc: "U13 per-check timeout in ms for the deterministic verify_gate pre-gate commands. Invalid/≤0 → 120000, mirroring runPhaseGates (runtime/verification/verify-gate.ts resolveVerifyGateTimeoutMs)",
 	},
 	PI_CREW_VERIFY_DETERMINISM: {
@@ -523,7 +526,7 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 	PI_CREW_RPC_TURN_TIMEOUT_MS: {
 		name: "PI_CREW_RPC_TURN_TIMEOUT_MS",
 		parser: "int",
-		default: "600000",
+		default: 600_000, // wave-2b: numeric default (was string "600000" — fallback bypassed the parser)
 		doc: "W7/DR1 belt-and-suspenders turn timeout for the EXPERIMENTAL RPC worker transport: max ms a prompt-accepted turn may run without agent_settled before the transport fails with the early-failure shape (DR5 guard still blocks the stdio fallback once a session event was seen). Env-only while RPC stays experimental. Invalid/≤0 → 600000 (rpc-worker.ts resolveRpcTurnTimeoutMs)",
 	},
 	PI_CREW_AUTO_EXIT: {
@@ -533,13 +536,13 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 	PI_CREW_AUTO_PRUNE_KEEP: {
 		name: "PI_CREW_AUTO_PRUNE_KEEP",
 		parser: "int",
-		default: "10",
+		default: 10, // wave-2b: numeric default (was string "10" — fallback bypassed the parser)
 		doc: "DP-01: number of most-recent finished runs the session-start auto-prune retains (was hard-coded 10). Invalid/negative → 10 with a warning (run-maintenance.ts:resolveAutoPruneKeep)",
 	},
 	PI_CREW_AUTO_PRUNE_AGE_FLOOR_HOURS: {
 		name: "PI_CREW_AUTO_PRUNE_AGE_FLOOR_HOURS",
 		parser: "int",
-		default: "24",
+		default: 24, // wave-2b: numeric default (was string "24" — fallback bypassed the parser)
 		doc: "DP-01: auto-prune never deletes a finished run younger than this many hours, even beyond top-keep — evidence/incident runs survive a session restart (0 disables; run-maintenance.ts:resolveAutoPruneAgeFloorMs)",
 	},
 	PI_CREW_SURFACE: {

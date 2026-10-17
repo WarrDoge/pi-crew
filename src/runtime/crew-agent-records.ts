@@ -1057,7 +1057,13 @@ export function readCrewAgentEventsCursor(
 	const limit = typeof options.limit === "number" && Number.isInteger(options.limit) && options.limit >= 0 ? options.limit : undefined;
 
 	const filtered = readAgentEventMatches(filePath, sinceSeq);
-	const events = limit !== undefined ? filtered.slice(0, limit) : filtered;
+	// R8-L2 (wave-2b, FS3 twin): seq-sort BEFORE the limit slice. File-order
+	// slicing on a non-monotonic file can deliver an early high seq inside the
+	// first `limit` events; nextSeq=max-delivered then permanently skips every
+	// undelivered lower-seq event for paging consumers. Sort ONLY under a
+	// limit — the no-limit path delivers everything (nextSeq = true max) and
+	// keeps its historical FILE-order contract (mirrors cursor.ts FS3).
+	const events = limit !== undefined ? [...filtered].sort((a, b) => (a.seq as number) - (b.seq as number)).slice(0, limit) : filtered;
 	const returnedMaxSeq = events.reduce((max, event) => (typeof event.seq === "number" ? Math.max(max, event.seq) : max), sinceSeq);
 	return {
 		path: filePath,

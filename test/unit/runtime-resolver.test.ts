@@ -6,6 +6,7 @@ import { resolveCrewRuntime } from "../../src/runtime/model/runtime-resolver.ts"
 test("runtime resolver defaults auto to live-session when available", async () => {
 	const runtime = await resolveCrewRuntime({}, {
 		PI_CREW_MOCK_LIVE_SESSION: "success",
+		PI_CREW_ALLOW_MOCK: "1", // wave-2b: mock seam double-gated with PI_CREW_ALLOW_MOCK
 	} as NodeJS.ProcessEnv);
 	assert.equal(runtime.kind, "live-session");
 	assert.equal(runtime.requestedMode, "auto");
@@ -44,6 +45,7 @@ test("runtime resolver lets explicit live-session override child-process mock", 
 	const runtime = await resolveCrewRuntime({ runtime: { mode: "live-session" }, executeWorkers: true }, {
 		PI_TEAMS_MOCK_CHILD_PI: "json-success",
 		PI_CREW_MOCK_LIVE_SESSION: "success",
+		PI_CREW_ALLOW_MOCK: "1", // wave-2b: mock seam double-gated with PI_CREW_ALLOW_MOCK
 	} as NodeJS.ProcessEnv);
 	assert.equal(runtime.kind, "live-session");
 	assert.equal(runtime.requestedMode, "live-session");
@@ -59,6 +61,7 @@ test("runtime resolver uses mock live-session when enabled", async () => {
 	const runtime = await resolveCrewRuntime({ runtime: { mode: "live-session" }, executeWorkers: true }, {
 		PI_CREW_ENABLE_EXPERIMENTAL_LIVE_SESSION: "1",
 		PI_CREW_MOCK_LIVE_SESSION: "success",
+		PI_CREW_ALLOW_MOCK: "1", // wave-2b: mock seam double-gated with PI_CREW_ALLOW_MOCK
 	} as NodeJS.ProcessEnv);
 	assert.equal(runtime.kind, "live-session");
 	assert.equal(runtime.requestedMode, "live-session");

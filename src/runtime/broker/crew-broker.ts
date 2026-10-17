@@ -1436,6 +1436,15 @@ export class CrewBroker {
 		}
 		// Default recipient: the sender's taskId (the orchestrator that
 		// spawned this worker). If 'to' is provided, use it instead.
+		// R2-L-A6 (wave-2b): 'to' is SENDER-CHOSEN and lands in a mailbox
+		// record (taskId field) — an arbitrary value would let a worker
+		// address any task in the run (spoofed follow-up routing). Restrict
+		// to the two identities the sender legitimately owns: its run and
+		// its own (parent) task.
+		if (to !== undefined && to !== conn.runId && to !== conn.taskId) {
+			this.sendError(conn, id, "bad-params", `escalate: 'to' must be this connection's run or task`);
+			return;
+		}
 		const target = to ?? conn.taskId ?? conn.runId;
 		try {
 			const loaded = loadRunManifestById(cwd, conn.runId);

@@ -74,6 +74,7 @@ describe("runtime-policy", () => {
 				resolveTaskRuntimeKind("live-session", "executor", undefined, {
 					PI_CREW_DEPTH: "1",
 					PI_CREW_MOCK_LIVE_SESSION: "success",
+					PI_CREW_ALLOW_MOCK: "1", // wave-2b: mock seam double-gated with PI_CREW_ALLOW_MOCK
 				}),
 				"live-session",
 			);

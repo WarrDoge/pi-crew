@@ -69,6 +69,11 @@ export const ESSENTIAL_PROCESS_ENV_VARS: readonly string[] = [
 	"XDG_DATA_HOME",
 	"XDG_CACHE_HOME",
 	"XDG_RUNTIME_DIR",
+	// R1-M1 (wave-2b): Node's fs.realpathSync.native / os.tmpdir / sqlite WAL
+	// all consult TMPDIR; a host with a non-default TMPDIR spawned children that
+	// diverged from it (temp paths under /tmp vs $TMPDIR) — pass it through so
+	// parent and children agree on the temp root.
+	"TMPDIR",
 ];
 
 /** Node/npm toolchain vars (nvm prefixes, npm registry/config). */

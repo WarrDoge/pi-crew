@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type LoadedPiTeamsConfig, loadConfig } from "../config/config.ts";
+import { LIMIT_CEILINGS } from "../config/config-validation.ts";
 import { getCrewEnv } from "../config/env-vars.ts";
 import { discoverProviderExtensionPaths } from "../runtime/model/provider-extensions.ts";
 import { parseCsv, parseFrontmatter } from "../utils/frontmatter.ts";
@@ -462,11 +463,16 @@ function parseAgentFile(filePath: string, source: ResourceSource): AgentConfig |
 			contextMode,
 			maxTurns: (() => {
 				const n = Number.parseInt(frontmatter.maxTurns, 10);
-				return Number.isFinite(n) && n > 0 ? n : undefined;
+				// R7-A3 (wave-2b): clamp to the config ceiling — a repo-sourced agent
+				// file with maxTurns: 1e9 became the effective run cap whenever
+				// runtime.maxTurns was unset (config paths already bound at 10k).
+				return Number.isFinite(n) && n > 0 ? Math.min(n, LIMIT_CEILINGS.runtimeMaxTurns) : undefined;
 			})(),
 			maxTokens: (() => {
 				const n = Number.parseInt(frontmatter.maxTokens, 10);
-				return Number.isFinite(n) && n > 0 ? n : undefined;
+				// R7-A3: same clamp class — budget-equivalent token counts use the
+				// handoff-budget ceiling (1M) as the family bound.
+				return Number.isFinite(n) && n > 0 ? Math.min(n, LIMIT_CEILINGS.runtimeHandoffBudgetTokens) : undefined;
 			})(),
 			effort:
 				frontmatter.effort === "low" || frontmatter.effort === "medium" || frontmatter.effort === "high"

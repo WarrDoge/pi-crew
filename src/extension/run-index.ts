@@ -27,9 +27,32 @@ function readManifest(filePath: string): TeamRunManifest | undefined {
  */
 const TEMP_DIR_ROOTS = [os.tmpdir(), "/var/tmp", "/tmp"];
 
+/** R7-P2 (wave-2b): canonicalize BOTH sides of the temp-root comparison.
+ * macOS returns /var/... from one API and /private/var/... from another
+ * (getcwd is physical); the raw startsWith then misses and phantom test runs
+ * leak into production dashboards. realpath'd roots + realpath'd compared
+ * paths (best-effort — a vanished path simply doesn't match, as before). */
+const TEMP_DIR_ROOTS_REAL = TEMP_DIR_ROOTS.map((root) => {
+	try {
+		return fs.realpathSync.native(root);
+	} catch {
+		return root;
+	}
+});
+
+function realPathOrNull(p: string): string | null {
+	try {
+		return fs.realpathSync.native(p);
+	} catch {
+		return null;
+	}
+}
+
 function isTempWorkspacePath(p: string | undefined): boolean {
 	if (!p) return false;
-	return TEMP_DIR_ROOTS.some((t) => p.startsWith(t + path.sep));
+	const real = realPathOrNull(p);
+	if (!real) return false; // unreadable/vanished — do not guess
+	return TEMP_DIR_ROOTS_REAL.some((t) => real === t || real.startsWith(t + path.sep));
 }
 
 function collectRuns(root: string, maxEntries?: number, signal?: AbortSignal): TeamRunManifest[] {

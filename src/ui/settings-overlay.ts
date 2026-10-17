@@ -8,6 +8,7 @@ import * as piTui from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "../utils/visual.ts";
 import { keyOf, matchesKey } from "./key-utils.ts";
 import { CURSOR, canopyLine, formatHint, overflowHint, RAIL, railLine } from "./rail.ts";
+import { SETTINGS_ENUM_VALUES } from "./settings-enum-source.ts";
 import type { CrewTheme } from "./theme-adapter.ts";
 import { discoverPiThemes, getActivePiTheme } from "./theme-discovery.ts";
 
@@ -85,7 +86,7 @@ const SETTINGS: SettingDef[] = [
 		id: "runtime.mode",
 		label: "Runtime Mode",
 		type: "enum",
-		values: ["auto", "scaffold", "child-process", "live-session"],
+		values: [...SETTINGS_ENUM_VALUES["runtime.mode"]!], // R4-B2: schema-derived
 		tab: "runtime",
 		description: "How workers execute. 'auto' picks best available. 'scaffold' = dry-run.",
 	},
@@ -114,7 +115,7 @@ const SETTINGS: SettingDef[] = [
 		id: "runtime.promptMode",
 		label: "Prompt Mode",
 		type: "enum",
-		values: ["compact", "full", "minimal"],
+		values: [...SETTINGS_ENUM_VALUES["runtime.promptMode"]!], // R4-B2: schema-derived (real: replace|append)
 		tab: "runtime",
 		description: "How much prompt detail to send to workers.",
 	},
@@ -122,17 +123,17 @@ const SETTINGS: SettingDef[] = [
 		id: "runtime.completionMutationGuard",
 		label: "Mutation Guard",
 		type: "enum",
-		values: ["off", "warn", "block"],
+		values: [...SETTINGS_ENUM_VALUES["runtime.completionMutationGuard"]!], // R4-B2: schema-derived (block→fail)
 		tab: "runtime",
 		description: "Guard against tasks completing without file mutations.",
 	},
 	{
-		id: "runtime.isolationPolicy",
-		label: "Isolation Policy",
+		id: "runtime.isolationPolicy.defaultRuntime",
+		label: "Isolation Default Runtime",
 		type: "enum",
-		values: ["workspace", "none"],
+		values: [...SETTINGS_ENUM_VALUES["runtime.isolationPolicy.defaultRuntime"]!], // R4-B2: schema-derived
 		tab: "runtime",
-		description: "Workspace isolation between agents.",
+		description: "Default worker runtime when a role is not isolated (schema: isolationPolicy.defaultRuntime).",
 	},
 	// Limits
 	{
@@ -218,7 +219,7 @@ const SETTINGS: SettingDef[] = [
 		id: "ui.dashboardPlacement",
 		label: "Dashboard Placement",
 		type: "enum",
-		values: ["center", "right"],
+		values: [...SETTINGS_ENUM_VALUES["ui.dashboardPlacement"]!], // R4-B2: schema-derived
 		tab: "ui",
 		description: "Where to place the dashboard overlay.",
 	},
@@ -240,7 +241,7 @@ const SETTINGS: SettingDef[] = [
 		id: "ui.widgetPlacement",
 		label: "Widget Placement",
 		type: "enum",
-		values: ["bottom", "hidden"],
+		values: [...SETTINGS_ENUM_VALUES["ui.widgetPlacement"]!], // R4-B2: schema-derived (hidden invalid)
 		tab: "ui",
 		description: "Where to place the crew widget.",
 	},
@@ -388,7 +389,7 @@ const EFFECTIVE_DEFAULTS: Record<string, unknown> = {
 	"runtime.inheritContext": true,
 	"runtime.promptMode": "replace",
 	"runtime.completionMutationGuard": "warn",
-	"runtime.isolationPolicy": undefined,
+	"runtime.isolationPolicy.defaultRuntime": undefined,
 	"limits.maxConcurrentWorkers": 1024,
 	"limits.maxTaskDepth": 100,
 	"limits.maxRunMinutes": 1440,

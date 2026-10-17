@@ -149,7 +149,14 @@ function readLock(lockPath: string): WorkspaceLockContents | undefined {
 	try {
 		const parsed = JSON.parse(readFileSync(lockPath, "utf-8"));
 		if (!parsed || typeof parsed !== "object") return undefined;
-		return parsed as WorkspaceLockContents;
+		const lock = parsed as WorkspaceLockContents;
+		// R7-C2 (wave-2b): a non-numeric `heartbeat` (corrupt / hand-edited
+		// lockfile) made `now - lock.heartbeat` NaN and BOTH staleness
+		// comparisons false — an IMMORTAL lock nothing could steal. Treat a
+		// non-finite heartbeat as a corrupt lockfile (undefined → the steal
+		// path), same as unparseable JSON.
+		if (typeof lock.heartbeat !== "number" || !Number.isFinite(lock.heartbeat)) return undefined;
+		return lock;
 	} catch {
 		return undefined;
 	}

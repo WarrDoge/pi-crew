@@ -13,8 +13,10 @@ function restoreEnv(name: string, previous: string | undefined): void {
 
 test("wait returns immediately for already-completed run", async () => {
 	const previousMock = process.env.PI_CREW_MOCK_LIVE_SESSION;
+	const previousAllowMock = process.env.PI_CREW_ALLOW_MOCK; // wave-2b
 	const previousDepth = process.env.PI_CREW_DEPTH;
 	process.env.PI_CREW_MOCK_LIVE_SESSION = "success";
+	process.env.PI_CREW_ALLOW_MOCK = "1"; // wave-2b: mock seam double-gated
 	process.env.PI_CREW_DEPTH = "0";
 	const cwd = createTrackedTempDir("pi-crew-wait-done-");
 	try {
@@ -38,6 +40,7 @@ test("wait returns immediately for already-completed run", async () => {
 		assert.match(firstText(waitResult), /finished: completed/);
 	} finally {
 		restoreEnv("PI_CREW_MOCK_LIVE_SESSION", previousMock);
+		restoreEnv("PI_CREW_ALLOW_MOCK", previousAllowMock);
 		restoreEnv("PI_CREW_DEPTH", previousDepth);
 		removeTrackedTempDir(cwd);
 	}
@@ -161,8 +164,10 @@ test("wait finds run in child directory when ctx.cwd is parent", async () => {
 
 test("wait returns task breakdown for live-session run", async () => {
 	const previousMock = process.env.PI_CREW_MOCK_LIVE_SESSION;
+	const previousAllowMock = process.env.PI_CREW_ALLOW_MOCK; // wave-2b
 	const previousDepth = process.env.PI_CREW_DEPTH;
 	process.env.PI_CREW_MOCK_LIVE_SESSION = "success";
+	process.env.PI_CREW_ALLOW_MOCK = "1"; // wave-2b: mock seam double-gated
 	process.env.PI_CREW_DEPTH = "0";
 	const cwd = createTrackedTempDir("pi-crew-wait-e2e-");
 	try {
@@ -190,6 +195,7 @@ test("wait returns task breakdown for live-session run", async () => {
 		assert.match(text, /03_verify.*completed/s, `Expected '03_verify: completed' in: ${text}`);
 	} finally {
 		restoreEnv("PI_CREW_MOCK_LIVE_SESSION", previousMock);
+		restoreEnv("PI_CREW_ALLOW_MOCK", previousAllowMock);
 		restoreEnv("PI_CREW_DEPTH", previousDepth);
 		removeTrackedTempDir(cwd);
 	}
@@ -201,8 +207,10 @@ test("wait returns task breakdown for live-session run", async () => {
 
 test("e2e wait from parent directory for live-session run in child", async () => {
 	const previousMock = process.env.PI_CREW_MOCK_LIVE_SESSION;
+	const previousAllowMock = process.env.PI_CREW_ALLOW_MOCK; // wave-2b
 	const previousDepth = process.env.PI_CREW_DEPTH;
 	process.env.PI_CREW_MOCK_LIVE_SESSION = "success";
+	process.env.PI_CREW_ALLOW_MOCK = "1"; // wave-2b: mock seam double-gated
 	process.env.PI_CREW_DEPTH = "0";
 	const parentDir = createTrackedTempDir("pi-crew-wait-e2e-cross-");
 	const childDir = path.join(parentDir, "pi-crew");
@@ -232,6 +240,7 @@ test("e2e wait from parent directory for live-session run in child", async () =>
 		assert.match(text, /03_verify.*completed/s);
 	} finally {
 		restoreEnv("PI_CREW_MOCK_LIVE_SESSION", previousMock);
+		restoreEnv("PI_CREW_ALLOW_MOCK", previousAllowMock);
 		restoreEnv("PI_CREW_DEPTH", previousDepth);
 		removeTrackedTempDir(parentDir);
 	}

@@ -1,6 +1,7 @@
 import type { PiTeamsConfig } from "../../config/config.ts";
 import type { RuntimeResolutionState } from "../../state/types.ts";
 import type { CrewRuntimeKind } from "../crew-agent-runtime.ts";
+import { mockLiveSessionEnabled } from "./runtime-policy.ts";
 
 export type CrewRuntimeMode = "auto" | "scaffold" | "child-process" | "live-session";
 
@@ -35,7 +36,8 @@ export async function isLiveSessionRuntimeAvailable(
 	timeoutMs = 1500,
 	env: NodeJS.ProcessEnv = process.env,
 ): Promise<{ available: boolean; reason?: string }> {
-	if (env.PI_CREW_MOCK_LIVE_SESSION === "success") {
+	// wave-2b: double-gated mock seam — see mockLiveSessionEnabled.
+	if (mockLiveSessionEnabled(env)) {
 		return {
 			available: true,
 			reason: "Mock live-session runtime is enabled.",
@@ -112,8 +114,8 @@ export async function resolveCrewRuntime(config: PiTeamsConfig, env: NodeJS.Proc
 	}
 	// auto mode: use child-process unless preferLiveSession is explicitly enabled
 	if (requestedMode === "auto") {
-		// Check for mock env var first (for testing)
-		if (env.PI_CREW_MOCK_LIVE_SESSION === "success") {
+		// Check for the double-gated mock seam first (for testing)
+		if (mockLiveSessionEnabled(env)) {
 			const live = await isLiveSessionRuntimeAvailable(1500, env);
 			if (live.available) return liveCaps(requestedMode);
 		}

@@ -26,6 +26,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	backgroundRunnerEnvAllowlist,
+	childPiBaseAllowlist,
 	crewEnvForwardingDecisions,
 	crewEnvForwardingGapReport,
 } from "../../../src/config/env-allowlist-registry.ts";
@@ -59,6 +60,8 @@ const FROZEN_BACKGROUND_RUNNER = [
 	"XDG_DATA_HOME",
 	"XDG_CACHE_HOME",
 	"XDG_RUNTIME_DIR",
+	// R1-M1 (wave-2b): documented addition — TMPDIR joins the essential set.
+	"TMPDIR",
 	"APPDATA",
 	"LOCALAPPDATA",
 	"USERPROFILE",
@@ -116,7 +119,7 @@ const FROZEN_BACKGROUND_RUNNER = [
 	"PI_CREW_TOOLS_MODIFIERS",
 ];
 
-/** FROZEN pre-registry BASE_ALLOWLIST (v0.11.16) — unchanged by this wave. */
+/** FROZEN pre-registry BASE_ALLOWLIST (v0.11.16) — plus the wave-2b TMPDIR addition. */
 const FROZEN_BASE = [
 	"PATH",
 	"HOME",
@@ -135,6 +138,8 @@ const FROZEN_BASE = [
 	"XDG_DATA_HOME",
 	"XDG_CACHE_HOME",
 	"XDG_RUNTIME_DIR",
+	// R1-M1 (wave-2b): documented addition — TMPDIR joins the essential set.
+	"TMPDIR",
 	"APPDATA",
 	"LOCALAPPDATA",
 	"USERPROFILE",
@@ -162,6 +167,14 @@ test("behavior preservation: BACKGROUND_RUNNER_ENV_ALLOWLIST is the frozen v0.11
 
 test("behavior preservation: BASE_ALLOWLIST is the frozen v0.11.16 literal, byte-identical", () => {
 	assert.deepEqual(BASE_ALLOWLIST, FROZEN_BASE);
+});
+
+test("R1-M1 (wave-2b): TMPDIR is present in BOTH generated allowlists (background runner + child pi)", () => {
+	// The essential-process set feeds both generators; a regression that
+	// rebuilds either list from a stale literal silently re-drops TMPDIR and
+	// parent/children disagree on the temp root again.
+	assert.ok(backgroundRunnerEnvAllowlist().includes("TMPDIR"), "backgroundRunnerEnvAllowlist must carry TMPDIR");
+	assert.ok(childPiBaseAllowlist().includes("TMPDIR"), "childPiBaseAllowlist must carry TMPDIR");
 });
 
 test("C-1 coverage: every CREW_ENV_VARS key has exactly one forwarding decision (no unclassified, no orphan decisions)", () => {

@@ -319,6 +319,12 @@ export function convertToOTLP(snapshots: MetricSnapshot[]): unknown {
 							name: snapshot.name,
 							description: snapshot.description,
 							[snapshot.type === "histogram" ? "histogram" : snapshot.type === "gauge" ? "gauge" : "sum"]: {
+								// wave-2b (OTLP): counters exported as Sum MUST carry
+								// aggregationTemporality or OTLP-compliant backends reject /
+								// mis-aggregate the series (proto enum AggregationTemporality:
+								// 0=UNSPECIFIED, 1=DELTA, 2=CUMULATIVE). Registry counters are
+								// cumulative monotonic — declare CUMULATIVE.
+								...(snapshot.type === "counter" ? { aggregationTemporality: 2 } : {}),
 								dataPoints: pointValues(snapshot),
 							},
 						})),
@@ -394,10 +400,14 @@ export class OTLPExporter implements MetricExporter {
 				const body = await gzipAsync(Buffer.from(json));
 				const response = await fetch(this.opts.endpoint, {
 					method: "POST",
+					// wave-2b (OTLP): user headers spread FIRST so OUR wire-critical
+					// content-type/encoding win — a user header of
+					// content-type: text/plain previously replaced ours and collectors
+					// 415'd the push (the old spread-last overrode us).
 					headers: {
+						...(this.opts.headers ?? {}),
 						"content-type": "application/json",
 						"content-encoding": "gzip",
-						...(this.opts.headers ?? {}),
 					},
 					body,
 					signal: controller.signal,

@@ -63,7 +63,9 @@ function validateConfigWithWarnings(raw: unknown): string[] {
 	return [];
 }
 
-const LIMIT_CEILINGS = {
+// wave-2b (R7-A3): exported so agent frontmatter parsing (discover-agents)
+// clamps project-sourced values with the SAME ceilings the config paths use.
+export const LIMIT_CEILINGS = {
 	maxConcurrentWorkers: 1024,
 	maxTaskDepth: 100,
 	maxChildrenPerTask: 1000,

@@ -116,6 +116,10 @@ async function watchDir(dir) {
 	// spawn a per-directory watcher for robustness. Cost: O(2N) FDs
 	// where N = number of source dirs (~5 for a typical pi-crew tree).
 	// Each watcher is independent and yields events as its dir changes.
+	// R5-M-A1 (wave-2b): the walk was ONE level deep — sub-subdirectories
+	// (src/ui/dashboard-panes/*) had no watcher; late-created dirs were never
+	// picked up. watchDir now recurses (each sub calls watchDir itself) and
+	// the root watcher arms watchers for dirs created at runtime.
 	const watcherJobs = [];
 	try {
 		// Watch the dir itself (catches direct children changes)
@@ -123,35 +127,34 @@ async function watchDir(dir) {
 		watcherJobs.push(
 			(async () => {
 				for await (const e of rootWatcher) {
-					if (e.filename) handleEvent(dir, e.filename);
+					if (!e.filename) continue;
+					const full = path.join(dir, e.filename);
+					let isDir = false;
+					try {
+						isDir = statSync(full).isDirectory();
+					} catch {
+						/* raced away — treat as a file event */
+					}
+					if (isDir) {
+						if (IGNORE_DIRS.has(e.filename)) continue;
+						// Late-created dir: arm a watcher subtree for it now.
+						watcherJobs.push(watchDir(full));
+						continue;
+					}
+					handleEvent(dir, e.filename);
 				}
 			})(),
 		);
 	} catch (err) {
 		console.warn(`[watch-bundle] cannot watch ${dir}:`, err?.code ?? err?.message ?? err);
 	}
-	// Recurse into subdirectories (skip ignored) — each gets its own watcher
+	// Recurse into subdirectories (skip ignored) — each recurses further
 	try {
 		const entries = await readdir(dir, { withFileTypes: true });
 		for (const entry of entries) {
 			if (!entry.isDirectory()) continue;
 			if (IGNORE_DIRS.has(entry.name)) continue;
-			const sub = path.join(dir, entry.name);
-			watcherJobs.push(
-				(async () => {
-					try {
-						const subWatcher = await watch(sub, { persistent: true });
-						for await (const e of subWatcher) {
-							if (e.filename) handleEvent(sub, e.filename);
-						}
-					} catch (err) {
-						console.warn(
-							`[watch-bundle] cannot watch ${sub}:`,
-							err?.code ?? err?.message ?? err,
-						);
-					}
-				})(),
-			);
+			watcherJobs.push(watchDir(path.join(dir, entry.name)));
 		}
 	} catch {
 		// ignore readdir errors

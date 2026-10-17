@@ -314,7 +314,11 @@ test("[u11-5a] depth guard: pre-U11 rule unchanged — live-session at depth>0 s
 	assert.equal(resolveTaskRuntimeKind("live-session", "explorer", undefined, FLAT_ENV), "live-session");
 	// Test-harness exception preserved.
 	assert.equal(
-		resolveTaskRuntimeKind("live-session", "explorer", undefined, { PI_CREW_DEPTH: "1", PI_CREW_MOCK_LIVE_SESSION: "success" }),
+		resolveTaskRuntimeKind("live-session", "explorer", undefined, {
+			PI_CREW_DEPTH: "1",
+			PI_CREW_MOCK_LIVE_SESSION: "success",
+			PI_CREW_ALLOW_MOCK: "1",
+		}),
 		"live-session",
 	);
 });
@@ -330,7 +334,7 @@ test("[u11-5b] depth guard EXTENDED to the embedded upgrade: opted-in role at de
 			"child-process",
 			"explorer",
 			undefined,
-			{ PI_CREW_DEPTH: "1", PI_CREW_MOCK_LIVE_SESSION: "success" },
+			{ PI_CREW_DEPTH: "1", PI_CREW_MOCK_LIVE_SESSION: "success", PI_CREW_ALLOW_MOCK: "1" },
 			{ policy: POLICY_ON },
 		),
 		"live-session",
@@ -697,6 +701,7 @@ test("[u11-e2e-2] embedded routing E2E: opted-in role runs the in-process live-s
 	const { cwd, manifest, tasks, task } = makeFixture();
 	const prev = new Map<string, string | undefined>();
 	setEnv("PI_CREW_MOCK_LIVE_SESSION", "success", prev);
+	setEnv("PI_CREW_ALLOW_MOCK", "1", prev); // wave-2b: mock seam double-gated
 	setEnv("PI_TEAMS_MOCK_CHILD_PI", undefined, prev);
 	try {
 		const result = await runTeamTask({

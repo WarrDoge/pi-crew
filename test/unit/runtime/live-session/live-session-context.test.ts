@@ -15,9 +15,11 @@ function restoreEnv(name: string, previous: string | undefined): void {
 test("live-session runtime can inherit parent conversation context", async () => {
 	const previousEnable = process.env.PI_CREW_ENABLE_EXPERIMENTAL_LIVE_SESSION;
 	const previousMock = process.env.PI_CREW_MOCK_LIVE_SESSION;
+	const previousAllowMock = process.env.PI_CREW_ALLOW_MOCK; // wave-2b
 	const previousDepth = process.env.PI_CREW_DEPTH;
 	process.env.PI_CREW_ENABLE_EXPERIMENTAL_LIVE_SESSION = "1";
 	process.env.PI_CREW_MOCK_LIVE_SESSION = "success";
+	process.env.PI_CREW_ALLOW_MOCK = "1"; // wave-2b: mock seam double-gated
 	process.env.PI_CREW_DEPTH = "0";
 	const cwd = createTrackedTempDir("pi-crew-live-context-");
 	try {
@@ -79,6 +81,7 @@ test("live-session runtime can inherit parent conversation context", async () =>
 	} finally {
 		restoreEnv("PI_CREW_ENABLE_EXPERIMENTAL_LIVE_SESSION", previousEnable);
 		restoreEnv("PI_CREW_MOCK_LIVE_SESSION", previousMock);
+		restoreEnv("PI_CREW_ALLOW_MOCK", previousAllowMock);
 		restoreEnv("PI_CREW_DEPTH", previousDepth);
 		removeTrackedTempDir(cwd);
 	}

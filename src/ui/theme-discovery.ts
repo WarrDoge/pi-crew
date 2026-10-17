@@ -20,6 +20,7 @@
  * `await import(` without a `// LAZY:` marker).
  */
 import * as fs from "node:fs";
+import { atomicWriteFile } from "../state/atomic-write.ts";
 import { getAllThemes } from "./pi-ui-compat.ts";
 
 /**
@@ -169,16 +170,34 @@ export function setPiTheme(name: string): string {
 	const p = settingsPath();
 	if (!p) throw new Error("Could not determine settings path (no HOME).");
 	let settings: Record<string, unknown> = {};
-	try {
-		if (fs.existsSync(p)) {
-			settings = JSON.parse(fs.readFileSync(p, "utf8"));
+	if (fs.existsSync(p)) {
+		// wave-2b (theme atomic): a corrupt/unreadable settings file must NEVER
+		// be silently replaced — the old behavior parsed anything unreadable into
+		// {} and wrote it back, wiping the user's entire settings on one bad
+		// read. Only an EMPTY file legitimately starts fresh; anything else that
+		// fails to read/parse aborts the write (the operator fixes or removes it).
+		let raw: string;
+		try {
+			raw = fs.readFileSync(p, "utf8");
+		} catch (error) {
+			throw new Error(`setPiTheme: settings unreadable at ${p} (${(error as Error).message}) — refusing to overwrite`);
 		}
-	} catch {
-		// corrupt settings — start fresh
-		settings = {};
+		if (raw.trim().length > 0) {
+			try {
+				const parsed: unknown = JSON.parse(raw);
+				if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+					throw new Error("settings root is not a JSON object");
+				}
+				settings = parsed as Record<string, unknown>;
+			} catch {
+				throw new Error(`setPiTheme: corrupt settings at ${p} — refusing to overwrite (fix or remove the file first)`);
+			}
+		}
 	}
 	settings.theme = name;
-	fs.writeFileSync(p, JSON.stringify(settings, null, 2) + "\n", "utf8");
+	// wave-2b (theme atomic): temp+rename so a crash mid-write cannot leave a
+	// truncated settings.json behind (the read side then refuses to touch it).
+	atomicWriteFile(p, JSON.stringify(settings, null, 2) + "\n");
 	return p;
 }
 

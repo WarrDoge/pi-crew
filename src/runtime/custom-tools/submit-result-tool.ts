@@ -91,10 +91,27 @@ export function createSubmitResultTool(
 					structuredData: params.structuredData,
 				},
 			};
+			// R2-L-B1 (wave-2b): a THROWING onYield previously still returned the
+			// success text — the model believed its result was recorded and ended
+			// the turn, silently dropping it. The error tool-result makes the
+			// failure visible so the worker retries or falls back to plain text.
 			try {
 				onYield(result);
 			} catch (error) {
 				logInternalError("submit-result-tool.yield", error, toolCallId);
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Result submission FAILED: ${error instanceof Error ? error.message : String(error)} — the result was NOT recorded. Try again or state the result in your final message.`,
+						},
+					],
+					details: {
+						summary: params.summary,
+						...(params.artifacts ? { artifacts: params.artifacts } : {}),
+						...(params.structuredData ? { structuredData: params.structuredData } : {}),
+					},
+				};
 			}
 			return response;
 		},

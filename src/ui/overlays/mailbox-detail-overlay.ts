@@ -24,7 +24,7 @@
 
 import { type MailboxMessage, readDeliveryState, readMailbox } from "../../state/coordination/mailbox.ts";
 import { loadRunManifestById } from "../../state/stores/state-store.ts";
-import { pad, truncate } from "../../utils/visual.ts";
+import { pad, sanitizeUntrustedLine, truncate } from "../../utils/visual.ts";
 import { overlayActionForKey } from "../keybinding-map.ts";
 import { ACTIVE, CURSOR, canopyLine, formatHint, overflowHint, RAIL, railLeaders, railLine, sectionLine, shortId } from "../rail.ts";
 import { asCrewTheme, type CrewTheme } from "../theme-adapter.ts";
@@ -157,8 +157,10 @@ export class MailboxDetailOverlay {
 					budget,
 				),
 			);
+			// R4-B1 gap (wave-2b): mailbox bodies are worker-sourced — the same
+			// OSC-52/OSC-8 injection seam as the panes. Sanitize at render.
 			for (const line of (selected.body ?? "").split(/\r?\n/)) {
-				lines.push(railLine(RAIL.body, "border", truncate(line, budget), theme, budget));
+				lines.push(railLine(RAIL.body, "border", truncate(sanitizeUntrustedLine(line), budget), theme, budget));
 			}
 		}
 
@@ -189,7 +191,7 @@ export class MailboxDetailOverlay {
 		const status = this.theme.fg(acknowledged ? "success" : "warning", acknowledged ? "✓" : "!");
 		const from = message.from ?? "?";
 		const to = message.to ?? "?";
-		const body = (message.body ?? "").replace(/\s+/g, " ");
+		const body = sanitizeUntrustedLine((message.body ?? "").replace(/\s+/g, " "));
 		return truncate(`${marker}${status} ${from} ${ACTIVE} ${to}: ${body}`, width);
 	}
 

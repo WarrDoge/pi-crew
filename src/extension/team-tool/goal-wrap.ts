@@ -287,7 +287,17 @@ export async function startGoalWrappedRun(
 			},
 		});
 
-		const spawned = await spawnBackgroundTeamRun(goalLoopManifest);
+		// wave-2b (goal-wrap zombie): a spawn failure left goalState saved as
+		// "running" with NO pid — `goal status` reports a live loop forever.
+		// Mirror goal.ts:236-241 (the non-wrapped goal-loop's spawn-failure
+		// branch): revert the status (blocked — the GoalLoopStatus enum has no
+		// "failed"; blocked is the existing precedent for this exact condition)
+		// and emit the failure event.
+		const spawned = await spawnBackgroundTeamRun(goalLoopManifest).catch((spawnError: unknown) => {
+			const message = spawnError instanceof Error ? spawnError.message : String(spawnError);
+			store.setStatus(goalId, "blocked", paths.eventsPath);
+			throw spawnError;
+		});
 		const pid = spawned.pid ?? 0;
 		// FIX: persist async.pid on the OUTER goal-loop manifest (not just goal state).
 		// Without this, async-notifier.markDeadAsyncRunIfNeeded returns early on
