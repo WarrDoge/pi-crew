@@ -312,9 +312,9 @@ test("U8 review fix: handle cache is LRU — a hit refreshes recency, hot run su
 test("R3A-M2: corrupt state.sqlite → quarantined, fresh db created, no throw, store functional", () => {
 	__test__closeAllSqliteStores();
 	const root = makeStateRoot();
+	let store: SqliteRunStateStore | undefined;
 	try {
 		fs.writeFileSync(sqliteDbPath(root), "this is definitely not a sqlite database file", "utf-8");
-		let store: SqliteRunStateStore;
 		assert.doesNotThrow(() => {
 			store = new SqliteRunStateStore(root);
 		}, "constructor must survive a corrupt db by quarantining it");
@@ -332,6 +332,14 @@ test("R3A-M2: corrupt state.sqlite → quarantined, fresh db created, no throw, 
 		probe.close();
 		assert.equal(Number(v.user_version), 1, "fresh db stamped with user_version=1");
 	} finally {
+		// Direct `new` bypasses the factory cache — closeAllSqliteStores does
+		// NOT see these stores; close explicitly or Windows holds the file
+		// (EBUSY) past rmSync.
+		try {
+			store?.close();
+		} catch {
+			/* best-effort */
+		}
 		__test__closeAllSqliteStores();
 		fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
@@ -340,13 +348,13 @@ test("R3A-M2: corrupt state.sqlite → quarantined, fresh db created, no throw, 
 test("R3A-M2: pre-existing db with absent user_version (0) → treated as foreign → quarantined", () => {
 	__test__closeAllSqliteStores();
 	const root = makeStateRoot();
+	let store: SqliteRunStateStore | undefined;
 	try {
 		// A VALID sqlite db created WITHOUT our user_version stamp (the
 		// pre-Wave-3 on-disk shape).
 		const legacy = new DatabaseSync(sqliteDbPath(root));
 		legacy.exec("CREATE TABLE tasks (id TEXT PRIMARY KEY, record TEXT NOT NULL)");
 		legacy.close();
-		let store: SqliteRunStateStore | undefined;
 		assert.doesNotThrow(() => {
 			store = new SqliteRunStateStore(root);
 		}, "foreign-version db quarantined, not thrown");
@@ -362,6 +370,14 @@ test("R3A-M2: pre-existing db with absent user_version (0) → treated as foreig
 		assert.equal(Number(rows.n), 1, "fresh db re-created with the schema");
 		void store;
 	} finally {
+		// Direct `new` bypasses the factory cache — closeAllSqliteStores does
+		// NOT see these stores; close explicitly or Windows holds the file
+		// (EBUSY) past rmSync.
+		try {
+			store?.close();
+		} catch {
+			/* best-effort */
+		}
 		__test__closeAllSqliteStores();
 		fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 	}
