@@ -78,11 +78,9 @@ test("P2 (d): flag ON — executor (scratchpad-armed, no allowlist) gets bash de
 
 test("P2 (e): flag ON — NON-scratchpad roles keep bash (lever is scoped to scratchpad roles)", () => {
 	process.env[FLAG] = "1";
-	// explorer + reviewer have bash but are NOT scratchpad-armed — they must be
-	// untouched (they have no sh() fallback, so removing bash would break them).
-	const explorer = resolveToolPolicy(makeAgent({ name: "explorer" }), "explorer");
-	assert.ok(explorer.tools?.includes("bash"), "explorer keeps bash (not scratchpad-armed)");
-
+	// Wave-3 Chain A removed bash from explorer entirely, so reviewer is the
+	// exemplar bash-bearing non-scratchpad role. They must be untouched by the
+	// demote lever (no sh() fallback, so removing bash would break them).
 	const reviewer = resolveToolPolicy(makeAgent({ name: "reviewer" }), "reviewer");
 	assert.ok(reviewer.tools?.includes("bash"), "reviewer keeps bash (not scratchpad-armed)");
 	assert.ok(!reviewer.excludeTools?.includes("bash"), "reviewer excludeTools untouched");
@@ -91,12 +89,19 @@ test("P2 (e): flag ON — NON-scratchpad roles keep bash (lever is scoped to scr
 test("P2 (f): flag ON — read-only role with scratchpad:true frontmatter is NOT demoted (S-6 gate)", () => {
 	process.env[FLAG] = "1";
 	// S-6: read-only roles never enable scratchpad regardless of frontmatter.
-	// A demote would remove bash from a read-only role that has no sh() — wrong.
-	// explorer is read-only; even an explicit scratchpad:true frontmatter opt-in
-	// is gated out, so the demote must NOT fire.
+	// Wave-3 Chain A removed bash from the explorer allowlist, so the pin is
+	// now: the S-6 gate keeps the demote lever OFF for read-only roles —
+	// scratchpad stays disabled and the (bashless) allowlist passes through
+	// untouched (the lever must not add its own denylist entries either).
 	const explorer = makeAgent({ name: "explorer", scratchpad: true });
 	const policy = resolveToolPolicy(explorer, "explorer");
-	assert.ok(policy.tools?.includes("bash"), "read-only role keeps bash even with scratchpad:true (S-6 gate)");
+	assert.notEqual(policy.scratchpad, true, "S-6: read-only role never scratchpad-armed");
+	assert.deepEqual(
+		policy.tools,
+		["read", "grep", "find", "ls", "glob", "ask"],
+		"allowlist passes through untouched (no bash by policy, lever adds nothing)",
+	);
+	assert.ok(!policy.excludeTools?.includes("scratchpad"), "lever must not fire on read-only roles");
 });
 
 test("P2 (g): flag ON — F6 kill-switch on a WRITE role keeps bash (verifier+scratchpad:false)", () => {

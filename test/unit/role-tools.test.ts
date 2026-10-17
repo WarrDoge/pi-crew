@@ -7,11 +7,12 @@ test("getToolConfig returns config for known roles", () => {
 	assert.ok(explorer.tools !== undefined);
 	assert.ok(explorer.tools!.includes("read"));
 	assert.ok(explorer.tools!.includes("grep"));
-	// W7 update: bash is now in explorer's tools (not excludeTools) so the
-	// research-5 (decisions) stream can run `git log --grep` to mine commit
-	// history. State-mutation safety is enforced separately by READ_ONLY_ROLES
-	// in role-permission.ts; edit/write remain excluded.
-	assert.ok(explorer.tools!.includes("bash"));
+	// Wave-3 Chain A (deep review 2026-10-16/17): bash REMOVED from explorer's
+	// tools — the advertised read-only contract is the enforceable one now
+	// (READ_ONLY_ROLES state-mutation gating cannot stop host-level persistence
+	// via arbitrary commands). bash moved to excludeTools; edit/write/web stay.
+	assert.ok(!explorer.tools!.includes("bash"));
+	assert.ok(explorer.excludeTools!.includes("bash"));
 	assert.ok(explorer.excludeTools!.includes("edit"));
 	assert.ok(explorer.excludeTools!.includes("write"));
 	assert.ok(explorer.excludeTools!.includes("web"));
@@ -56,18 +57,18 @@ test("security-reviewer has strictest restrictions (F1: hyphen key resolves)", (
 	assert.ok(security.excludeTools!.includes("write"));
 });
 
-test("explorer has read-only + bash tools, excludes edit/write", () => {
-	// W7 update: bash added for git log/show (decisions stream) + grep -r +
-	// find. Still no edit/write (file mutations are blocked at the
-	// READ_ONLY_ROLES layer in role-permission.ts). Renamed from
-	// "explorer has read-only tools" to reflect the new design.
+test("explorer has read-only tools (no bash — Wave-3 Chain A), excludes edit/write", () => {
+	// Wave-3 Chain A: bash removed from the enforced allowlist (was W7-added
+	// for git log/show mining). File mutations stay blocked at the
+	// READ_ONLY_ROLES layer AND at the tool layer now. See role-tools.ts.
 	const explorer = getToolConfig("explorer");
 	assert.ok(explorer.tools!.includes("read"));
 	assert.ok(explorer.tools!.includes("grep"));
 	assert.ok(explorer.tools!.includes("find"));
 	assert.ok(explorer.tools!.includes("ls"));
 	assert.ok(explorer.tools!.includes("glob"));
-	assert.ok(explorer.tools!.includes("bash"));
+	assert.ok(!explorer.tools!.includes("bash"));
+	assert.ok(explorer.excludeTools!.includes("bash"));
 	assert.ok(!explorer.tools!.includes("edit"));
 	assert.ok(!explorer.tools!.includes("write"));
 	assert.ok(!explorer.tools!.includes("web"));

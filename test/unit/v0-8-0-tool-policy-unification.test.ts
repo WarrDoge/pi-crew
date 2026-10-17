@@ -35,17 +35,16 @@ function makeAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
 
 describe("resolveToolPolicy — allowlist precedence", () => {
 	it("builtin agent: role-config allowlist wins over frontmatter", () => {
-		// W7: explorer role-config tools now include `bash` (for research-5
-		// decisions stream's `git log --grep`). Frontmatter still omits bash.
-		// Builtin must use the role-config allowlist (security: it's the
-		// authoritative set).
+		// Wave-3 Chain A: explorer role-config no longer includes `bash` — the
+		// read-only contract is the enforceable one. Builtin must use the
+		// role-config allowlist (security: it's the authoritative set).
 		const agent = makeAgent({
 			source: "builtin",
 			name: "explorer",
 			tools: ["read", "grep", "find", "ls"],
 		});
 		const policy = resolveToolPolicy(agent, "explorer");
-		assert.deepEqual(policy.tools, ["read", "grep", "find", "ls", "glob", "bash", "ask"]); // ask: dormant (QW17/B1-F4)
+		assert.deepEqual(policy.tools, ["read", "grep", "find", "ls", "glob", "ask"]); // ask: dormant (QW17/B1-F4); bash: removed (Chain A)
 	});
 
 	it("builtin agent: frontmatter allowlist is the fallback when role has none", () => {
@@ -74,15 +73,16 @@ describe("resolveToolPolicy — allowlist precedence", () => {
 	});
 
 	it("user/project agent: role-config is the fallback when frontmatter omits tools", () => {
-		// W7: explorer role-config now also includes `bash`. Custom agent
-		// spawned under explorer → inherits the role-config allowlist.
+		// Wave-3 Chain A: explorer role-config no longer includes `bash`.
+		// Custom agent spawned under explorer → inherits the role-config
+		// allowlist (bashless).
 		const agent = makeAgent({
 			source: "project",
 			name: "custom",
 			tools: undefined,
 		});
 		const policy = resolveToolPolicy(agent, "explorer");
-		assert.deepEqual(policy.tools, ["read", "grep", "find", "ls", "glob", "bash", "ask"]); // ask: dormant (QW17/B1-F4)
+		assert.deepEqual(policy.tools, ["read", "grep", "find", "ls", "glob", "ask"]); // ask: dormant (QW17/B1-F4); bash: removed (Chain A)
 	});
 
 	it("no allowlist anywhere → tools undefined (all built-ins allowed)", () => {
