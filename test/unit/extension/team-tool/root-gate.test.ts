@@ -80,6 +80,18 @@ describe("rootGateBlockReason (raw params resolution)", () => {
 		assert.equal(rootGateBlockReason({ action: "config", config: {} }, WORKER_ENV), undefined);
 	});
 
+	it("RT24-F1: config/autonomy reads carrying non-schema keys stay open (args must not count as patch)", () => {
+		// Live battery 2026-10-18: worker sent `config {args:"show"}` (a read);
+		// the old exclusion-list miscounted `args` as a patch key and blocked it.
+		assert.equal(rootGateBlockReason({ action: "config", config: { args: "show" } }, WORKER_ENV), undefined);
+		assert.equal(rootGateBlockReason({ action: "config", config: { args: "status" } }, WORKER_ENV), undefined);
+		assert.equal(rootGateBlockReason({ action: "autonomy", config: { args: "status" } }, WORKER_ENV), undefined);
+		// Real writes hidden behind the same junk key are still gated (handler
+		// predicate sees them too — gate and handler share the projection fns).
+		assert.ok(rootGateBlockReason({ action: "config", config: { args: "show", unset: ["broker"] } }, WORKER_ENV));
+		assert.ok(rootGateBlockReason({ action: "autonomy", config: { args: "status", autoApprove: true } }, WORKER_ENV));
+	});
+
 	it("settings: set/unset at user scope + theme gated; reads/project open", () => {
 		assert.ok(rootGateBlockReason({ action: "settings", config: { args: "set broker.enabled true" } }, WORKER_ENV));
 		assert.ok(rootGateBlockReason({ action: "settings", config: { args: "unset broker.enabled" } }, WORKER_ENV));

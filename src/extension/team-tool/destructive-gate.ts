@@ -233,18 +233,27 @@ export function rootGateBlockReason(params: RootGateParamsLike, env: NodeJS.Proc
 	if (action === "schedule") {
 		return assertRootOnlyAction("schedule", subcommand, scope, env)?.message;
 	}
-	// config: gate only the WRITE path (non-empty patch or unset paths).
+	// config: gate only the WRITE path. Carrier keys (scope/unset/subAction/
+	// dryRun/confirm/force/args) are dropped by the config schema
+	// (configPatchFromConfig → parseConfig), so a payload of ONLY carrier keys
+	// can never change the file — a read. Unknown junk keys stay
+	// write-classified (fail-closed). `args` was missing from this list and
+	// miscounted `config {args:"show"}` reads as writes (RT24-F1, live-caught
+	// 2026-10-18). Note parseConfig injects defaults (runtime.*), so
+	// patch-emptiness cannot be used here — see updateConfig skip-if-unchanged.
 	if (action === "config") {
-		const patchKeys = Object.keys(cfg).filter(
-			(k) => !["scope", "unset", "subAction", "dryRun", "confirm", "force"].includes(k) && cfg[k] !== undefined,
-		);
+		const carrierKeys = new Set(["scope", "unset", "subAction", "dryRun", "confirm", "force", "args"]);
+		const patchKeys = Object.keys(cfg).filter((k) => !carrierKeys.has(k) && cfg[k] !== undefined);
 		const unset = Array.isArray(cfg.unset) ? cfg.unset.length > 0 : cfg.unset !== undefined;
 		const isWrite = patchKeys.length > 0 || unset;
 		if (!isWrite) return undefined;
 	}
-	// autonomy: gate only the WRITE path (patch present).
+	// autonomy: gate only the WRITE path (patch keys present). Same carrier
+	// reasoning as config — `args`/`subAction` are subcommand carriers, not
+	// autonomous-config fields.
 	if (action === "autonomy") {
-		const patchKeys = Object.keys(cfg).filter((k) => !["subAction", "dryRun", "confirm"].includes(k) && cfg[k] !== undefined);
+		const carrierKeys = new Set(["subAction", "dryRun", "confirm", "args"]);
+		const patchKeys = Object.keys(cfg).filter((k) => !carrierKeys.has(k) && cfg[k] !== undefined);
 		if (patchKeys.length === 0) return undefined;
 	}
 	// settings: derive the subcommand from `config.args` ("set k v", "unset k",

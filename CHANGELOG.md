@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed (live battery 2026-10-18 — real-test v0.11.24)
+
+- **fix(gate): RT24-F1 root-gate config/autonomy read over-block** — `rootGateBlockReason` counted the `args` subcommand carrier as a config patch key, so worker-origin `config {args:"show"}` READS were rejected as "writes user-scope config" (live-caught in the v0.11.24 real-test battery; docblock promised reads open). `args` added to the carrier-key sets for `config` and `autonomy`; unknown junk keys stay write-classified (fail-closed). Pinned: reads with carrier keys open, writes hidden behind the same key still gated (`unset`/patch keys), user config byte-untouched. Live-verified end-to-end (fresh `pi -p`, worker env): read allowed + dumps config; `unset` write gate-blocked verbatim "root-session required".
+
 ### Fixed (deep review 2026-10-16/17 — Waves 2-4; report `pi-crew-deep-review-2026-10-16.md`, 128/128 cold-verified)
 
 - **fix(state): FS2 + R5-M-B4 + family-2 read-error wipes** — readCrewAgents/plan-store/ownership-map/active-run-registry/orphan-worker-registry no longer collapse non-ENOENT read faults to empty feeding a locked full overwrite (sentinel + skip-save + loud log; ST-4-style guards).
