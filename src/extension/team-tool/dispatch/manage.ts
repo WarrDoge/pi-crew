@@ -86,7 +86,15 @@ export async function handleManageDomain(params: TeamToolParamsValue, ctx: TeamC
 					...(initialized.skippedFiles.length
 						? ["Skipped existing files:", ...initialized.skippedFiles.map((file) => `- ${file}`)]
 						: []),
-					`Config: ${initialized.configPath || "(none)"} (${initialized.configScope}${initialized.configCreated ? "; created" : initialized.configSkipped ? "; already existed" : "; unchanged"})`,
+					`Config: ${initialized.configPath || "(none)"} (${initialized.configScope}${
+						initialized.configBackupPath
+							? "; overwritten — previous content backed up to " + initialized.configBackupPath
+							: initialized.configCreated
+								? "; created"
+								: initialized.configSkipped
+									? "; already existed — left untouched (pass config.overwrite: true to replace)"
+									: "; unchanged"
+					})`,
 					`Ignore: ${initialized.gitignorePath} (${initialized.gitignoreUpdated ? "updated" : "already configured"})`,
 				].join("\n"),
 				{ action: "init", status: "ok" },

@@ -740,6 +740,14 @@ class AgentOverridesSubmenu {
 	private editField: "model" | "thinking" | null = null;
 	private editBuffer = "";
 	private readonly onCancel: () => void;
+	/**
+	 * R31-M1: the submenu used to accept `onApply` and never store/call it, so
+	 * every agent model/thinking override edit was silently discarded when the
+	 * submenu closed (the operator believed a security-relevant override was
+	 * applied while nothing persisted). Persist on SAVE, mirroring the sibling
+	 * boolean/enum/string submenus which call `onChange` immediately.
+	 */
+	private readonly onApply: (overrides: Record<string, unknown>) => void;
 
 	constructor(
 		config: Record<string, unknown>,
@@ -749,6 +757,7 @@ class AgentOverridesSubmenu {
 	) {
 		this.theme = theme;
 		this.onCancel = onCancel;
+		this.onApply = onApply;
 		const existing = (config.agents as Record<string, unknown>)?.overrides as
 			| Record<string, { model?: string; thinking?: string }>
 			| undefined;
@@ -873,6 +882,7 @@ class AgentOverridesSubmenu {
 		const k = keyOf(data);
 		if (k === "enter") {
 			const agent = this.agents[this.selectedIndex]!;
+			const before = JSON.stringify(this.overrides);
 			if (!this.overrides[agent]) this.overrides[agent] = {};
 			if (this.editField === "model") {
 				this.overrides[agent]!.model = this.editBuffer || undefined;
@@ -884,6 +894,10 @@ class AgentOverridesSubmenu {
 				delete this.overrides[agent];
 			}
 			this.editField = null;
+			// R31-M1: hand the edited map back to the overlay (which records it in
+			// `changedValues` + calls `onChange`) — only when something actually
+			// changed, so a no-op open/save does not fire a spurious write.
+			if (JSON.stringify(this.overrides) !== before) this.onApply(structuredClone(this.overrides));
 			return;
 		}
 		if (k === "escape") {

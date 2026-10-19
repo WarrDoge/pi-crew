@@ -19,7 +19,7 @@ import { forgetDetachedRun, hasDetachedRuns, peekFinishedDetachedRunResults } fr
 import { listLiveAgents } from "../../runtime/live-session/live-agent-manager.ts";
 import type { createManifestCache } from "../../runtime/manifest-cache.ts";
 import { loadTasksWithRecovery } from "../../state/stores/manifest-io.ts";
-import type { TeamRunManifest } from "../../state/types.ts";
+import type { TeamRunManifest, TeamTaskState } from "../../state/types.ts";
 import { overlayFreshTaskStatuses, summarizeHeartbeats } from "../../ui/heartbeat-aggregator.ts";
 import { requestRender, setExtensionWidget, toPiWidgetPlacement } from "../../ui/pi-ui-compat.ts";
 import { requestPowerbarUpdate } from "../../ui/powerbar-publisher.ts";
@@ -27,6 +27,7 @@ import { RenderScheduler } from "../../ui/render-scheduler.ts";
 import { runEventBus } from "../../ui/run-event-bus.ts";
 import type { createRunSnapshotCache } from "../../ui/run-snapshot-cache.ts";
 import { updateCrewWidget } from "../../ui/widget/index.ts";
+import { readJsonFileCoalesced } from "../../utils/file-coalescer.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
 import { projectCrewRoot, userCrewRoot } from "../../utils/paths.ts";
 import { RunWatcherRegistry } from "../../utils/run-watcher-registry.ts";
@@ -126,6 +127,30 @@ export function manifestsFrameSignature(manifests: TeamRunManifest[]): string {
  */
 export function applyTerminalRunEventToManifests(manifests: TeamRunManifest[], event: { type: string; runId: string }): TeamRunManifest[] {
 	return isTerminalRunEventType(event.type) ? evictRunFromManifests(manifests, event.runId) : manifests;
+}
+
+/**
+ * R15-P1: GATE 3 used to call `loadTasksWithRecovery` — an uncached
+ * `readFileSync` + `JSON.parse` of the FULL task packet array (~8.4 KB/task) —
+ * once per running run on every 160 ms tick. Measured 14.78 ms/call at 200
+ * tasks, i.e. ~28% of the tick blocked on the event loop while runs were live.
+ *
+ * The read now goes through the in-tree coalesced reader (stat-gated on
+ * mtime+size, LRU-capped, short TTL): a tick that sees an unchanged file pays a
+ * syscall instead of a parse. The TTL is far below the stale (60 s) / dead
+ * (5 min) thresholds GATE 3 protects, and the quarantine/reconstruct path stays
+ * intact and self-invalidating — a recovered file is rewritten, so its mtime
+ * changes and the next tick misses the cache.
+ */
+const TASKS_READ_TTL_MS = 200;
+
+/**
+ * Read a run's tasks.json through the coalesced reader (GATE 3 truth source).
+ * Exported so the cache behaviour (and its freshness/quarantine invariants) can
+ * be pinned directly — see test/unit/extension/registration/render-loop-tasks-read-cache.test.ts.
+ */
+export function readTasksCoalesced(tasksPath: string, eventsPath: string, runId: string): TeamTaskState[] {
+	return readJsonFileCoalesced(tasksPath, TASKS_READ_TTL_MS, () => loadTasksWithRecovery(tasksPath, eventsPath, runId));
 }
 
 /**
@@ -385,7 +410,7 @@ export function setupRenderLoop(
 				// "dead worker" (live: team_20260923100114, 01_explore parked on
 				// ask). Overlay FRESH statuses before summarizing; divergence also
 				// schedules an in-place rebuild so the cache syncs off the tick.
-				const freshTasks = loadTasksWithRecovery(freshManifest.tasksPath, freshManifest.eventsPath, run.runId);
+				const freshTasks = readTasksCoalesced(freshManifest.tasksPath, freshManifest.eventsPath, run.runId);
 				const overlaid = overlayFreshTaskStatuses(snapshot, freshTasks);
 				if (overlaid !== snapshot) refreshSnapshotInPlace(run.runId);
 				const summary = summarizeHeartbeats(overlaid, { now });

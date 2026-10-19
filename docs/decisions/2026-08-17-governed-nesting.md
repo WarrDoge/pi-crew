@@ -120,6 +120,16 @@ delegate({ description, prompt, role?: "explorer"|"analyst"|"executor",
   grandchild usage is accumulated from message_end events and the pessimistic
   reservation refunds to actual (clamped [0, reserve]). "As they arrive" event-
   streaming remains a follow-up; the reserve is the fail-closed floor.
+  > **AMENDED 2026-10-19 (fix-wave 6, M3-4 / R44-N4).** The refund is GONE: the
+  > settlement charge is the host-decided ADMISSION RESERVATION itself, and the
+  > child's `message_end` total (clamped [0, reserve]) is recorded on
+  > `delegate.rolled_up` as `selfReportedTokens` for observability ONLY. Reason:
+  > the source was self-attested — a child that under-reported refunded almost
+  > its whole reservation (round-44 probe: 49 999 of a 50 000 reserve), so the
+  > budget charge was writer-controlled. Enforcement reads the tally through
+  > `allocation.tokensSpent` (`state/usage.ts taskTokenTotal`, M3-4/R43-N2), which
+  > is now the reservation. The reservation remains the fail-closed floor — the
+  > amendment only removes the refund, never the floor.
 - **§12 trust (S2):** the trust gate is resolved from the capability flag itself:
   config.nesting.enabled is sensitive (USER config only) — enabling it IS the
   manual trust decision (nestingTrustedEscalation threads to the broker; default

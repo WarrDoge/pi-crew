@@ -529,23 +529,36 @@ function dryRunRemovedIds(guidancePath: string): string[] {
  *  - NEVER removes user-authored agent files (`~/.pi/agent/agents/*.md`)
  *    because pi-crew cannot tell which were user-created vs test-copied —
  *    only the timestamped `.bak-*` backups (clearly pi-crew test junk).
- *  - The state dir removal requires force=true by default is NOT required
- *    (it's pi-crew's own runtime cache, regenerable), but config.json removal
- *    IS gated on force=true (it may hold user-customized settings).
- *  - dryRun=true previews without writing.
+ *  - F13-B: the user state dir is NOT removed on `confirm` alone. It holds run
+ *    history/artifacts for the whole user tier, so removal is gated on an
+ *    explicit `force: true` — parity with the global config below and with
+ *    project-scope `.crew/` removal (`force` gate). Without force the state dir
+ *    is reported and preserved.
+ *  - dryRun=true previews without writing (and always states the force gate).
  */
 function handleUserCleanup(params: TeamToolParamsValue, ctx: TeamContext): PiTeamsToolResult {
 	const dryRun = params.dryRun === true;
 	const force = params.force === true;
 	const lines: string[] = ["User-scope cleanup for pi-crew:"];
 
-	// 1. pi-crew user state dir (~/.pi/agent/extensions/pi-crew/) — always safe
-	//    to remove (regenerable runtime cache: artifacts + state). This is the
-	//    bulk of the "user-level junk".
+	// 1. pi-crew user state dir (~/.pi/agent/extensions/pi-crew/) — run history +
+	//    artifacts for the user tier. F13-B: force-gated (was confirm-only, which
+	//    let a routine `cleanup scope=user` wipe the whole user state dir).
 	const crewStateDir = userCrewRoot();
 	lines.push(`pi-crew user state dir (${crewStateDir}):`);
 	let crewStateBytes = 0;
-	if (fs.existsSync(crewStateDir)) {
+	if (!fs.existsSync(crewStateDir)) {
+		lines.push("  - (not present — nothing to do)");
+	} else if (!force) {
+		try {
+			crewStateBytes = dirSize(crewStateDir);
+		} catch {
+			/* best-effort size */
+		}
+		lines.push(
+			`  - ${dryRun ? "would preserve" : "preserved"}: ${crewStateDir} (${formatBytes(crewStateBytes)}) — holds run history/artifacts; pass force: true to remove`,
+		);
+	} else {
 		try {
 			crewStateBytes = dirSize(crewStateDir);
 		} catch {
@@ -559,8 +572,6 @@ function handleUserCleanup(params: TeamToolParamsValue, ctx: TeamContext): PiTea
 			}
 		}
 		lines.push(`  - ${dryRun ? "would remove" : "removed"}: ${crewStateDir} (${formatBytes(crewStateBytes)})`);
-	} else {
-		lines.push("  - (not present — nothing to do)");
 	}
 
 	// 2. pi-crew global config (~/.pi/agent/pi-crew.json) — gated on force=true

@@ -119,3 +119,49 @@ test(
 		assert.ok(fs.existsSync(path.join(cwd, ".git", "info", "exclude")));
 	}),
 );
+
+// ── F13-A pin (wave-6 M3-22): an explicit overwrite must never be silent ──
+
+test(
+	"project init: overwriting an existing config backs it up and reports the path (F13-A)",
+	withIsolatedHome(async () => {
+		const cwd = process.env.PI_TEAMS_HOME!;
+		initializeProject(cwd);
+		const configPath = path.join(cwd, ".pi", "agent", "pi-crew.json");
+		fs.writeFileSync(configPath, JSON.stringify({ userCustom: { mine: true } }), "utf-8");
+
+		const overwritten = initializeProject(cwd, { overwrite: true });
+
+		assert.ok(overwritten.configBackupPath, "the overwrite must report where the old config went");
+		assert.equal(
+			JSON.parse(fs.readFileSync(overwritten.configBackupPath!, "utf-8")).userCustom.mine,
+			true,
+			"the backup holds the PRE-overwrite user content",
+		);
+		assert.equal(JSON.parse(fs.readFileSync(configPath, "utf-8")).userCustom, undefined, "the config is replaced by the defaults");
+
+		// The tool result must surface the backup path (no silent replacement).
+		const tool = await handleTeamTool({ action: "init", config: { overwrite: true } }, { cwd });
+		assert.equal(tool.isError, false);
+		assert.match(firstText(tool), /overwritten — previous content backed up to /);
+	}),
+);
+
+test(
+	"project init: without overwrite an existing config is preserved (and says so)",
+	withIsolatedHome(async () => {
+		const cwd = process.env.PI_TEAMS_HOME!;
+		initializeProject(cwd);
+		const configPath = path.join(cwd, ".pi", "agent", "pi-crew.json");
+		fs.writeFileSync(configPath, JSON.stringify({ keepMe: true }), "utf-8");
+
+		const skipped = initializeProject(cwd);
+
+		assert.equal(skipped.configSkipped, true);
+		assert.equal(skipped.configCreated, false);
+		assert.equal(skipped.configBackupPath, undefined);
+		assert.equal(JSON.parse(fs.readFileSync(configPath, "utf-8")).keepMe, true, "existing config untouched");
+		const tool = await handleTeamTool({ action: "init" }, { cwd });
+		assert.match(firstText(tool), /already existed — left untouched \(pass config\.overwrite: true to replace\)/);
+	}),
+);

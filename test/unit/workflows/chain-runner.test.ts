@@ -589,7 +589,98 @@ test("ChainRunner - runChain empty spec produces empty results", async () => {
 	const result = await runner.runChain(spec);
 
 	assert.strictEqual(result.steps.length, 0);
+	// R14-C5: vacuous truth was part of the same false-green bug — a chain that
+	// ran nothing did not succeed.
+	assert.strictEqual(result.success, false);
+});
+
+// ── R14-C1 / R14-C5 pins (wave-6 M3-18) ────────────────────────────────
+
+test("ChainRunner - R14-C1: parallel() members become sequential steps (not dropped)", async () => {
+	const goals: string[] = [];
+	const mockRunner: ChainTaskRunner = {
+		runTask: async (packet: TaskPacket) => {
+			goals.push(packet.goal);
+			return createTaskResult();
+		},
+	};
+	const runner = new ChainRunner(mockRunner, createMockHandoffManager());
+
+	const spec = runner.parseChain("a -> parallel(b, c) -> d");
+	assert.deepStrictEqual(
+		spec.steps.map((s) => s.name),
+		["a", "b", "c", "d"],
+	);
+
+	const result = await runner.runChain(spec);
+
+	// Every member actually executed — previously the group collapsed into ONE step
+	// literally named "parallel" and b/c never ran.
+	assert.deepStrictEqual(goals, ["a", "b", "c", "d"]);
+	assert.strictEqual(result.steps.length, 4);
 	assert.strictEqual(result.success, true);
+});
+
+test("ChainRunner - R14-C1: nested parallel groups flatten in source order", async () => {
+	const runner = new ChainRunner(createMockTaskRunner(), createMockHandoffManager());
+
+	const spec = runner.parseChain("a -> parallel(b, parallel(c, d)) -> e");
+
+	assert.deepStrictEqual(
+		spec.steps.map((s) => s.name),
+		["a", "b", "c", "d", "e"],
+	);
+});
+
+test("ChainRunner - R14-C1: @team refs survive inside parallel()", async () => {
+	const runner = new ChainRunner(createMockTaskRunner(), createMockHandoffManager());
+
+	const spec = runner.parseChain("@a -> parallel(@b, @c) -> @d");
+
+	assert.deepStrictEqual(
+		spec.steps.map((s) => s.team),
+		["a", "b", "c", "d"],
+	);
+});
+
+test("ChainRunner - R14-C1/C5: a failing parallel member is visible and fails the chain", async () => {
+	// member index 2 ("c") comes back partial — the rest of the chain must stop and
+	// the chain must NOT be reported as a success.
+	let call = 0;
+	const mockRunner: ChainTaskRunner = {
+		runTask: async () => {
+			call++;
+			return createTaskResult({ outcome: call === 3 ? "partial" : "success" });
+		},
+	};
+	const runner = new ChainRunner(mockRunner, createMockHandoffManager());
+
+	const result = await runner.runChain(runner.parseChain("a -> parallel(b, c) -> d"));
+
+	assert.strictEqual(call, 3); // "d" not executed
+	assert.strictEqual(result.steps.length, 3);
+	assert.strictEqual(result.steps[2]?.name, "c");
+	assert.strictEqual(result.steps[2]?.outcome, "partial");
+	assert.strictEqual(result.success, false);
+});
+
+test("ChainRunner - R14-C5: early break on a partial outcome is NOT success (false-green)", async () => {
+	let call = 0;
+	const mockRunner: ChainTaskRunner = {
+		runTask: async () => {
+			call++;
+			return createTaskResult({ outcome: call === 2 ? "partial" : "success" });
+		},
+	};
+	const runner = new ChainRunner(mockRunner, createMockHandoffManager());
+
+	const result = await runner.runChain(runner.parseChain("a -> b -> c"));
+
+	assert.strictEqual(call, 2); // "c" never ran (break on non-success)
+	assert.strictEqual(result.steps.length, 2);
+	assert.strictEqual(result.steps[1]?.outcome, "partial");
+	// Pre-fix this was true ("Chain completed", status ok) with step 3 unexecuted.
+	assert.strictEqual(result.success, false);
 });
 
 test("ChainRunner - parseChain handles trailing arrow", () => {

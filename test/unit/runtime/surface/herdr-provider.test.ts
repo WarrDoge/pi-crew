@@ -715,3 +715,61 @@ test("onExit: subscription đăng ký CẢ hai loại pane.closed + pane.exited"
 	assert.ok(types.includes("pane.exited"), `phải subscribe pane.exited, nhận: ${JSON.stringify(types)}`);
 	handle.dispose();
 });
+
+// ── F12-M1 pins (wave-6 M3-26): exited watcher entries must not leak ──────
+// Mirror of the tmux R2-L-B4 fix: `fire()` keeps the entry forever and the only
+// deletion site was `handle.dispose()`, which the host never calls per pane, so
+// every herdr surface pane leaked callbacks + reason for the host lifetime.
+
+/** Fake harness whose pane.split returns a UNIQUE pane id per spawn. */
+function makeFakeUniquePanes(): FakeHarness {
+	let paneSeq = 0;
+	return makeFake((req) => {
+		if (req.method === "tab.create") return { type: "tab_created", tab: { tab_id: "w3:t9" }, root_pane: { pane_id: "w3:pR" } };
+		if (req.method === "pane.split") {
+			paneSeq += 1;
+			return { type: "pane_info", pane: { pane_id: `w3:u${paneSeq}`, workspace_id: "w3" } };
+		}
+		return defaultRespond(req);
+	});
+}
+
+test("F12-M1: after a pane fires, late onExit subscribers get the reason at most ONCE (entry is freed)", async () => {
+	const h = makeFake();
+	const { handle } = await spawnPane(h);
+	handle.onExit(() => undefined);
+	h.emitPaneClosed("w3:pC");
+
+	// First late subscriber: served from the bounded recently-exited ring.
+	const first: SurfaceExitReason[] = [];
+	handle.onExit((r) => first.push(r));
+	assert.deepEqual(first, ["pane-closed"]);
+
+	// Second late subscriber: the watcher entry AND the ring slot are gone — the
+	// pre-fix code kept the exited watcher forever and replayed on every subscribe.
+	const second: SurfaceExitReason[] = [];
+	handle.onExit((r) => second.push(r));
+	assert.deepEqual(second, []);
+});
+
+test("F12-M1: the exited-reason ring is bounded (cap 64) — oldest reasons are dropped", async () => {
+	const h = makeFakeUniquePanes();
+	const provider = h.provider();
+	const handles: SurfaceHandle[] = [];
+	for (let i = 0; i < 70; i++) {
+		handles.push(await provider.createSurface(`t${i}`, { cwd: "/tmp", command: "bash x.sh" }));
+	}
+	for (const handle of handles) handle.onExit(() => undefined);
+	// Fire all 70 in order (pane ids w3:u1 … w3:u70).
+	for (let i = 1; i <= 70; i++) h.emitPaneClosed(`w3:u${i}`);
+
+	// Oldest (u1) fell out of the 64-entry ring — no replay.
+	const oldest: SurfaceExitReason[] = [];
+	handles[0]!.onExit((r) => oldest.push(r));
+	assert.deepEqual(oldest, [], "the oldest reason must be evicted from the bounded ring");
+
+	// Newest (u70) is still replayable exactly once.
+	const newest: SurfaceExitReason[] = [];
+	handles[69]!.onExit((r) => newest.push(r));
+	assert.deepEqual(newest, ["pane-closed"]);
+});

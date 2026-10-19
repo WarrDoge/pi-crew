@@ -21,6 +21,13 @@ export interface ProjectInitResult {
 	configScope: "global" | "project" | "none";
 	configCreated: boolean;
 	configSkipped: boolean;
+	/**
+	 * F13-A: set when an EXPLICIT `overwrite: true` replaced an existing config
+	 * file. The previous content is preserved at this path — an overwrite of the
+	 * global (`~/.pi/agent/pi-crew.json`) or project config is destructive and may
+	 * discard user-customized settings, so it must never be silent.
+	 */
+	configBackupPath?: string;
 }
 
 function ensureDir(dir: string, createdDirs: string[]): void {
@@ -112,10 +119,20 @@ export function initializeProject(cwd: string, options: ProjectInitOptions = {})
 
 	let configCreated = false;
 	let configSkipped = false;
+	let configBackupPath: string | undefined;
 	if (configPath) {
 		if (configScope === "project") ensureDir(path.dirname(configPath), createdDirs);
 		else fs.mkdirSync(path.dirname(configPath), { recursive: true });
-		if (!fs.existsSync(configPath) || options.overwrite === true) {
+		const configExists = fs.existsSync(configPath);
+		if (!configExists) {
+			fs.writeFileSync(configPath, `${JSON.stringify(DEFAULT_PI_CREW_CONFIG, null, 2)}\n`, "utf-8");
+			configCreated = true;
+		} else if (options.overwrite === true) {
+			// F13-A: overwriting an existing config is destructive — it may hold the
+			// user's own settings (global scope writes ~/.pi/agent/pi-crew.json).
+			// Keep the previous content and report it instead of replacing silently.
+			configBackupPath = `${configPath}.bak-${Date.now()}`;
+			fs.copyFileSync(configPath, configBackupPath);
 			fs.writeFileSync(configPath, `${JSON.stringify(DEFAULT_PI_CREW_CONFIG, null, 2)}\n`, "utf-8");
 			configCreated = true;
 		} else {
@@ -166,5 +183,6 @@ export function initializeProject(cwd: string, options: ProjectInitOptions = {})
 		configScope,
 		configCreated,
 		configSkipped,
+		...(configBackupPath ? { configBackupPath } : {}),
 	};
 }

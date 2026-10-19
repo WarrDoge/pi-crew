@@ -212,6 +212,102 @@ test("agent overrides submenu opens and Esc cancels", () => {
 	assert.ok(!rendered(overlay).includes("edit thinking"));
 });
 
+// ── R31-M1 pin (wave-6 M3-25): edits in AgentOverridesSubmenu must persist ──
+// The submenu accepted `onApply` and never stored/called it, so every agent
+// model/thinking override was silently discarded when the submenu closed.
+
+/** Tab to the agents tab, open the overrides submenu, and select `agent`. */
+function openAgentSubmenu(overlay: { handleInput(data: string): void }, agent: string): void {
+	overlay.handleInput("\t"); // limits
+	overlay.handleInput("\t"); // agents
+	overlay.handleInput("\r"); // open agent overrides submenu
+	const index = [
+		"explorer",
+		"planner",
+		"analyst",
+		"critic",
+		"executor",
+		"reviewer",
+		"security-reviewer",
+		"test-engineer",
+		"verifier",
+		"cold-verifier",
+		"writer",
+	].indexOf(agent);
+	for (let i = 0; i < index; i++) overlay.handleInput("\u001b[B");
+}
+
+function typeChars(overlay: { handleInput(data: string): void }, text: string): void {
+	for (const ch of text) overlay.handleInput(ch);
+}
+
+test("agent overrides submenu: saving a model fires onChange with agents.overrides (R31-M1)", () => {
+	const changes: Array<[string, unknown]> = [];
+	const { overlay } = createSettingsOverlay(
+		{},
+		theme,
+		(id, value) => changes.push([id, value]),
+		() => undefined,
+	);
+	openAgentSubmenu(overlay, "explorer");
+	overlay.handleInput("\r"); // edit model
+	typeChars(overlay, "opus");
+	overlay.handleInput("\r"); // save
+
+	assert.deepEqual(changes, [["agents.overrides", { explorer: { model: "opus" } }]]);
+
+	// The edit must survive leaving the submenu (it used to be discarded).
+	overlay.handleInput("\u001b"); // back to the settings list
+	assert.equal(changes.length, 1);
+});
+
+test("agent overrides submenu: saving a thinking mode persists that field (R31-M1)", () => {
+	const changes: Array<[string, unknown]> = [];
+	const { overlay } = createSettingsOverlay(
+		{},
+		theme,
+		(id, value) => changes.push([id, value]),
+		() => undefined,
+	);
+	openAgentSubmenu(overlay, "planner");
+	overlay.handleInput("e"); // edit thinking
+	typeChars(overlay, "deep");
+	overlay.handleInput("\r"); // save
+
+	assert.deepEqual(changes, [["agents.overrides", { planner: { thinking: "deep" } }]]);
+});
+
+test("agent overrides submenu: clearing the last field removes the agent entry and persists it", () => {
+	const changes: Array<[string, unknown]> = [];
+	const { overlay } = createSettingsOverlay(
+		{ agents: { overrides: { explorer: { model: "opus" } } } },
+		theme,
+		(id, value) => changes.push([id, value]),
+		() => undefined,
+	);
+	openAgentSubmenu(overlay, "explorer");
+	overlay.handleInput("\r"); // edit model (buffer = "opus")
+	for (let i = 0; i < 4; i++) overlay.handleInput("\u007f"); // backspace x4
+	overlay.handleInput("\r"); // save the now-empty override
+
+	assert.deepEqual(changes, [["agents.overrides", {}]]);
+});
+
+test("agent overrides submenu: a no-op save does not fire onChange", () => {
+	const changes: Array<[string, unknown]> = [];
+	const { overlay } = createSettingsOverlay(
+		{ agents: { overrides: { explorer: { model: "opus" } } } },
+		theme,
+		(id, value) => changes.push([id, value]),
+		() => undefined,
+	);
+	openAgentSubmenu(overlay, "explorer");
+	overlay.handleInput("\r"); // edit model (buffer = "opus")
+	overlay.handleInput("\r"); // save unchanged value
+
+	assert.deepEqual(changes, []);
+});
+
 test("action setting (Pi theme) dispatches onAction with the action id and chosen value", () => {
 	const actions: Array<[string, unknown]> = [];
 	const { overlay } = createSettingsOverlay(

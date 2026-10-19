@@ -189,6 +189,15 @@ export function createHerdrProvider(deps: HerdrProviderDeps = {}): SurfaceProvid
 		return active;
 	}
 
+	// F12-M1 (R2-L-B4 twin): exited watchers were retained forever — the only
+	// deletion site was `handle.dispose()`, which the host does not call per pane,
+	// so every herdr surface pane leaked one entry (callbacks + reason closure) for
+	// the whole host session. `fire()` now MOVES the entry into a bounded
+	// recently-exited ring (late subscribers still get their reason replayed once)
+	// instead of keeping it alive. Mirrors tmux-provider.ts:150-186.
+	const exitedRecent = new Map<string, SurfaceExitReason>();
+	const EXITED_RECENT_CAP = 64;
+
 	/** Bắn reason MỘT lần cho mọi callback của pane (copy list — cb có thể dispose). */
 	function fire(paneId: string, reason: SurfaceExitReason): void {
 		const watcher = watchers.get(paneId);
@@ -196,6 +205,14 @@ export function createHerdrProvider(deps: HerdrProviderDeps = {}): SurfaceProvid
 		watcher.exited = true;
 		watcher.reason = reason;
 		for (const cb of [...watcher.callbacks]) cb(reason);
+		// F12-M1: free the watcher entry after the callbacks fired — keep only a
+		// bounded reason ring for late-subscriber replay (onExit below).
+		watchers.delete(paneId);
+		exitedRecent.set(paneId, reason);
+		if (exitedRecent.size > EXITED_RECENT_CAP) {
+			const oldest = exitedRecent.keys().next().value;
+			if (oldest !== undefined) exitedRecent.delete(oldest);
+		}
 		maybeCloseSubscription();
 	}
 
@@ -359,6 +376,15 @@ export function createHerdrProvider(deps: HerdrProviderDeps = {}): SurfaceProvid
 			kind: "herdr",
 			...(tabId ? { tabId } : {}),
 			onExit(cb) {
+				// F12-M1: late subscriber on an already-fired pane — replay the exit
+				// reason from the bounded ring, then serve it (single replay). Mirrors
+				// tmux-provider.ts onExit.
+				const exitedReason = exitedRecent.get(paneId);
+				if (exitedReason !== undefined) {
+					exitedRecent.delete(paneId);
+					cb(exitedReason);
+					return;
+				}
 				let watcher = watchers.get(paneId);
 				if (!watcher) {
 					watcher = { callbacks: [], exited: false };
@@ -374,10 +400,14 @@ export function createHerdrProvider(deps: HerdrProviderDeps = {}): SurfaceProvid
 			},
 			dispose() {
 				const watcher = watchers.get(paneId);
-				if (!watcher) return;
+				if (!watcher) {
+					exitedRecent.delete(paneId);
+					return;
+				}
 				// Host chủ động dispose khi pane còn sống → "detached" cho listener.
 				if (!watcher.exited) fire(paneId, "detached");
 				watchers.delete(paneId);
+				exitedRecent.delete(paneId);
 				maybeCloseSubscription();
 			},
 		};

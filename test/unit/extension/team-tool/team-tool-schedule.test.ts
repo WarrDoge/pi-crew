@@ -11,9 +11,11 @@ import {
 	handleRemoveScheduled,
 	handleSchedule,
 	handleUpdateScheduled,
+	MAX_SCHEDULED_JOBS,
 	registerCrewScheduler,
 } from "../../../../src/extension/team-tool/handle-schedule.ts";
 import { textFromToolResult } from "../../../../src/extension/tool-result.ts";
+import { loadCrewSettingsTiers, updateCrewSettings } from "../../../../src/runtime/settings-store.ts";
 import type { TeamToolParamsValue } from "../../../../src/schema/team-tool-schema.ts";
 import { createTrackedTempDir, removeTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
 
@@ -393,6 +395,64 @@ describe("handleUpdateScheduled", () => {
 			assert.strictEqual(res.isError, true);
 			const text = textFromToolResult(res);
 			assert.ok(text.includes("jobId"));
+		} finally {
+			removeTrackedTempDir(tmp);
+		}
+	});
+});
+
+// ── F12-M3 pin (wave-6 M3-26): scheduled jobs must be capped ──────────────
+
+describe("handleSchedule — MAX_SCHEDULED_JOBS cap (F12-M3)", () => {
+	const job = (i: number) => ({
+		id: `job-${i}`,
+		name: `job ${i}`,
+		description: "seeded",
+		schedule: "0 9 * * *",
+		scheduleType: "cron",
+		subagentType: "team",
+		prompt: "{}",
+		enabled: true,
+		createdAt: new Date(0).toISOString(),
+	});
+
+	it("refuses to add a job once the persisted store is at the cap", () => {
+		const tmp = createTrackedTempDir("sched-cap-");
+		try {
+			updateCrewSettings(tmp, (settings) => ({
+				...settings,
+				scheduledJobs: Array.from({ length: MAX_SCHEDULED_JOBS }, (_, i) => job(i)),
+			}));
+
+			const res = handleSchedule(
+				makeParams({ goal: "one more task", once: new Date(Date.now() + 3600_000).toISOString() }),
+				makeCtx(tmp),
+			);
+
+			assert.strictEqual(res.isError, true);
+			assert.ok(textFromToolResult(res).includes("Scheduled job limit reached"));
+			// And the store did not grow.
+			assert.strictEqual(loadCrewSettingsTiers(tmp).project.scheduledJobs?.length, MAX_SCHEDULED_JOBS);
+		} finally {
+			removeTrackedTempDir(tmp);
+		}
+	});
+
+	it("still adds below the cap (boundary control)", () => {
+		const tmp = createTrackedTempDir("sched-cap-ok-");
+		try {
+			updateCrewSettings(tmp, (settings) => ({
+				...settings,
+				scheduledJobs: Array.from({ length: MAX_SCHEDULED_JOBS - 1 }, (_, i) => job(i)),
+			}));
+
+			const res = handleSchedule(
+				makeParams({ goal: "last allowed task", once: new Date(Date.now() + 3600_000).toISOString() }),
+				makeCtx(tmp),
+			);
+
+			assert.strictEqual(res.isError, false);
+			assert.strictEqual(loadCrewSettingsTiers(tmp).project.scheduledJobs?.length, MAX_SCHEDULED_JOBS);
 		} finally {
 			removeTrackedTempDir(tmp);
 		}

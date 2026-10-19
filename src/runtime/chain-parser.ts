@@ -125,10 +125,12 @@ function tokenize(input: string): Token[] {
 			continue;
 		}
 
-		// Name
-		if (/[a-zA-Z_]/.test(input[i]!)) {
+		// Name (a leading '@' is part of a @team reference — R14-C1: without this
+		// the tokenizer threw on '@', the whole DSL parse fell back to the simple
+		// splitter, and parallel(@a, @b) silently degraded into garbage steps.)
+		if (/[a-zA-Z_]/.test(input[i]!) || (input[i] === "@" && /[a-zA-Z_]/.test(input[i + 1] ?? ""))) {
 			let name = "";
-			while (i < input.length && /[a-zA-Z0-9_.-]/.test(input[i]!)) {
+			while (i < input.length && /[a-zA-Z0-9_.@-]/.test(input[i]!)) {
 				name += input[i];
 				i++;
 			}

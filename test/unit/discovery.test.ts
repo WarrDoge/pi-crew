@@ -14,10 +14,13 @@ test("builtin resources are discoverable", () => {
 	// Check builtin agents (excludes user/project agents that may override builtins)
 	assert.ok(discovery.builtin.length >= 10, `Expected at least 10 builtin agents, got ${discovery.builtin.length}`);
 	assert.equal(allTeams(discoverTeams(cwd)).length, 6);
-	// 11 workflows since strict-fast-fix.workflow.md was added
-	// (commit c25dfbe2; before that distill.workflow.md in v0.9.49, commit
-	// 25f17a0). Update here when adding new builtin workflows.
-	assert.equal(allWorkflows(discoverWorkflows(cwd)).length, 11);
+	// 10 workflows: strict-fast-fix.workflow.md was added (commit c25dfbe2; before
+	// that distill.workflow.md in v0.9.49, commit 25f17a0), and wave-6 M3-24 (R28-M1)
+	// RELOCATED the doc-only `chain.workflow.md` out of workflows/ — it parsed to 10
+	// phantom prose steps and could never run. Chain execution lives in
+	// src/runtime/chain-runner.ts + src/extension/team-tool/chain-dispatch.ts.
+	// Update here when adding or removing a builtin workflow.
+	assert.equal(allWorkflows(discoverWorkflows(cwd)).length, 10);
 });
 
 test("workflow frontmatter can set maxConcurrency", () => {

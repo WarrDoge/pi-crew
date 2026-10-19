@@ -64,7 +64,7 @@ const workflowName = directAgent
     : (params.workflow ?? team.defaultWorkflow ?? "default");
 ```
 
-So each chain step ends up executing the **`chain` workflow** (`workflows/chain.workflow.md`) as a
+So each chain step ends up executing the **`chain` workflow** (`docs/chain-workflow.md` — formerly `workflows/chain.workflow.md`) as a
 normal team workflow. The `chain` workflow is a dispatcher-only workflow (it exists for the chain
 runner); running it through the normal `executeTeamRun` path fails fast (~58 ms, before any worker
 spawn) and the failure is recorded with an empty error string.
