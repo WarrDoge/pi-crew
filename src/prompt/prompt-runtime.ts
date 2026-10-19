@@ -551,11 +551,33 @@ export function createDelegateTool(deps: DelegateToolDeps = {}): DelegateToolDef
 			const socketPath = get(PI_CREW_BROKER_SOCKET_ASK_ENV);
 			const token = get(PI_CREW_BROKER_TOKEN_ASK_ENV);
 			const runId = get(PI_CREW_BROKER_RUN_ID_ASK_ENV);
+			// delegate-auth: name the ACTUALLY-missing vars and distinguish the two
+			// no-creds shapes instead of a catch-all that blames all four:
+			//   (a) identity present + socket/token absent — nested-host run: the
+			//       spawning host is itself a child session, and child sessions
+			//       never install a broker (issueForChild is root-session-only,
+			//       lifecycle-handlers), so NO broker exists for this runId at any
+			//       depth. (A root-spawned depth-2 worker DOES carry creds, so the
+			//       old "depth-2 worker" label was wrong for this case.)
+			//   (b) identity vars absent too — scaffold, mock, or partially-wired
+			//       spawn; list exactly which vars are missing.
+			const missingVars: string[] = [];
+			if (!taskId) missingVars.push("PI_CREW_TASK_ID/PI_CREW_BROKER_TASK_ID");
+			if (!stateRoot) missingVars.push(PI_CREW_STATE_ROOT_ENV);
+			if (!runId) missingVars.push(PI_CREW_BROKER_RUN_ID_ASK_ENV);
+			if (!socketPath) missingVars.push(PI_CREW_BROKER_SOCKET_ASK_ENV);
+			if (!token) missingVars.push(PI_CREW_BROKER_TOKEN_ASK_ENV);
+			// direct-truthiness guard keeps TS narrowing for the client construction
+			// below (the missingVars[] indirection alone defeats control-flow analysis).
 			if (!taskId || !stateRoot || !socketPath || !token || !runId) {
+				const reason =
+					!socketPath && !token && taskId && stateRoot && runId
+						? "PI_CREW_BROKER_SOCKET / PI_CREW_BROKER_TOKEN absent while task-id/run-id/state-root are set — nested-host run: this worker's host is itself a child session, which never installs a broker, so no broker exists for this run"
+						: `${missingVars.join(" / ")} absent — scaffold, mock, or partially-wired spawn`;
 				return notice(
 					"unavailable",
 					"no-broker",
-					"[delegate] unavailable: no broker connection (socket/token/run-id/state-root absent — scaffold, mock, or depth-2 worker) — do the work yourself; do not call delegate again.",
+					`[delegate] unavailable: no broker connection (${reason}) — do the work yourself; do not call delegate again.`,
 				);
 			}
 			const client = deps.makeBrokerClient
