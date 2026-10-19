@@ -1,4 +1,5 @@
 import { loadConfig, updateConfig } from "../../config/config.ts";
+import { isDangerousPath } from "../../config/config-validation.ts";
 import { suggestConfigKey } from "../../config/suggestions.ts";
 import { collectSensitiveConfigPaths } from "../../schema/sensitive-config-paths.ts";
 import { discoverPiThemes, formatThemesListing, setPiTheme } from "../../ui/theme-discovery.ts";
@@ -69,6 +70,12 @@ const EFFECTIVE_DEFAULTS: Record<string, unknown> = {
 // ---------------------------------------------------------------------------
 
 function setNested(obj: Record<string, unknown>, path: string, value: unknown): void {
+	// R24-H1 (M1-1): walking a raw dotted key through `target["__proto__"]`
+	// resolves to Object.prototype via the [[Prototype]] getter — the write
+	// then lands on Object.prototype BEFORE configPatchFromConfig sanitizes.
+	// Refuse dangerous segments at the walker (shared proto-safe helpers in
+	// config-validation.ts).
+	if (isDangerousPath(path)) return;
 	const keys = path.split(".");
 	let target: Record<string, unknown> = obj;
 	for (let i = 0; i < keys.length - 1; i++) {
@@ -531,6 +538,10 @@ export function handleSettings(params: { config?: Record<string, unknown> }, ctx
 	if (args.startsWith("unset ")) {
 		const key = args.slice(6).trim();
 		if (!key) return result("Usage: team-settings unset <key>", { ...ERR }, true);
+		// R24-H2 (M1-1): refuse reserved Object.prototype key paths at the
+		// boundary — `unset __proto__.toString` would otherwise delete
+		// Object.prototype.toString via the [[Prototype]] getter walk.
+		if (isDangerousPath(key)) return result(`Refusing to unset '${key}': reserved Object.prototype key path`, { ...ERR }, true);
 		try {
 			const saved = updateConfig({}, { cwd: ctx.cwd, scope, unsetPaths: [key] });
 			return result(`Unset ${key}\nSaved to: ${saved.path}`, {
@@ -555,6 +566,10 @@ export function handleSettings(params: { config?: Record<string, unknown> }, ctx
 		const key = rest.slice(0, spaceIdx);
 		const rawValue = rest.slice(spaceIdx + 1).trim();
 		if (!key) return result("Usage: team-settings set <key> <value>", { ...ERR }, true);
+		// R24-H1 (M1-1): refuse reserved Object.prototype key paths at the
+		// boundary — `set __proto__.polluted 1` would otherwise pollute
+		// Object.prototype via the [[Prototype]] getter walk in setNested.
+		if (isDangerousPath(key)) return result(`Refusing to set '${key}': reserved Object.prototype key path`, { ...ERR }, true);
 
 		const value = parseValue(rawValue);
 		const patch: Record<string, unknown> = {};

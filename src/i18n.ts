@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { isDangerousKey, stripDangerousKeysDeep } from "./config/config-validation.ts";
 import { logInternalError } from "./utils/internal-error.ts";
 
 type Params = Record<string, string | number>;
@@ -166,22 +167,17 @@ export function t(key: Key, params?: Params): string {
  * @example
  * addTranslations("vi", { "agent.requiresPrompt": "Agent cần prompt." })
  */
-const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
-
-function stripDangerousKeys<T extends Record<string, unknown>>(obj: T): T {
-	const safe: Record<string, unknown> = {};
-	for (const key of Object.keys(obj)) {
-		if (!DANGEROUS_KEYS.has(key)) {
-			safe[key] = obj[key];
-		}
-	}
-	return safe as T;
-}
-
 export function addTranslations(locale: string, bundle: Partial<Record<Key, string>>): void {
 	if (!locale) return;
-	const safeBundle = stripDangerousKeys(bundle as Record<string, unknown>) as Partial<Record<Key, string>>;
-	const existing = translations[locale];
+	// R46-7 (M1-1): the locale axis reaches `translations[locale]` — a
+	// reserved name (`__proto__`) resolves through the [[Prototype]] getter to
+	// Object.prototype, so the Object.assign branch would pollute it and the
+	// assignment branch would silently reassign [[Prototype]]. Reject reserved
+	// locale names and use own-property lookup (shared proto-safe helpers in
+	// config-validation.ts).
+	if (isDangerousKey(locale)) return;
+	const safeBundle = stripDangerousKeysDeep(bundle as Record<string, unknown>) as Partial<Record<Key, string>>;
+	const existing = Object.hasOwn(translations, locale) ? translations[locale] : undefined;
 	if (existing) {
 		Object.assign(existing, safeBundle);
 	} else {

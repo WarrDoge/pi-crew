@@ -111,6 +111,64 @@ export const DANGEROUS_OBJECT_KEYS = new Set([
 ]);
 
 /**
+ * Case-normalized view of DANGEROUS_OBJECT_KEYS. The canonical set keeps the
+ * real member spellings (toString, valueOf, …), but key matching must be
+ * lowercase on BOTH sides — `"valueOf".toLowerCase()` is `"valueof"`, which
+ * would never match a camelCase entry.
+ */
+const DANGEROUS_KEYS_LOWER = new Set([...DANGEROUS_OBJECT_KEYS].map((key) => key.toLowerCase()));
+
+/**
+ * True when `key` collides with a reserved Object.prototype member.
+ * Case-insensitive to catch `__Proto__`, `CONSTRUCTOR`, `TOSTRING`, etc.
+ */
+export function isDangerousKey(key: string): boolean {
+	return DANGEROUS_KEYS_LOWER.has(key.toLowerCase());
+}
+
+/**
+ * True when ANY dot-separated segment of a dotted config path collides with a
+ * reserved Object.prototype member. This is the guard for dotted-path walkers
+ * (setNested/unsetPath): it catches the NESTED pollution vectors
+ * `__proto__.polluted` and `constructor.prototype.x` that single-key checks
+ * miss, because the walk hits `obj["__proto__"]` (the [[Prototype]] getter)
+ * long before the final segment is written.
+ */
+export function isDangerousPath(dottedPath: string): boolean {
+	return dottedPath.split(".").some((segment) => segment.length > 0 && isDangerousKey(segment));
+}
+
+/**
+ * Deeply strip dangerous prototype-pollution keys from an arbitrary value
+ * (objects, arrays, primitives pass through). Returns a fresh plain-object
+ * tree that is safe to merge/assign at a parse boundary.
+ *
+ * M1-1 shared boundary contract: every boundary that accepts a user-supplied
+ * config patch, dotted key, or translation registration (team-settings
+ * set/unset, updateConfig unsetPaths, config/autonomy patch parsing, i18n
+ * addTranslations) routes through isDangerousPath/isDangerousKey/
+ * stripDangerousKeysDeep here — ONE canonical drop rule. This is
+ * BOUNDARY-LEVEL defense only; it must not grow handler-specific predicates:
+ * carrier keys of tool payloads (`args`, `scope`, `unset`, …) are
+ * intentionally NOT dangerous keys — never add them (RT24-F1 lesson: mirrored
+ * handler predicates drifted and over-blocked reads).
+ *
+ * Case-insensitive superset of the retired per-module strippers (which covered
+ * only `__proto__`/`constructor`/`prototype` case-sensitively): this drops the
+ * full DANGEROUS_OBJECT_KEYS set at every level.
+ */
+export function stripDangerousKeysDeep<T>(value: T): T {
+	if (value === null || typeof value !== "object") return value;
+	if (Array.isArray(value)) return value.map((item) => stripDangerousKeysDeep(item)) as T;
+	const safe: Record<string, unknown> = {};
+	for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+		if (isDangerousKey(key)) continue;
+		safe[key] = stripDangerousKeysDeep(child);
+	}
+	return safe as T;
+}
+
+/**
  * Strips dangerous Object.prototype keys from an object.
  * Returns a new object built with Object.create(null) to prevent
  * prototype pollution attacks.

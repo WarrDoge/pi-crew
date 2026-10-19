@@ -6,7 +6,7 @@ import { withFileLockSync } from "../state/coordination/locks.ts";
 import { logInternalError } from "../utils/internal-error.ts";
 import { isJunkPathLiteral, projectCrewRoot, projectPiRoot } from "../utils/paths.ts";
 import { mergeConfig } from "./config-merge.ts";
-import { parseConfig, parseConfigWithWarnings } from "./config-validation.ts";
+import { isDangerousPath, parseConfig, parseConfigWithWarnings } from "./config-validation.ts";
 import { DEFAULT_BROKER, DEFAULT_NESTING, DEFAULT_PERSISTENCE, resolveBrokerEnvOverride } from "./defaults.ts";
 import { getCrewEnv, getCrewEnvBool } from "./env-vars.ts";
 import { sanitizeProjectConfig } from "./sanitize-project-config.ts";
@@ -258,6 +258,13 @@ function resolvePersistenceEnvOverrideAndDefaults(parsed: PersistenceConfig | un
 }
 
 function unsetPath(record: Record<string, unknown>, dottedPath: string): void {
+	// R24-H2 (M1-1): walking a raw dotted key through `target["__proto__"]`
+	// resolves to Object.prototype via the [[Prototype]] getter, so a key like
+	// `__proto__.toString` DELETES Object.prototype members. Refuse dangerous
+	// segments at the walker itself (shared proto-safe helpers in
+	// config-validation.ts) — this covers
+	// every unsetPaths consumer (team-settings unset, team `config` action).
+	if (isDangerousPath(dottedPath)) return;
 	const parts = dottedPath.split(".").filter(Boolean);
 	if (parts.length === 0) return;
 	let target: Record<string, unknown> = record;
