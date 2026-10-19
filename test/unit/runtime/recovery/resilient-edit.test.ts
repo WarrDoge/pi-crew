@@ -1,55 +1,111 @@
 /**
- * Unit tests for src/runtime/resilient-edit.ts (ZERO-COVERAGE module).
+ * Unit tests for src/runtime/resilient-edit.ts.
+ *
+ * R49-F1 (wave-6 M3-15): the module used to read the PHANTOM `pi.tools.edit` /
+ * `pi.extensions` keys (absent from the real 1.0.4 extension API), so
+ * `wrapEditWithResilientReplace` always returned false in production — the
+ * feature was dead code. The wrapper now registers a real `tool_result` hook
+ * (`pi.on`), which is the only supported seam: `getAllTools()` returns
+ * metadata-only `ToolInfo` with no `execute`.
  *
  * Public API under test:
- *   - wrapEditWithResilientReplace(pi, tools?): boolean
+ *   - wrapEditWithResilientReplace(pi): boolean
  *
- * wrapEditWithResilientReplace monkey-patches the native `edit` tool so that
- * on an "old_string not found" failure it retries with the cascading replace()
- * engine (../runtime/replace.ts). These tests drive the REAL exported function
- * with a stub edit tool + a temp file on disk, exercising:
- *   - pass-through on success (native result returned unchanged),
- *   - fallback when the native result signals not-found (retry reads file,
- *     applies the replace cascade, writes the file, returns strategy info),
- *   - fallback when the native execute throws a not-found error,
- *   - both camelCase and snake_case param conventions,
- *   - skip when pi-diff is detected (no patching),
- *   - skip when no edit tool is present,
- *   - error path when params are insufficient to retry.
+ * Coverage:
+ *   - REAL loader-created api (probe r50b-s6 d-phantomkey ported here): the api
+ *     has no `tools`/`extensions` keys, wrap returns TRUE and registers a hook.
+ *   - hook pass-through: success / other tools / other error families return
+ *     undefined (native result untouched, file untouched).
+ *   - hook retry: not-found failure → cascade retry writes the file and returns
+ *     a success result ({content, isError:false}).
+ *   - 1.0.4 `{path, edits:[{oldText,newText}]}` input AND legacy flat
+ *     `{oldString,newString}` param names.
+ *   - multi-edit is ALL-OR-NOTHING (a partial fuzz match must not half-write).
+ *   - replaceAll threading.
+ *   - pi-diff auto-disable via the REAL getAllTools() listing.
+ *   - no `on` on the api → not applied.
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { wrapEditWithResilientReplace } from "../../../../src/runtime/resilient-edit.ts";
 
-/** Minimal structural type for the stub edit tool accepted by the module. */
-interface StubEdit {
-	name: string;
-	description: string;
-	parameters: unknown;
-	execute: (toolCallId: string, params: unknown, signal: unknown, onUpdate: unknown) => Promise<unknown>;
+/**
+ * The real loader is not an exported subpath of the pi package, so it is loaded
+ * by resolved file URL (same entry the probe r50b-s6 d-phantomkey drove).
+ */
+function loaderUrl(): string {
+	try {
+		return new URL("core/extensions/loader.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href;
+	} catch {
+		// Fallback for layouts where import.meta.resolve cannot see the package.
+		return pathToFileURL(path.join(process.cwd(), "node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js")).href;
+	}
+}
+type Loader = {
+	createExtensionRuntime: () => unknown;
+	loadExtensionFromFactory: (
+		factory: (pi: unknown) => void,
+		cwd: string,
+		eventBus: never,
+		runtime: unknown,
+		extensionPath: string,
+	) => Promise<void>;
+};
+
+type HandlerResult = { content?: Array<{ type: string; text: string }>; isError?: boolean } | undefined;
+
+interface FakePi {
+	on: (event: string, handler: (event: unknown, ctx?: unknown) => Promise<HandlerResult>) => () => void;
+	getAllTools: () => unknown[];
 }
 
-/** A no-op pi with NO extensions (so isPiDiffLoaded() returns false). */
-function makePi(extensions?: unknown[]): unknown {
-	if (extensions === undefined) return {};
-	return { extensions };
+/** Fake pi capturing registered hooks; mirrors the host's `on(event, handler)` surface. */
+function makePi(opts: { allTools?: unknown[]; withOn?: boolean } = {}): {
+	pi: FakePi;
+	handlers: Array<(event: unknown, ctx?: unknown) => Promise<HandlerResult>>;
+	registeredEvents: string[];
+} {
+	const handlers: Array<(event: unknown, ctx?: unknown) => Promise<HandlerResult>> = [];
+	const registeredEvents: string[] = [];
+	const allTools = opts.allTools ?? [];
+	const pi = {
+		allTools,
+		on(event: string, handler: (event: unknown, ctx?: unknown) => Promise<HandlerResult>) {
+			registeredEvents.push(event);
+			handlers.push(handler);
+			return () => {
+				/* no-op unsubscribe */
+			};
+		},
+		getAllTools: () => allTools,
+	} as unknown as FakePi;
+	if (opts.withOn === false) delete (pi as unknown as Record<string, unknown>).on;
+	return { pi, handlers, registeredEvents };
 }
 
-/** A normal "success" edit result that is NOT a not-found signal. */
-function okResult(): unknown {
-	return { content: [{ type: "text", text: "Edited successfully." }] };
+/** Merge handler results the way the host's tool_result runner does. */
+async function emitToolResult(
+	handlers: Array<(event: unknown, ctx?: unknown) => Promise<HandlerResult>>,
+	event: unknown,
+): Promise<HandlerResult> {
+	let merged: HandlerResult;
+	for (const handler of handlers) {
+		const result = await handler(event);
+		if (!result) continue;
+		merged = { ...(merged ?? {}), ...result };
+	}
+	return merged;
 }
 
-/** A result whose serialized text matches the not-found patterns. */
-function notFoundResult(text = "old_string not found"): unknown {
-	return { content: [{ type: "text", text }] };
-}
-
-function makeEdit(execute: StubEdit["execute"]): StubEdit {
-	return { name: "edit", description: "d", parameters: {}, execute };
+function notFoundEvent(
+	input: unknown,
+	text = "Could not find the exact text in target.txt. The old text must match exactly including all whitespace and newlines.",
+) {
+	return { type: "tool_result", toolName: "edit", toolCallId: "t1", input, content: [{ type: "text", text }], isError: true };
 }
 
 function tmpFile(content: string): { dir: string; file: string } {
@@ -59,162 +115,218 @@ function tmpFile(content: string): { dir: string; file: string } {
 	return { dir, file };
 }
 
-test("wrapEditWithResilientReplace: native success passes through unchanged (no retry)", async () => {
-	const original = okResult();
-	const edit = makeEdit(async () => original);
-	const pi = makePi();
-	let callCount = 0;
-	const wrapped = makeEdit(async (...args) => {
-		callCount += 1;
-		return edit.execute(...args);
-	});
+test("R49-F1 pin (probe r50b-s6 d-phantomkey): real 1.0.4 loader api wraps for real", async () => {
+	// loadExtensionFromFactory is the SAME path production extensions go through;
+	// the factory receives the real api object.
+	let captured: unknown;
+	const { createExtensionRuntime, loadExtensionFromFactory } = (await import(loaderUrl())) as unknown as Loader;
+	const runtime = createExtensionRuntime();
+	const eventBus = {
+		emit() {
+			/* no listeners in the loader-only probe */
+		},
+		on() {
+			return () => {
+				/* nothing to unsubscribe */
+			};
+		},
+	};
+	await loadExtensionFromFactory(
+		(pi: unknown) => {
+			captured = pi;
+		},
+		os.tmpdir(),
+		eventBus as never,
+		runtime,
+		path.join(os.tmpdir(), "probe-ext"),
+	);
+	const api = captured as Record<string, unknown>;
+	assert.ok(api, "loader handed the factory an api object");
+	// The api the module used to read from — these keys do NOT exist.
+	assert.equal("tools" in api, false, "api.tools is not a real key");
+	assert.equal("extensions" in api, false, "api.extensions is not a real key");
+	assert.equal("_extensions" in api, false, "api._extensions is not a real key");
+	assert.equal(typeof api.on, "function", "api.on is the real hook seam");
+	assert.equal(typeof api.getAllTools, "function", "api.getAllTools is a real key");
 
-	const applied = wrapEditWithResilientReplace(pi as never, { edit: wrapped });
-	assert.equal(applied, true, "wrapper applied");
-
-	const result = await wrapped.execute("call-1", { path: "ignored" }, undefined, undefined);
-	assert.equal(result, original, "native success result returned as-is");
-	assert.equal(callCount, 1, "native execute invoked exactly once");
+	const applied = wrapEditWithResilientReplace(api as never);
+	assert.equal(applied, true, "wrap must succeed on the REAL api (was false before R49-F1)");
 });
 
-test("wrapEditWithResilientReplace: not-found result triggers resilient cascade that rewrites the file", async () => {
+test("hook pass-through: success, other tools and other error families are left alone", async () => {
+	const { pi, handlers, registeredEvents } = makePi();
+	assert.equal(wrapEditWithResilientReplace(pi as never), true);
+	assert.deepEqual(registeredEvents, ["tool_result"], "registers the tool_result hook");
+
+	assert.equal(
+		await emitToolResult(handlers, {
+			toolName: "edit",
+			input: { path: "x" },
+			content: [{ type: "text", text: "Edited." }],
+			isError: false,
+		}),
+		undefined,
+	);
+	assert.equal(
+		await emitToolResult(handlers, {
+			toolName: "read",
+			input: { path: "x" },
+			content: [{ type: "text", text: "could not find" }],
+			isError: true,
+		}),
+		undefined,
+	);
+	assert.equal(
+		await emitToolResult(handlers, {
+			toolName: "edit",
+			input: { path: "x" },
+			content: [{ type: "text", text: "permission denied" }],
+			isError: true,
+		}),
+		undefined,
+		"non-not-found failures keep their native error",
+	);
+	assert.equal(
+		await emitToolResult(handlers, {
+			toolName: "edit",
+			input: { path: "x" },
+			content: [{ type: "text", text: "Found 2 occurrences of the text in x" }],
+			isError: true,
+		}),
+		undefined,
+		"duplicate-match failures are NOT fuzzy-retried",
+	);
+});
+
+test("hook retry: 1.0.4 {path, edits:[{oldText,newText}]} input rewrites the file", async () => {
 	const { file, dir } = tmpFile("function hello() {\n\treturn 1;\n}\n");
 	try {
-		// Native edit reports not-found; resilient retry must apply an exact match.
-		const edit = makeEdit(async () => notFoundResult());
-		const pi = makePi();
-		const applied = wrapEditWithResilientReplace(pi as never, { edit });
-		assert.equal(applied, true);
+		const { pi, handlers } = makePi();
+		wrapEditWithResilientReplace(pi as never);
 
-		const result = (await edit.execute(
-			"call-1",
-			{ path: file, oldString: "return 1;", newString: "return 2;" },
-			undefined,
-			undefined,
-		)) as { content: Array<{ text: string }>; _replaceStrategy: string };
-
-		const text = result.content[0]?.text ?? "";
-		assert.ok(text.includes("resilient cascade"), "result announces resilient cascade");
+		const result = await emitToolResult(
+			handlers,
+			notFoundEvent({ path: file, edits: [{ oldText: "return 1;", newText: "return 2;" }] }),
+		);
+		assert.ok(result, "hook returned a replacement result");
+		assert.equal(result?.isError, false, "the failed result is replaced by a success result");
+		const text = result?.content?.[0]?.text ?? "";
+		assert.ok(text.includes("resilient cascade"), "result announces the resilient cascade");
 		assert.ok(text.includes(file), "result references the edited path");
-		assert.equal(result._replaceStrategy, "simple", "exact-match strategy recorded");
-		// File was actually rewritten by the retry.
 		const after = fs.readFileSync(file, "utf8");
-		assert.ok(after.includes("return 2;"), "new string present in file");
-		assert.ok(!after.includes("return 1;"), "old string replaced in file");
+		assert.ok(after.includes("return 2;"), "new text present in the file");
+		assert.ok(!after.includes("return 1;"), "old text replaced in the file");
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
 
-test("wrapEditWithResilientReplace: not-found THROW triggers resilient cascade (snake_case params)", async () => {
+test("hook retry: legacy flat snake_case params still work", async () => {
 	const { file, dir } = tmpFile("const x = 10;\n");
 	try {
-		const edit = makeEdit(async () => {
-			throw new Error("old_string not found");
-		});
-		const pi = makePi();
-		wrapEditWithResilientReplace(pi as never, { edit });
-
-		// Use snake_case param names to exercise the alias fallbacks.
-		const result = (await edit.execute("call-2", { old_string: "x = 10", new_string: "x = 42", path: file }, undefined, undefined)) as {
-			content: Array<{ text: string }>;
-			_replaceStrategy: string;
-		};
-
-		assert.ok(result.content[0]?.text.includes("resilient cascade"), "retry ran after thrown not-found");
-		const after = fs.readFileSync(file, "utf8");
-		assert.ok(after.includes("x = 42"), "snake_case params applied to file");
+		const { pi, handlers } = makePi();
+		wrapEditWithResilientReplace(pi as never);
+		const result = await emitToolResult(handlers, notFoundEvent({ old_string: "x = 10", new_string: "x = 42", path: file }));
+		assert.ok(result?.content?.[0]?.text.includes("resilient cascade"), "legacy params retried");
+		assert.ok(fs.readFileSync(file, "utf8").includes("x = 42"), "legacy params applied to the file");
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
 
-test("wrapEditWithResilientReplace: non-not-found error rethrows (retry not attempted)", async () => {
-	const edit = makeEdit(async () => {
-		throw new Error("permission denied");
-	});
-	const pi = makePi();
-	wrapEditWithResilientReplace(pi as never, { edit });
-
-	await assert.rejects(
-		() => edit.execute("c", { path: "/nope", oldString: "a", newString: "b" }, undefined, undefined),
-		/permission denied/,
-		"unrelated error propagates unchanged",
-	);
+test("hook retry is ALL-OR-NOTHING: an unmatched edit leaves the file untouched", async () => {
+	const { file, dir } = tmpFile("alpha\nbeta\n");
+	try {
+		const { pi, handlers } = makePi();
+		wrapEditWithResilientReplace(pi as never);
+		const result = await emitToolResult(
+			handlers,
+			notFoundEvent({
+				path: file,
+				edits: [
+					{ oldText: "alpha", newText: "ALPHA" },
+					{ oldText: "does-not-exist-anywhere", newText: "x" },
+				],
+			}),
+		);
+		assert.equal(result, undefined, "no replacement when one entry cannot be matched");
+		assert.equal(fs.readFileSync(file, "utf8"), "alpha\nbeta\n", "file untouched (no half-write)");
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
 });
 
-test("wrapEditWithResilientReplace: not-found with insufficient params throws a not-found error", async () => {
-	const edit = makeEdit(async () => notFoundResult());
-	const pi = makePi();
-	wrapEditWithResilientReplace(pi as never, { edit });
-
-	// Missing old/new strings → retry path cannot proceed.
-	await assert.rejects(
-		() => edit.execute("c", { path: "/tmp/whatever" }, undefined, undefined),
-		/old_string not found \(and resilient retry skipped: missing path\/old\/new\)/,
-		"missing params surface a descriptive not-found error",
-	);
-});
-
-test("wrapEditWithResilientReplace: exhausted cascade rethrows a not-found error naming the strategy", async () => {
+test("hook retry: exhausted cascade and unreadable path return undefined (native error stands)", async () => {
 	const { file, dir } = tmpFile("unchanged content\n");
 	try {
-		const edit = makeEdit(async () => notFoundResult());
-		const pi = makePi();
-		wrapEditWithResilientReplace(pi as never, { edit });
-
-		await assert.rejects(
-			() => edit.execute("c", { path: file, oldString: "this does not exist anywhere", newString: "x" }, undefined, undefined),
-			/old_string not found \(resilient cascade exhausted, strategy=none\)/,
-			"no match surfaces strategy=none",
+		const { pi, handlers } = makePi();
+		wrapEditWithResilientReplace(pi as never);
+		assert.equal(
+			await emitToolResult(handlers, notFoundEvent({ path: file, edits: [{ oldText: "nowhere-in-file", newText: "x" }] })),
+			undefined,
+			"exhausted cascade → native error stands",
 		);
-		// File untouched.
-		assert.equal(fs.readFileSync(file, "utf8"), "unchanged content\n");
+		assert.equal(fs.readFileSync(file, "utf8"), "unchanged content\n", "file untouched");
+		assert.equal(
+			await emitToolResult(
+				handlers,
+				notFoundEvent({ path: path.join(dir, "missing-file.txt"), edits: [{ oldText: "a", newText: "b" }] }),
+			),
+			undefined,
+			"unreadable path → native error stands",
+		);
+		assert.equal(
+			await emitToolResult(handlers, notFoundEvent({ edits: [{ oldText: "a", newText: "b" }] })),
+			undefined,
+			"no path → no retry",
+		);
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
 
-test("wrapEditWithResilientReplace: skipped (returns false) when pi-diff is loaded", () => {
-	const edit = makeEdit(async () => okResult());
-	const originalExecute = edit.execute;
-	// pi.extensions contains a pi-diff entry → auto-disable to avoid double-wrap.
-	const pi = makePi([{ name: "pi-diff" }]);
-
-	const applied = wrapEditWithResilientReplace(pi as never, { edit });
-
-	assert.equal(applied, false, "not applied when pi-diff present");
-	assert.equal(edit.execute, originalExecute, "execute left unpatched");
-});
-
-test("wrapEditWithResilientReplace: skipped when no edit tool is present", () => {
-	const pi = makePi();
-	// Edit object present but with no execute function → module must skip.
-	const toolsNoExec = { edit: { name: "edit", description: "", parameters: {} } } as never;
-	const applied = wrapEditWithResilientReplace(pi as never, toolsNoExec);
-	assert.equal(applied, false, "no execute function → not applied");
-});
-
-test("wrapEditWithResilientReplace: replaceAll flag threads through to the cascade", async () => {
+test("hook retry: replaceAll threads through the cascade", async () => {
 	const { file, dir } = tmpFile("dup\ndup\ndup\n");
 	try {
-		const edit = makeEdit(async () => notFoundResult());
-		const pi = makePi();
-		wrapEditWithResilientReplace(pi as never, { edit });
-
-		// Provide oldString that does NOT exact-match the file (forces cascade),
-		// with replaceAll so the trimmed-line strategy replaces every line.
-		const result = (await edit.execute(
-			"c",
-			{ path: file, oldString: "dup ", newString: "ok", replaceAll: true },
-			undefined,
-			undefined,
-		)) as { content: Array<{ text: string }> };
-
-		assert.ok(result.content[0]?.text.includes("resilient cascade"), "cascade ran");
+		const { pi, handlers } = makePi();
+		wrapEditWithResilientReplace(pi as never);
+		const result = await emitToolResult(
+			handlers,
+			notFoundEvent({ path: file, edits: [{ oldText: "dup ", newText: "ok", replaceAll: true }] }),
+		);
+		assert.ok(result?.content?.[0]?.text.includes("resilient cascade"), "cascade ran");
 		const after = fs.readFileSync(file, "utf8");
 		assert.equal((after.match(/ok/g) ?? []).length, 3, "all occurrences replaced via replaceAll");
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+test("auto-disables when pi-diff is present in the REAL getAllTools() listing", () => {
+	for (const entry of [
+		{ name: "edit", namespace: { name: "pi-diff-tools" } },
+		{
+			name: "edit",
+			sourceInfo: { path: "/home/u/.pi/extensions/pi-diff/index.js", source: "package", scope: "user", origin: "package" },
+		},
+	]) {
+		const { pi, handlers, registeredEvents } = makePi({ allTools: [entry] });
+		assert.equal(wrapEditWithResilientReplace(pi as never), false, `pi-diff entry must disable the wrapper: ${JSON.stringify(entry)}`);
+		assert.equal(handlers.length, 0, "no hook registered");
+		assert.deepEqual(registeredEvents, [], "on() never called");
+	}
+});
+
+test("not applied when the api exposes no on() (nothing to hook)", () => {
+	const { pi } = makePi({ withOn: false });
+	assert.equal(wrapEditWithResilientReplace(pi as never), false);
+});
+
+test("getAllTools() throwing does not break the wrap decision", () => {
+	const { pi, handlers } = makePi();
+	(pi as unknown as { getAllTools: () => unknown[] }).getAllTools = () => {
+		throw new Error("not ready");
+	};
+	assert.equal(wrapEditWithResilientReplace(pi as never), true, "detection failure degrades to 'pi-diff absent'");
+	assert.equal(handlers.length, 1);
 });
