@@ -127,11 +127,17 @@ export type VerifierVerdict = "pass" | "fail" | "none";
  * (`live-session-runtime.ts` buildOutputContract → "PASS: <what verified> —
  * <evidence>" / "FAIL: <what failed> — <reason>"). Tolerates the markdown
  * decorations real workers emit (`**PASS:**`, `- FAIL:`, `> PASS:`,
- * `` `PASS:` ``, `# PASS:`), but only at line start — a bare mention of the
- * word inside prose does NOT count, and the colon is REQUIRED (the contract
- * has one; a colon-less "PASS" is prose, not a verdict).
+ * `` `PASS:` ``, `# PASS:`) AND the bare-prose verdicts the child-process
+ * workflow prompts used to ask for ("Give PASS or FAIL with evidence" →
+ * `PASS`, `**PASS**`, `PASS — evidence`, `PASS. Evidence: …`): a wave-6 T7
+ * live probe caught a FAILED-gate run blocking as `green_unsatisfied /
+ * observed=none` because the verifier followed its prose prompt and wrote a
+ * bare verdict. A token only counts at LINE START and only when followed by
+ * punctuation/EOL/`(` — a bare mention inside prose ("the verifier said
+ * PASS: that") still does NOT count, and a word continuation ("PASSED all
+ * checks") does not either.
  */
-const VERIFIER_VERDICT_LINE = /^[\s*_>#`=-]*(PASS|FAIL)\s*:/i;
+const VERIFIER_VERDICT_LINE = /^[\s*_>#`=-]*(PASS|FAIL)[\s*_`]*(?=[:.\u2014\u2013-]|$|\()/i;
 
 /**
  * M3-2 (R47-3/V4, fix-wave 6): read the verifier verdict out of the

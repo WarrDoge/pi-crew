@@ -141,7 +141,7 @@ registerPlanTemplate({
 			name: "verify",
 			role: "verifier",
 			taskTemplate:
-				"Verify that all review findings are addressed. Run FAST checks (completes in <2 min): `npm run test:critical && npx tsc --noEmit`. Do NOT run `npm run test:unit` or `npm test` — too slow (642 files, >4 min). Confirm: {{goal}} is achieved.",
+				"Verify that all review findings are addressed. Run FAST checks (completes in <2 min): `npm run test:critical && npx tsc --noEmit`. Do NOT run `npm run test:unit` or `npm test` — too slow (642 files, >4 min). Confirm: {{goal}} is achieved. Start the report with the verdict line `PASS: <what verified> — <evidence>` or `FAIL: <what failed> — <reason>` (the green-contract consumer reads it; no verdict line = UNVERIFIED).",
 			maxTasks: 1,
 			dependsOn: ["review"],
 			verificationCommand: "npm run test:critical && npx tsc --noEmit",
@@ -189,7 +189,7 @@ registerPlanTemplate({
 			name: "verify",
 			role: "verifier",
 			taskTemplate:
-				"Verify the complete implementation of: {{goal}}. Run FAST checks (`npm run test:critical && npx tsc --noEmit`, completes in <2 min). Do NOT run `npm run test:unit` or `npm test` — too slow for in-loop verification (642 files, >4 min). Validate all acceptance criteria.",
+				"Verify the complete implementation of: {{goal}}. Run FAST checks (`npm run test:critical && npx tsc --noEmit`, completes in <2 min). Do NOT run `npm run test:unit` or `npm test` — too slow for in-loop verification (642 files, >4 min). Validate all acceptance criteria. Start the report with the verdict line `PASS: <what verified> — <evidence>` or `FAIL: <what failed> — <reason>` (the green-contract consumer reads it; no verdict line = UNVERIFIED).",
 			maxTasks: 1,
 			dependsOn: ["review"],
 			verificationCommand: "npm run test:critical && npx tsc --noEmit",

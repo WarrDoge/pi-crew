@@ -74,7 +74,7 @@ For **implementation** workflows:
 
 ## Output Format
 
-End with exactly this block:
+Start your report with the verdict line — `PASS: <what verified> — <evidence>` or `FAIL: <what failed> — <reason>` (exact single-line format, colon required or the line may be bare `PASS`/`FAIL`; the leader's green-contract consumer reads this line — a report with no verdict line is treated as UNVERIFIED). Then end with exactly this block:
 
 ```
 VERIFICATION: PASS|FAIL

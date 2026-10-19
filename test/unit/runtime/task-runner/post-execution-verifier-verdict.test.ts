@@ -208,9 +208,22 @@ describe("extractVerifierVerdict — contract reading", () => {
 		assert.equal(extractVerifierVerdict("> PASS: ok"), "pass");
 	});
 
-	it("requires the colon (prose 'PASS' is not a verdict) and ignores mid-line mentions", () => {
+	it("accepts the bare-prose verdicts the child-process prompts ask for (T7 live finding), still ignoring mid-line mentions", () => {
+		// Wave-6 T7 live probe: a FAILED-gate run blocked as green_unsatisfied /
+		// observed=none because the verifier followed its prose prompt ("Give PASS
+		// or FAIL with evidence") and wrote a bare/decorated verdict. These MUST
+		// be consumed.
+		assert.equal(extractVerifierVerdict("PASS"), "pass");
+		assert.equal(extractVerifierVerdict("FAIL"), "fail");
+		assert.equal(extractVerifierVerdict("**PASS**"), "pass");
+		assert.equal(extractVerifierVerdict("PASS — tests green, 44/44"), "pass");
+		assert.equal(extractVerifierVerdict("FAIL. typecheck exits 1"), "fail");
+		assert.equal(extractVerifierVerdict("PASS (cached run 2026-10-19)"), "pass");
+		assert.equal(extractVerifierVerdict("## VERIFICATION: PASS|FAIL"), "none");
+		// Still NOT verdicts: mid-line mentions and word continuations.
 		assert.equal(extractVerifierVerdict("The verifier said PASS"), "none");
 		assert.equal(extractVerifierVerdict("PASSED all checks"), "none");
+		assert.equal(extractVerifierVerdict("PASSing rate is high"), "none");
 		assert.equal(extractVerifierVerdict("note: the executor wrote FAIL: earlier"), "none");
 		assert.equal(extractVerifierVerdict(""), "none");
 		assert.equal(extractVerifierVerdict(undefined), "none");

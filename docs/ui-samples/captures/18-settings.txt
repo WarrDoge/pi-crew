@@ -4,13 +4,13 @@
 ### Tab 1 — Runtime
 ┏ SETTINGS ▸ pi-crew                                                                                
 ┃ ⚙ Runtime  ·  📐 Limits  ·  🤖 Agents  ·  🖥 UI  ·  🎨 Themes  ·  🚀 Auto  ·  🔧 Advanced          
-┃   › Runtime Mode      auto (default)                                                              
-┃     Max Turns         10000 (default)                                                             
-┃     Grace Turns       5 (default)                                                                 
-┃     Inherit Context   true (default)                                                              
-┃     Prompt Mode       replace (default)                                                           
-┃     Mutation Guard    warn (default)                                                              
-┃     Isolation Policy  <not set>                                                                   
+┃   › Runtime Mode               auto (default)                                                     
+┃     Max Turns                  10000 (default)                                                    
+┃     Grace Turns                5 (default)                                                        
+┃     Inherit Context            true (default)                                                     
+┃     Prompt Mode                replace (default)                                                  
+┃     Mutation Guard             warn (default)                                                     
+┃     Isolation Default Runtime  <not set>                                                          
 ┃                                                                                                   
 ┃    How workers execute. 'auto' picks best available. 'scaffold' = dry-run.                        
 ┃                                                                                                   

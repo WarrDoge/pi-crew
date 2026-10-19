@@ -6,6 +6,17 @@
 
 - **fix(gate): RT24-F1 root-gate config/autonomy read over-block** — `rootGateBlockReason` counted the `args` subcommand carrier as a config patch key, so worker-origin `config {args:"show"}` READS were rejected as "writes user-scope config" (live-caught in the v0.11.24 real-test battery; docblock promised reads open). `args` added to the carrier-key sets for `config` and `autonomy`; unknown junk keys stay write-classified (fail-closed). Pinned: reads with carrier keys open, writes hidden behind the same key still gated (`unset`/patch keys), user config byte-untouched. Live-verified end-to-end (fresh `pi -p`, worker env): read allowed + dumps config; `unset` write gate-blocked verbatim "root-session required".
 
+## [0.11.26] — Fix: verifier verdict consumer blocked runs whose verifier returned a prose verdict (live-caught by the post-release real-test battery)
+
+### Fixed
+- **Verifier verdict consumption (R47-3/V4 follow-up, live regression)**: the wave-6 verdict consumer required the exact `PASS:`/`FAIL:` line, but every child-process verifier prompt still asked for a prose verdict ("Give PASS or FAIL with evidence"). A FAILED-gate run whose verifier followed its prompt wrote a bare/decorated verdict → the consumer read `none` → `observed=none` → the green contract **blocked** the run (`green_unsatisfied`) instead of resolving it. Live-proven twice (before/after). Fix, two sides:
+  - `extractVerifierVerdict` now accepts bare/decorated verdicts at line start (`PASS`, `**PASS**`, `PASS — …`, `PASS. …`, `PASS (…)`) while still rejecting mid-line mentions and word continuations (`PASSED`, `PASSing`); FAIL-wins and source-priority semantics unchanged. Pins 11/11 incl. mutation.
+  - Prompts now demand the exact line: `workflows/{fast-fix,plan-execute,review,strict-fast-fix,default}.workflow.md`, `agents/verifier.md`, and both `plan-templates.ts` verifier taskTemplates require `PASS: <what verified> — <evidence>` / `FAIL: <what failed> — <reason>` (green-contract consumer reads it; no verdict line = UNVERIFIED).
+- **Settings catalog refresh**: `docs/ui-samples/captures|png/18-settings` regenerated — the Runtime tab now renders the schema key `runtime.isolationPolicy.defaultRuntime` (was a stale label/key).
+
+### Verified
+- Post-release battery (docs/real-test/reports/real-test-2026-10-19-fix-wave-6-battery.md): T1 124/124 · T2 3-path · T3/T4/T8 md5 · T5 /team-help live · T7×2 (PASS skipVerifier / FAIL verifier-with-context, verdict consumed) · T9a 13/13 · T9b 5 paths · T9b-W ask round-trip + message + delegate + loadout · T9g steer boot-window · T10a tmux 4/4 + herdr 5/5 · T10b live surface run (provider=tmux, spawn/close ×2, 0 degraded) · T11 a–j · T12 18 agents both parsers · T13 real-run render, sweeps clean + PNG inspected.
+
 ## [0.11.25] — Fix-wave 6: deep-review R1-R51 close-out (security cluster, state/verification families, doc tail) (2026-10-19)
 
 Close-out wave for the 51-round / ~150-finding deep review recorded in

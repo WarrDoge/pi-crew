@@ -36,6 +36,6 @@ Rules:
 - **MAXIMIZE PARALLELISM**: Put independent tasks in the SAME phase so they run concurrently. Never create sequential phases when tasks are independent.
 - Task titles name the concrete piece of work — they become the task list the user watches.
 - Choose the smallest effective number of tasks per phase; a simple goal may have 1-2 phases with 1-2 tasks.
-- End implementation plans with a verification phase (`verifier` role): run FAST targeted checks only (e.g. the affected test files), never the full suite.
+- End implementation plans with a verification phase (`verifier` role): run FAST targeted checks only (e.g. the affected test files), never the full suite. The verifier's report MUST start with the verdict line — `PASS: <what verified> — <evidence>` or `FAIL: <what failed> — <reason>` (the green-contract consumer reads it; a report with no verdict line is treated as UNVERIFIED).
 - Tasks within the same phase run in parallel; phases run sequentially.
 - Do not include more than 12 tasks per phase; split or summarize oversized plans instead.
