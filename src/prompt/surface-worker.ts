@@ -122,6 +122,40 @@ export function shouldAutoExit(signals: AutoExitSignals): boolean {
 // ── parent liveness ───────────────────────────────────────────────────────
 
 /**
+ * Default `/proc/<pid>/stat` reader for {@link parentAlive}.
+ *
+ * R19-M1 (deep-review round 19): the R7-P1 tolerance (a THROWING reader with no
+ * recorded start time ⇒ alive-with-caveat) was UNREACHABLE in production because
+ * the default reader caught its own error and returned `undefined` — which
+ * `parentAlive` reads as “no entry ⇒ parent is dead”. On macOS (no procfs) every
+ * healthy surface worker therefore self-terminated at the first 5 s guard tick
+ * (`terminate("worker.parent-lost")`), and the R7-P1 pin only held for injected
+ * readers.
+ *
+ * The platform distinction is the whole point:
+ *   - Linux with procfs: ENOENT is the DEAD signal (unchanged — keeps Linux
+ *     dead-pid detection exact); any other errno (EACCES/EPERM) is “unreadable”
+ *     and is surfaced as a throw so the tolerance applies.
+ *   - No procfs (macOS / Windows / a Linux container without /proc): the file can
+ *     never exist, so “cannot read” must NOT be reported as “dead”. Throw —
+ *     `parentAlive` then keeps the worker alive and the host watchdog is the
+ *     backstop (a false “alive” is recoverable; a false “dead” kills work).
+ *
+ * `platform` is injectable so the macOS path is testable on every CI OS.
+ */
+export function defaultProcStatReader(pid: number, platform: string = process.platform): string | undefined {
+	if (platform !== "linux" || !fs.existsSync("/proc/self/stat")) {
+		throw new Error(`procfs unavailable on ${platform}: cannot read /proc/${pid}/stat`);
+	}
+	try {
+		return fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException | undefined)?.code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+/**
  * Pure parent-liveness decision.
  *   - stat unreadable → parent is GONE (/proc ENOENT means dead on Linux).
  *   - readable + expected ticks present + mismatch → PID REUSE, treat as lost.
@@ -132,15 +166,7 @@ export function shouldAutoExit(signals: AutoExitSignals): boolean {
  */
 export function parentAlive(pid: number, expectedStartTime: string | undefined, readStat?: (pid: number) => string | undefined): boolean {
 	if (!Number.isFinite(pid) || pid <= 0) return false;
-	const reader =
-		readStat ??
-		((p: number): string | undefined => {
-			try {
-				return fs.readFileSync(`/proc/${p}/stat`, "utf8");
-			} catch {
-				return undefined;
-			}
-		});
+	const reader = readStat ?? ((p: number): string | undefined => defaultProcStatReader(p));
 	let stat: string | undefined;
 	let readerThrew = false;
 	try {

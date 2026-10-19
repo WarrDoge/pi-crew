@@ -800,6 +800,32 @@ export function snapshotDirtyWorktree(
 	worktreePath: string,
 	dirtyStatus: string,
 ): WorktreeSnapshotResult {
+	return writeDirtyWorktreeSnapshot(manifest, { runId: manifest.runId, taskId: task.id }, worktreePath, dirtyStatus);
+}
+
+/**
+ * Label for a recovery snapshot: whose work is being backed up. Team-task reuse
+ * passes `task.id`; the DWF agent-worktree cleanup has no TeamTaskState and
+ * passes a path-derived label (R36-M1) — one label shape for both callers so the
+ * recovery artifact naming stays uniform (`worktree-recovery/<taskId>-<ts>.md`).
+ */
+export interface WorktreeSnapshotLabel {
+	runId: string;
+	taskId: string;
+}
+
+/**
+ * Implementation of {@link snapshotDirtyWorktree} — see it for the full contract.
+ * Split out (R36-M1) so the DWF agent-worktree cleanup can reuse the SAME
+ * tracked+untracked capture with a task-free label instead of the tracked-only
+ * `captureWorktreeDiff` that silently dropped untracked work.
+ */
+function writeDirtyWorktreeSnapshot(
+	manifest: TeamRunManifest,
+	label: WorktreeSnapshotLabel,
+	worktreePath: string,
+	dirtyStatus: string,
+): WorktreeSnapshotResult {
 	const truncated: WorktreeSnapshotTruncatedEntry[] = [];
 	const skipped: WorktreeSnapshotSkippedEntry[] = [];
 	let trackedDiffError: string | undefined;
@@ -807,7 +833,7 @@ export function snapshotDirtyWorktree(
 	try {
 		const parts: string[] = [
 			`# Worktree recovery snapshot`,
-			`runId: ${manifest.runId}  taskId: ${task.id}  path: ${worktreePath}`,
+			`runId: ${label.runId}  taskId: ${label.taskId}  path: ${worktreePath}`,
 			`capturedAt: ${new Date().toISOString()}`,
 			"",
 		];
@@ -881,7 +907,7 @@ export function snapshotDirtyWorktree(
 		}
 		writeArtifact(manifest.artifactsRoot, {
 			kind: "diff",
-			relativePath: `worktree-recovery/${task.id}-${Date.now()}.md`,
+			relativePath: `worktree-recovery/${label.taskId}-${Date.now()}.md`,
 			content: parts.join("\n"),
 			producer: "worktree-manager.snapshotDirtyWorktree",
 			retention: "run",
@@ -890,12 +916,27 @@ export function snapshotDirtyWorktree(
 		logInternalError(
 			"worktree.recovery.snapshotFailed",
 			err instanceof Error ? err : new Error(String(err)),
-			`runId=${manifest.runId}, taskId=${task.id}`,
+			`runId=${label.runId}, taskId=${label.taskId}`,
 		);
 		writeError = err instanceof Error ? err.message : String(err);
 	}
 	const complete = truncated.length === 0 && skipped.length === 0 && trackedDiffError === undefined && writeError === undefined;
 	return { complete, truncated, skipped, trackedDiffError, writeError };
+}
+
+/**
+ * True when `dir` exists and holds no entries.
+ *
+ * R36-M2: the ONLY directory a failed `git worktree add` may delete is an empty
+ * one (this attempt's own residue). A non-empty dir may be another run's live
+ * worktree or a partial checkout — never delete it.
+ */
+function isEmptyDir(dir: string): boolean {
+	try {
+		return fs.readdirSync(dir).length === 0;
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -1075,19 +1116,33 @@ export function prepareTaskWorkspace(
 		}
 		worktreeCreated = true;
 	} catch (error) {
-		// Clean up orphaned worktree directory if git worktree add failed
-		if (fs.existsSync(worktreePath)) {
+		const msg = error instanceof Error ? error.message : String(error);
+		// R36-M2 (deep-review round 36): inspect the error BEFORE touching the
+		// filesystem. `git worktree add` fails with "fatal: '<path>' already exists"
+		// when a CONCURRENT prepare (same runId+taskId — resume racing a dispatch)
+		// already won the path, and that path holds the WINNER's live worktree with
+		// the agent's uncommitted output. The pre-fix code ran `fs.rmSync(worktreePath)`
+		// FIRST, i.e. it destroyed another run's live work with zero artifact.
+		if (/already checked out|is already used by worktree/i.test(msg)) {
+			throw new Error(
+				`Branch '${branch}' is checked out at another worktree. Run \`team cleanup runId=${manifest.runId} force=true\` or manually remove the conflicting worktree.`,
+			);
+		}
+		if (/already exists/i.test(msg) && fs.existsSync(worktreePath)) {
+			throw new Error(
+				`Worktree path already exists and git refused to create it: ${worktreePath}. ` +
+					"It belongs to another run/step or is leftover residue, and it may hold uncommitted work — refusing to delete it. " +
+					`Remove it manually (or run \`team cleanup runId=${manifest.runId} force=true\`) and retry.`,
+			);
+		}
+		// Any other failure mode: the directory can only be this attempt's own
+		// residue, and even then only an EMPTY one is safe to remove (fail closed).
+		if (isEmptyDir(worktreePath)) {
 			try {
 				fs.rmSync(worktreePath, { recursive: true, force: true });
 			} catch {
 				/* best-effort cleanup */
 			}
-		}
-		const msg = error instanceof Error ? error.message : String(error);
-		if (/already checked out|is already used by worktree/i.test(msg)) {
-			throw new Error(
-				`Branch '${branch}' is checked out at another worktree. Run \`team cleanup runId=${manifest.runId} force=true\` or manually remove the conflicting worktree.`,
-			);
 		}
 		throw error;
 	}
@@ -1240,18 +1295,27 @@ export async function prepareTaskWorkspaceAsync(
 		}
 		worktreeCreated = true;
 	} catch (error) {
-		if (fs.existsSync(worktreePath)) {
-			try {
-				fs.rmSync(worktreePath, { recursive: true, force: true });
-			} catch {
-				/* best-effort cleanup */
-			}
-		}
+		// R36-M2: mirror of the sync path — inspect BEFORE any deletion (a racing
+		// concurrent prepare owns this path; deleting it destroys live work).
 		const msg = error instanceof Error ? error.message : String(error);
 		if (/already checked out|is already used by worktree/i.test(msg)) {
 			throw new Error(
 				`Branch '${branch}' is checked out at another worktree. Run \`team cleanup runId=${manifest.runId} force=true\` or manually remove the conflicting worktree.`,
 			);
+		}
+		if (/already exists/i.test(msg) && fs.existsSync(worktreePath)) {
+			throw new Error(
+				`Worktree path already exists and git refused to create it: ${worktreePath}. ` +
+					"It belongs to another run/step or is leftover residue, and it may hold uncommitted work — refusing to delete it. " +
+					`Remove it manually (or run \`team cleanup runId=${manifest.runId} force=true\`) and retry.`,
+			);
+		}
+		if (isEmptyDir(worktreePath)) {
+			try {
+				fs.rmSync(worktreePath, { recursive: true, force: true });
+			} catch {
+				/* best-effort cleanup */
+			}
 		}
 		throw error;
 	}
@@ -1421,6 +1485,37 @@ export async function prepareAgentWorktreeAsync(manifest: TeamRunManifest, agent
 }
 
 /**
+ * R36-M1 (deep-review round 36): back up the FULL dirty state (tracked +
+ * UNTRACKED) of an agent worktree before it is force-removed.
+ *
+ * `captureWorktreeDiff` (the artifact written just above) is `git diff` only, so
+ * a worktree whose work consists of NEW files (the common case for an agent: it
+ * writes files) produced an EMPTY diff → no artifact at all → `worktree remove
+ * --force` destroyed the work with zero recovery. Reuses the RR-010 snapshot
+ * (binary-safe, per-file cap, skipped-entry naming, `complete` fail-closed
+ * predicate) with a path-derived label — the DWF path has no TeamTaskState.
+ *
+ * The worktree is still removed (a leaked worktree blocks the next agent call —
+ * that is what `cleanupAgentWorktree` exists for), but an INCOMPLETE snapshot is
+ * logged as an internal error instead of passing silently (AGENTS.md rule 40).
+ */
+function captureAgentWorktreeRecovery(manifest: TeamRunManifest, worktreePath: string, dirtyStatus: string): void {
+	try {
+		const label: WorktreeSnapshotLabel = { runId: manifest.runId, taskId: `wf-agent-${path.basename(worktreePath)}` };
+		const result = writeDirtyWorktreeSnapshot(manifest, label, worktreePath, dirtyStatus);
+		if (!result.complete) {
+			logInternalError(
+				"worktree.agent-cleanup.snapshotIncomplete",
+				new Error(`Recovery snapshot INCOMPLETE for ${worktreePath} before force-removal${describeIncompleteSnapshot(result)}`),
+				`runId=${manifest.runId}, worktreePath=${worktreePath}`,
+			);
+		}
+	} catch (error) {
+		logInternalError("worktree.agent-cleanup.snapshot", error, `worktreePath=${worktreePath}`);
+	}
+}
+
+/**
  * round-17 P2-4: Remove a DWF agent worktree after the agent completes.
  *
  * Captures the worktree diff as an artifact before removal (best-effort), then
@@ -1442,6 +1537,14 @@ export function cleanupAgentWorktree(manifest: TeamRunManifest, worktreePath: st
 		}
 	} catch (error) {
 		logInternalError("worktree.agent-cleanup.diff", error, `worktreePath=${worktreePath}`);
+	}
+	// R36-M1: `git diff` above cannot see untracked files — capture them too, or
+	// the force-remove below destroys the agent's new files with NO artifact.
+	try {
+		const dirtyStatus = git(worktreePath, ["-c", "core.quotePath=false", "status", "--porcelain", "-uall"]);
+		if (/^\?\? /m.test(dirtyStatus)) captureAgentWorktreeRecovery(manifest, worktreePath, dirtyStatus);
+	} catch (error) {
+		logInternalError("worktree.agent-cleanup.status", error, `worktreePath=${worktreePath}`);
 	}
 	// Remove worktree (best-effort). Try git first, then fall back to fs.rm.
 	try {
@@ -1489,6 +1592,13 @@ export async function cleanupAgentWorktreeAsync(manifest: TeamRunManifest, workt
 		}
 	} catch (error) {
 		logInternalError("worktree.agent-cleanup.diff", error, `worktreePath=${worktreePath}`);
+	}
+	// R36-M1: async mirror — untracked files are invisible to `git diff`.
+	try {
+		const dirtyStatus = await gitAsync(worktreePath, ["-c", "core.quotePath=false", "status", "--porcelain", "-uall"]);
+		if (/^\?\? /m.test(dirtyStatus)) captureAgentWorktreeRecovery(manifest, worktreePath, dirtyStatus);
+	} catch (error) {
+		logInternalError("worktree.agent-cleanup.status", error, `worktreePath=${worktreePath}`);
 	}
 	// Resolve repoRoot once and reuse (cache optimization).
 	let repoRoot: string | undefined;

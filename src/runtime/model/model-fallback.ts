@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getCrewEnv } from "../../config/env-vars.ts";
 import { errors } from "../../errors.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
 import { fuzzyResolveModelId } from "./model-resolver.ts";
@@ -646,7 +647,7 @@ export function resolveModelFallbackPolicy(
 		| undefined,
 	env: NodeJS.ProcessEnv = process.env,
 ): ModelFallbackPolicy | undefined {
-	const envMaxAuto = env.PI_CREW_MAX_AUTO_FALLBACKS;
+	const envMaxAuto = getCrewEnv("PI_CREW_MAX_AUTO_FALLBACKS", env);
 	let maxAutoFallbacks: number | undefined;
 	if (envMaxAuto) {
 		const parsed = Number.parseInt(envMaxAuto, 10);
@@ -680,7 +681,7 @@ export function resolveModelFallbackPolicy(
 	// "parent-first") silently behaved as parentFirst. Invalid → warn + fall
 	// back to config/default, mirroring the PI_CREW_MAX_AUTO_FALLBACKS
 	// clamp-warn sibling pattern above.
-	const envOrder = env.PI_CREW_MODEL_FALLBACK_ORDER;
+	const envOrder = getCrewEnv("PI_CREW_MODEL_FALLBACK_ORDER", env);
 	let order: "parentFirst" | "asIs" | undefined;
 	if (envOrder) {
 		if (envOrder === "parentFirst" || envOrder === "asIs") {
@@ -697,12 +698,8 @@ export function resolveModelFallbackPolicy(
 	} else {
 		order = config?.order;
 	}
-	const requireCredentials =
-		env.PI_CREW_MODEL_REQUIRE_CREDENTIALS === "1"
-			? true
-			: env.PI_CREW_MODEL_REQUIRE_CREDENTIALS === "0"
-				? false
-				: config?.requireCredentials;
+	const envRequireCredentials = getCrewEnv("PI_CREW_MODEL_REQUIRE_CREDENTIALS", env);
+	const requireCredentials = envRequireCredentials === "1" ? true : envRequireCredentials === "0" ? false : config?.requireCredentials;
 	// quotaAwareOrdering defaults to true (user preference: default-on with cache).
 	// When explicitly disabled, no deprioritization/rank data is attached.
 	const quotaAware = config?.quotaAwareOrdering !== false;
@@ -725,7 +722,7 @@ export function resolveDefaultSubagentModel(
 	config: { defaultSubagentModel?: string } | undefined,
 	env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
-	return env.PI_CREW_MODEL?.trim() || config?.defaultSubagentModel?.trim() || undefined;
+	return getCrewEnv("PI_CREW_MODEL", env)?.trim() || config?.defaultSubagentModel?.trim() || undefined;
 }
 
 export interface ConfiguredModelRouting {

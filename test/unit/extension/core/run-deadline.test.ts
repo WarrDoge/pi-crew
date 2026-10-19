@@ -4,12 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test, { after } from "node:test";
 import type { PiTeamsConfig } from "../../../../src/config/config.ts";
-import { DEFAULT_RUN_DEADLINE_MS, resolveRunDeadline } from "../../../../src/extension/team-tool/run-deadline.ts";
+import { DEFAULT_RUN_DEADLINE_MS, MAX_TIMER_DELAY_MS, resolveRunDeadline } from "../../../../src/extension/team-tool/run-deadline.ts";
 import {
 	clearSessionSwitchInFlight,
 	markSessionSwitchInFlight,
 	resetCrewViewSessionState,
 } from "../../../../src/ui/inline-panel/view-session-store.ts";
+import { clampTimerDelayMs } from "../../../../src/utils/timer-limits.ts";
 
 const realTmp = fs.realpathSync(os.tmpdir());
 
@@ -169,4 +170,49 @@ test("resolveRunDeadline default keeps the abort timer armed (direct-await paths
 	assert.equal(signal.aborted, false);
 	await new Promise((resolve) => setTimeout(resolve, 120));
 	assert.equal(signal.aborted, true);
+});
+
+// ── R37-F1: 2^31-1 timer clamp + validation ───────────────────────────────
+
+test("R37-F1: an oversized params.timeoutMs is clamped to 2^31-1 — the run is NOT aborted at birth", async () => {
+	const dir = fs.mkdtempSync(path.join(realTmp, "rd-clamp-over-"));
+	createdTmpDirs.push(dir);
+	const ctx = makeCtx(dir);
+	// 2.5e9 > 2^31-1: pre-fix this armed setTimeout(abort, 2.5e9), which Node
+	// overflows to a 1 ms timer — the run aborted at birth (round-37 runtime).
+	const { signal, deadlineMs } = resolveRunDeadline(ctx, { timeoutMs: 2_500_000_000 }, { limits: { maxRunMinutes: 60 } });
+	assert.equal(deadlineMs, MAX_TIMER_DELAY_MS, "deadline is clamped to the largest timer-safe delay");
+	await new Promise((resolve) => setTimeout(resolve, 40));
+	assert.equal(signal.aborted, false, "a clamped deadline must NOT fire in ~1 ms (abort-at-birth regression)");
+});
+
+test("R37-F1: Number.MAX_SAFE_INTEGER / Infinity / NaN / negative timeoutMs fall back to config or default", () => {
+	const dir = fs.mkdtempSync(path.join(realTmp, "rd-clamp-invalid-"));
+	createdTmpDirs.push(dir);
+	const ctx = makeCtx(dir);
+	const config: PiTeamsConfig = { limits: { maxRunMinutes: 30 } };
+	for (const bad of [Number.POSITIVE_INFINITY, Number.NaN, -1, 0]) {
+		const { deadlineMs } = resolveRunDeadline(ctx, { timeoutMs: bad }, config);
+		assert.equal(deadlineMs, 30 * 60_000, `timeoutMs=${String(bad)} must be rejected, config applies`);
+	}
+	// A finite, in-range value is still honored verbatim.
+	assert.equal(resolveRunDeadline(ctx, { timeoutMs: 1234 }, config).deadlineMs, 1234);
+	// The config path is clamped too (an unvalidated config object can exceed 2^31).
+	assert.equal(
+		resolveRunDeadline(ctx, {}, { limits: { maxRunMinutes: 10_000_000 } }).deadlineMs,
+		MAX_TIMER_DELAY_MS,
+		"config-derived deadline is clamped to the timer ceiling",
+	);
+});
+
+test("R37-F1: clampTimerDelayMs is the single boundary (undefined for invalid input)", () => {
+	assert.equal(clampTimerDelayMs(2_147_483_648), MAX_TIMER_DELAY_MS);
+	assert.equal(clampTimerDelayMs(2_147_483_647), MAX_TIMER_DELAY_MS);
+	assert.equal(clampTimerDelayMs(1_000), 1_000);
+	assert.equal(clampTimerDelayMs(1.9), 1, "floored to an integer delay");
+	assert.equal(clampTimerDelayMs(undefined), undefined);
+	assert.equal(clampTimerDelayMs("5000"), undefined);
+	assert.equal(clampTimerDelayMs(Number.NaN), undefined);
+	assert.equal(clampTimerDelayMs(0), undefined);
+	assert.equal(clampTimerDelayMs(-1), undefined);
 });

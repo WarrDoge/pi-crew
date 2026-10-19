@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentConfig } from "../../agents/agent-config.ts";
-import { getCrewEnvBool } from "../../config/env-vars.ts";
+import { getCrewEnv, getCrewEnvBool } from "../../config/env-vars.ts";
 import { atomicWriteFile } from "../../state/atomic-write.ts";
 import { hasRunStateLayout, packageRoot, userPiRoot } from "../../utils/paths.ts";
 import { PI_NO_MCP_FLOOR, piVersionAtLeast } from "../child-pi/pi-version.ts";
@@ -131,13 +131,13 @@ export function applyThinkingSuffix(model: string | undefined, thinking: string 
 }
 
 export function currentCrewDepth(env: NodeJS.ProcessEnv = process.env): number {
-	const raw = env.PI_CREW_DEPTH ?? env.PI_TEAMS_DEPTH ?? "0";
+	const raw = getCrewEnv("PI_CREW_DEPTH", env) ?? "0";
 	const parsed = Number(raw);
 	return Number.isInteger(parsed) && parsed >= 0 ? parsed : 0;
 }
 
 export function resolveCrewMaxDepth(inputMaxDepth?: number, env: NodeJS.ProcessEnv = process.env): number {
-	const raw = env.PI_CREW_MAX_DEPTH ?? env.PI_TEAMS_MAX_DEPTH;
+	const raw = getCrewEnv("PI_CREW_MAX_DEPTH", env);
 	const envDepth = raw !== undefined ? Number(raw) : NaN;
 	if (Number.isInteger(envDepth) && envDepth >= 1 && envDepth <= 10) return envDepth;
 	if (Number.isInteger(envDepth) && envDepth > 10) {

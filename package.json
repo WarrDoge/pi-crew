@@ -57,6 +57,7 @@
 		"docs/troubleshooting.md",
 		"docs/usage.md",
 		"docs/architecture.md",
+		"docs/chain-workflow.md",
 		"docs/dynamic-workflows.md",
 		"docs/resource-formats.md",
 		"docs/publishing.md",
@@ -116,6 +117,7 @@
 		"smoke:pi": "pi install .",
 		"smoke:release": "node scripts/release-smoke.mjs",
 		"prepack": "node scripts/clean-strip-types.mjs",
+		"prepublishOnly": "npm run ci",
 		"test:fast": "npm run test:critical && npm run test:bundle",
 		"check:wc-gate": "node scripts/wc-gate.mjs"
 	},

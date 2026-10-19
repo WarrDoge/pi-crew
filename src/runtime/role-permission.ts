@@ -1,3 +1,5 @@
+import { getCrewEnv } from "../config/env-vars.ts";
+
 export type RolePermissionMode = "read_only" | "workspace_write" | "danger_full_access" | "explicit_confirm";
 
 // (FIND-12 R1 review: the AgentPermissionOptions opt-in was dropped — no caller
@@ -43,7 +45,7 @@ export function permissionForRole(role: string): RolePermissionMode {
 }
 
 export function currentCrewRole(env: NodeJS.ProcessEnv = process.env): string | undefined {
-	return env.PI_CREW_ROLE?.trim() || env.PI_TEAMS_ROLE?.trim() || undefined;
+	return getCrewEnv("PI_CREW_ROLE", env)?.trim() || getCrewEnv("PI_TEAMS_ROLE", env)?.trim() || undefined;
 }
 
 export function checkSubagentSpawnPermission(role: string | undefined): PermissionCheckResult {

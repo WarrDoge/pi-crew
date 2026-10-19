@@ -385,7 +385,7 @@ export type AskToolDefinition = ToolDefinition<typeof AskParams, AskDetails>;
  *  reads the injected env object, never a raw process.env.PI_CREW_* member,
  *  so the check:env-vars gate stays green). */
 export function shouldRegisterAskTool(env: NodeJS.ProcessEnv = process.env): boolean {
-	return env[PI_CREW_ASK_ENABLED_ENV] === "1";
+	return getCrewEnv(PI_CREW_ASK_ENABLED_ENV, env) === "1";
 }
 
 // ── T3/R5 (ADR-5 2026-08-17-governed-nesting §1): worker-side `delegate` tool ──
@@ -696,7 +696,7 @@ export function createDelegateTool(deps: DelegateToolDeps = {}): DelegateToolDef
  *  for EVERY role. Broker admission re-checks depth+slot from the task
  *  RECORD — the env is UX/hygiene, not the security boundary). */
 export function shouldRegisterDelegateTool(env: NodeJS.ProcessEnv = process.env): boolean {
-	return env[PI_CREW_DELEGATE_ENABLED_ENV] === "1";
+	return getCrewEnv(PI_CREW_DELEGATE_ENABLED_ENV, env) === "1";
 }
 
 /** Task 5 (§15.2): fence a sibling/group inbox message before it reaches the

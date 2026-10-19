@@ -21,6 +21,7 @@
  *  5. Otherwise → blocked with a reason telling the user what to pass.
  */
 
+import { getCrewEnv } from "../../config/env-vars.ts";
 import { currentCrewDepth } from "../../runtime/model/pi-args.ts";
 
 export const DESTRUCTIVE_TEAM_ACTIONS = new Set([
@@ -125,7 +126,7 @@ export class RootSessionRequiredError extends Error {
  * in-repo (broker tests).
  */
 export function isRootSession(env: NodeJS.ProcessEnv = process.env): boolean {
-	if (env.PI_CREW_KIND === "subagent") return false;
+	if (getCrewEnv("PI_CREW_KIND", env) === "subagent") return false;
 	try {
 		return currentCrewDepth(env) === 0;
 	} catch {

@@ -132,7 +132,18 @@ const BUDGETS = {
 		// Fix-wave 6 / M1-4 (2026-10-19): 528 → 529 — runtime/sanitize/worker-text.ts
 		// (generic fenceWorkerText helper for R38-C1/EP1; statically imported by
 		// api/read.ts — hot read path, must stay in the value graph).
-		maxFiles: 529,
+		// Fix-wave 6 / M3-17+M3-20 (2026-10-19): 529 → 532 — utils/timer-limits.ts
+		// (R37-F1 2^31-1 timeout clamp; statically imported by
+		// extension/team-tool/run-deadline.ts and runtime/run-tracker.ts — both on
+		// the run/wait hot path, not deferrable) + the M3-5 delegate family's two
+		// new modules (runtime/broker/delegate/delegate-abort.ts,
+		// delegate-finalize.ts) which are statically reached from crew-broker.ts.
+		// Count measured with the R18-1 depth-1 + R18-3 `.js`-suffix fixes in place,
+		// so the graph is now complete (those two fixes add no file by themselves:
+		// no `.js`-suffixed relative import exists in the tree today). RE-MEASURE at
+		// wave land — this number is a moving target while parallel tasks land src
+		// modules (the wave's rebuild step is the natural point to reconcile it).
+		maxFiles: 532,
 		forbid: ["test/", "scripts/", "docs/", "dist/"],
 	},
 };
@@ -358,10 +369,17 @@ function origLineOfSite(parsed, site) {
 
 // ── File sets ────────────────────────────────────────────────────────────────
 
-function gitTrackedFiles(pattern) {
+function gitTrackedFiles() {
 	let out = "";
 	try {
-		out = execSync(`git ls-files -- "${pattern}"`, {
+		// R18-1 (deep-review round 18): `git ls-files -- "src/**/*.ts"` needs a
+		// DIRECTORY level between the globstars, so depth-1 files (src/errors.ts,
+		// src/i18n.ts) were never listed — they silently escaped the declared-deps
+		// and LAZY-marker checks (real tree: 545 of 547 files seen; the fs-walk
+		// fallback below cannot fire because the tracked list is non-empty). List
+		// the whole `src` tree and filter by extension instead (same shape as
+		// check-bundle-staleness.mjs). The fallback still covers fixture trees.
+		out = execSync("git ls-files -- src", {
 			cwd: ROOT,
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
@@ -385,7 +403,7 @@ function gitTrackedFiles(pattern) {
 	return acc;
 }
 
-const srcFiles = gitTrackedFiles("src/**/*.ts");
+const srcFiles = gitTrackedFiles();
 const rootEntries = ["index.ts", "index.bundle.ts"]
 	.map((f) => resolve(ROOT, f))
 	.filter((f) => existsSync(f));
@@ -450,7 +468,16 @@ for (const file of srcFiles) {
 
 function resolveRelative(spec, fromFile) {
 	const base = resolve(dirname(fromFile), spec);
-	for (const candidate of [base, `${base}.ts`, `${base}/index.ts`]) {
+	const candidates = [base];
+	// R18-3 (deep-review round 18): TS ESM style `import ... from "./x.js"`
+	// resolves to `./x.ts` on disk and esbuild INLINES it (probe: graph 1/528 vs
+	// control 5/528, code present in the bundle). Without the suffix mapping the
+	// edge was dropped → budget undercount AND a route around `forbid`.
+	if (spec.endsWith(".js")) candidates.push(`${base.slice(0, -3)}.ts`);
+	if (spec.endsWith(".mjs")) candidates.push(`${base.slice(0, -4)}.mts`);
+	if (spec.endsWith(".jsx")) candidates.push(`${base.slice(0, -4)}.tsx`);
+	candidates.push(`${base}.ts`, `${base}/index.ts`);
+	for (const candidate of candidates) {
 		if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
 	}
 	return undefined;

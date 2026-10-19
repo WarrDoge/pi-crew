@@ -2,6 +2,7 @@ import type { PiTeamsConfig } from "../../config/config.ts";
 import { loadConfig } from "../../config/config.ts";
 import { isSessionSwitchInFlight } from "../../ui/inline-panel/view-session-store.ts";
 import { safeAbort } from "../../utils/safe-abort.ts";
+import { clampTimerDelayMs, MAX_TIMER_DELAY_MS } from "../../utils/timer-limits.ts";
 import type { TeamContext } from "./context.ts";
 
 /**
@@ -21,6 +22,28 @@ export interface RunDeadline {
 
 /** Fallback deadline when no config or param override is available: 1 hour. */
 export const DEFAULT_RUN_DEADLINE_MS = 3_600_000;
+
+/**
+ * R37-F1: re-export the timer ceiling so callers/tests of this module can pin
+ * the clamp without reaching into utils/timer-limits.ts.
+ */
+export { MAX_TIMER_DELAY_MS };
+
+/**
+ * R37-F1: the resolved deadline MUST stay inside the `setTimeout` range.
+ *
+ * `params.timeoutMs` is read off the raw tool params (`additionalProperties:
+ * true`, so it is not schema-validated) and `maxRunMinutes * 60_000` comes from
+ * config. Either can exceed 2^31-1, and Node's timer then fires after **1 ms**
+ * — the run aborted at birth (deep-review round 37, runtime-proven).
+ *
+ * Exported so the `waitForRun` mirror (run-tracker.ts) and tests share ONE
+ * boundary. Returns undefined for absent/invalid values so the config →
+ * default chain still applies.
+ */
+export function clampRunDeadlineMs(value: unknown): number | undefined {
+	return clampTimerDelayMs(value);
+}
 
 /** Options for resolveRunDeadline. */
 export interface RunDeadlineOptions {
@@ -69,10 +92,14 @@ export function resolveRunDeadline<T extends object>(
 	config?: PiTeamsConfig,
 	options?: RunDeadlineOptions,
 ): RunDeadline {
-	const timeoutMs = (params as { timeoutMs?: number }).timeoutMs;
+	// R37-F1: BOTH inputs are caller-controlled and neither is schema-validated
+	// (params: additionalProperties; config: may be passed in directly).
+	// Validate (finite, > 0) and clamp to the timer ceiling before arming.
+	const timeoutMs = clampRunDeadlineMs((params as { timeoutMs?: number }).timeoutMs);
 	const effectiveConfig = config ?? loadConfig(ctx.cwd).config;
 	const maxRunMinutes = effectiveConfig?.limits?.maxRunMinutes;
-	const deadlineMs = timeoutMs ?? (maxRunMinutes ? maxRunMinutes * 60_000 : DEFAULT_RUN_DEADLINE_MS);
+	const configDeadlineMs = clampRunDeadlineMs(typeof maxRunMinutes === "number" ? maxRunMinutes * 60_000 : undefined);
+	const deadlineMs = timeoutMs ?? configDeadlineMs ?? DEFAULT_RUN_DEADLINE_MS;
 
 	const controller = new AbortController();
 	// Propagate caller abort (ctx.signal) to the shared controller.

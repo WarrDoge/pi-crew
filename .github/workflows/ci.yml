@@ -139,6 +139,14 @@ jobs:
         # nothing enforced it. check:event-types runs --enforce: the
         # 2026-09-17 drift closure registered all 79 emitted types, so any
         # NEW emitted-but-unregistered type now fails CI.
+        # Fix-wave 6 / M3-23 (R26-F1/R18-2): the two scripts below were also
+        # BLIND, not just unenforced — check-env-vars now resolves env-param
+        # aliases (`function f(env: NodeJS.ProcessEnv = process.env)` →
+        # `env.PI_CREW_X`, 24 such reads at filing time) and check-event-types
+        # now classifies template/variable `type:` emits (a template whose static
+        # prefix is an unregistered namespace fails --enforce). Both fixes landed
+        # IN THE SCRIPTS, so this wiring needs no extra step — keep it that way:
+        # never re-implement a gate here.
         run: |
           npm run check:conflict-markers
           npm run check:lazy-imports

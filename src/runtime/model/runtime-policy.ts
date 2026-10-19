@@ -1,4 +1,5 @@
 import type { CrewRuntimeConfig } from "../../config/config.ts";
+import { getCrewEnv } from "../../config/env-vars.ts";
 import type { CrewRuntimeKind } from "../crew-agent-runtime.ts";
 import { currentCrewDepth } from "./pi-args.ts";
 
@@ -51,8 +52,9 @@ export function resolveEmbeddedFaultThreshold(policy: CrewRuntimeConfig["embedde
  * set, and PI_CREW_ALLOW_MOCK is filtered from child envs.
  */
 export function mockLiveSessionEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-	if (env.PI_CREW_MOCK_LIVE_SESSION !== "success") return false;
-	return env.PI_CREW_ALLOW_MOCK === "1" || env.PI_CREW_ALLOW_MOCK === "true";
+	if (getCrewEnv("PI_CREW_MOCK_LIVE_SESSION", env) !== "success") return false;
+	const allowMock = getCrewEnv("PI_CREW_ALLOW_MOCK", env);
+	return allowMock === "1" || allowMock === "true";
 }
 
 export function resolveTaskRuntimeKind(
