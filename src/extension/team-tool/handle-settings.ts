@@ -146,6 +146,43 @@ function flattenConfig(obj: unknown, prefix: string = ""): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Sensitive-value redaction (US-030 / R45-S1)
+// ---------------------------------------------------------------------------
+
+/** Marker printed in place of a schema-marked sensitive value. */
+const SENSITIVE_REDACTION_MARKER = "***(redacted — sensitive)";
+
+/** Schema-marked sensitive dotted paths — computed once from the same source
+ * the `get` path historically used, so `get`/`list`/`json` can never drift. */
+const SENSITIVE_CONFIG_PATHS = collectSensitiveConfigPaths();
+
+function isSensitiveConfigPath(dotted: string): boolean {
+	return SENSITIVE_CONFIG_PATHS.some((p) => dotted === p || dotted.startsWith(`${p}.`));
+}
+
+/**
+ * R45-S1 (deep-review 2026-10-19): `list` and `json` dump the WHOLE effective
+ * config, so without redaction they bypass the `get` path's US-030 redaction
+ * and echo sensitive values (webhook.secret, otlp.headers, …) verbatim into
+ * the session transcript — any in-session agent can read tool output. Returns
+ * a deep clone with every sensitive-marked value replaced by the marker;
+ * undefined/null are kept as-is (they leak nothing and stay invisible in both
+ * output formats).
+ */
+function redactSensitiveConfig(value: unknown, prefix: string = ""): unknown {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+	const out: Record<string, unknown> = {};
+	for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+		const dotted = prefix ? `${prefix}.${key}` : key;
+		out[key] =
+			isSensitiveConfigPath(dotted) && child !== undefined && child !== null
+				? SENSITIVE_REDACTION_MARKER
+				: redactSensitiveConfig(child, dotted);
+	}
+	return out;
+}
+
+// ---------------------------------------------------------------------------
 // Known config keys — mirrors config-schema.ts + config.ts.
 // ---------------------------------------------------------------------------
 
@@ -318,7 +355,8 @@ export function handleSettings(params: { config?: Record<string, unknown> }, ctx
 	// team-settings list — show ALL effective values (not just KNOWN_KEYS)
 	if (!args || args === "list") {
 		const lines = ["pi-crew effective settings:", `Config file: ${loaded.path}`, ""];
-		const flatLines = flattenConfig(effective);
+		// R45-S1: full dump must pass through the same redaction as `get`.
+		const flatLines = flattenConfig(redactSensitiveConfig(effective));
 		if (flatLines.length > 0) {
 			lines.push(...flatLines);
 		} else {
@@ -344,7 +382,8 @@ export function handleSettings(params: { config?: Record<string, unknown> }, ctx
 			`// Sources: ${loaded.paths?.join(", ") ?? loaded.path}`,
 			...(loaded.warnings?.map((w) => `// WARNING: ${w}`) ?? []),
 			"",
-			JSON.stringify(effective, null, 2),
+			// R45-S1: full dump must pass through the same redaction as `get`.
+			JSON.stringify(redactSensitiveConfig(effective), null, 2),
 		];
 		return result(lines.join("\n"), { ...OK } as never);
 	}
@@ -475,11 +514,11 @@ export function handleSettings(params: { config?: Record<string, unknown> }, ctx
 		// US-030 security review: a value whose dotted path is schema-marked
 		// sensitive (webhook.secret, otlp.headers, …) must not be echoed into
 		// the session transcript — any in-session agent can read tool output.
-		const sensitive = collectSensitiveConfigPaths().some((path) => key === path || key.startsWith(`${path}.`));
+		const sensitive = isSensitiveConfigPath(key);
 		const rendered = sensitive
 			? value === undefined || value === null
 				? "<not set>"
-				: "***(redacted — sensitive)"
+				: SENSITIVE_REDACTION_MARKER
 			: formatValue(value, key);
 		return result(`${key} = ${rendered}${note}`, {
 			...OK,

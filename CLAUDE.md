@@ -111,10 +111,11 @@ Custom agents/teams/workflows are YAML files with routing metadata (triggers, us
 
 Config (`pi-crew.json`) merge order DIFFERS from resource discovery:
 
-`builtin (package defaults) < project (.pi/pi-crew.json) < user (~/.pi/pi-crew.json)`
+`builtin (package defaults) < project (<crewRoot>/config.json, alt .pi/pi-crew.json) < user (~/.pi/agent/pi-crew.json)`
 
 User config always wins. Sensitive fields in project config are sanitized
-via `sanitizeProjectConfig()`. See `src/config/config.ts:1170-1181`.
+via `sanitizeProjectConfig()` (`src/config/sanitize-project-config.ts`,
+merge order at `src/config/config.ts:396-424`).
 
 ## Common Commands
 

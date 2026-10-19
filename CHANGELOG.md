@@ -6,6 +6,8 @@
 
 - **fix(gate): RT24-F1 root-gate config/autonomy read over-block** — `rootGateBlockReason` counted the `args` subcommand carrier as a config patch key, so worker-origin `config {args:"show"}` READS were rejected as "writes user-scope config" (live-caught in the v0.11.24 real-test battery; docblock promised reads open). `args` added to the carrier-key sets for `config` and `autonomy`; unknown junk keys stay write-classified (fail-closed). Pinned: reads with carrier keys open, writes hidden behind the same key still gated (`unset`/patch keys), user config byte-untouched. Live-verified end-to-end (fresh `pi -p`, worker env): read allowed + dumps config; `unset` write gate-blocked verbatim "root-session required".
 
+## [0.11.24] — Deep review waves 2-4: terminal-escape injection, broker replay/overflow, state read-error wipes (2026-10-18)
+
 ### Fixed (deep review 2026-10-16/17 — Waves 2-4; report `pi-crew-deep-review-2026-10-16.md`, 128/128 cold-verified)
 
 - **fix(state): FS2 + R5-M-B4 + family-2 read-error wipes** — readCrewAgents/plan-store/ownership-map/active-run-registry/orphan-worker-registry no longer collapse non-ENOENT read faults to empty feeding a locked full overwrite (sentinel + skip-save + loud log; ST-4-style guards).
@@ -17,6 +19,8 @@
 - **fix(reliability — Wave 4):** R9-F3 effectiveness counts delegate.completed; R9-OPS2 stale /tmp pc-*.sock sweep (24h); spawnedRunIds pruned; tmux-watcher/BatchBarrier disposal; cron scan hoisted+hopped (no 527k-iteration stall); prune digest head-2/tail-2 fallback for all tools; herdr 10s request timeout + error-ack → mux-dead; oscillation period-2 detection; parked-ask shield derives from clamped deadline (+ broker stamps manifest.waitState.deadline); purgeStaleActiveRunIndex isIntentionalWait + waitState clear; rpcPool overwrite guard; FS6 liveness-before-exactly-once; FS7 fallback attempt enters accounting; FS8 writer-timeout terminates wedged worker; client per-request timer unref'd; steer.push requestId dedupe; missed-cron one-time skipped event.
 - **fix(hardening one-liners):** TMPDIR in child env allowlists (macOS run-lock dual-guard actually contends); escalate `to` validated; deadletter assertSafePathId; PI_TEAMS_PI_BIN path-separator boundary; submit_result error-result on throw; launch-script env-key regex; quoted `command -v` probe; classifier failureSummary redacted; tool_execution args/supervisor_contact compacted + 64KiB line cap; env-vars numeric defaults route through parsers; mock-seam double-gated; sqlite 0600; theme atomic write + no corrupt-wipe; OTLP CUMULATIVE temporality + header precedence; goal-wrap spawn-failure → blocked (no zombie goal); CI-only concurrency clamp; sweep-test-tmp age guard; watch-bundle recursion; temp-root realpath both sides; agent frontmatter ceilings; non-finite heartbeat = corrupt lock; agent-events cursor seq-sort; settings enums derived from schema (+ drift test); mailbox seam sanitize; R10-C1 duplicate-condition fix.
 
+## [0.11.23] — Deep review wave 1: state-loss HIGHs (tasks.json orphan reconcile, coalesced dispatch, agents.json requeue) + broker delegate param validation (2026-10-17)
+
 ### Fixed (deep review 2026-10-16/17 — Wave 1; report `pi-crew-deep-review-2026-10-16.md`, 128/128 cold-verified)
 
 - **fix(recovery): R2-H1 — orphan reconcile persisted the FILTERED zombie subset** (tasks.json data loss, runtime-proven). `/tmp` orphan reconcile wrote `result.repairedTasks` (stale-only subset) via full-overwrite — every sibling record destroyed on a timer tick. Now persists `result.persistTasks ?? repairedTasks` (mirror of `crash-recovery.ts`); caller retention pinning test (3-task fixture: alive + zombie + completed all retained).
@@ -27,6 +31,8 @@
 - **fix(prompt): R7-P1 — surface workers self-terminated at 5s off-Linux** — `parentAlive`'s default `/proc` reader throws off-Linux and `return false` fired BEFORE the empty-start-time tolerance the host writer implements; guard now armed only when `/proc` is readable. Verified in clone (surface-runtime 38/38).
 - **fix(event-log): FS1 + FS3**. FS1: agent-events `.seq` sidecar trusted with no regression guard — crash-window re-mints duplicate seqs that `> sinceSeq` consumers drop forever; now max(sidecar, tail-scan) like EL-1. FS3: cursor `nextSeq=max-delivered` + file-order slice stranded lower-seq events forever on documented non-monotonic files (field-confirmed in 7 runs); `filtered` is now seq-sorted before the limit slice (2 sites); the 2 file-order test pins updated to seq-order contract.
 - **fix(run): R5-M-B3 — 4 bare `void appendEventAsync` in `run.ts`** (probe-proven host crash via unhandledRejection, exit=7); all now `.catch`-logged (17 other sites already were).
+
+## [0.11.22] — DR-01 false-green P0 + rounds 4-7 audit waves (DR-02/DR-03/DR-04) (2026-10-16)
 
 ### Fixed (rounds 4–7 audit waves — DR-02/DR-03/DR-04, reports `docs/reviews/pi-crew-audit-round{4,5,6,7}-*.md`)
 

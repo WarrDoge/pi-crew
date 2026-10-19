@@ -371,7 +371,7 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 	},
 	PI_CREW_TRUST_PROJECT_DWF: {
 		name: "PI_CREW_TRUST_PROJECT_DWF",
-		doc: "'1' allows project-sourced .dwf.ts workflows (dynamic-workflow-runner.ts:154)",
+		doc: "'1' allows project-sourced .dwf.ts workflows (dynamic-workflow-runner.ts:189)",
 	},
 	PI_TEAMS_CHILD_RESPONSE_TIMEOUT_MS: {
 		name: "PI_TEAMS_CHILD_RESPONSE_TIMEOUT_MS",

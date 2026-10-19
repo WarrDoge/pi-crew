@@ -24,7 +24,7 @@ import { appendEvent } from "../event-log/event-log.ts";
 import type { RunModelContext, TeamRunManifest, TeamTaskState } from "../types.ts";
 import { CURRENT_SCHEMA_VERSION } from "../types.ts";
 import { unregisterActiveRun } from "./active-run-registry.ts";
-import { extractTaskArray, loadTasksWithRecovery, loadTasksWithRecoveryAsync, quarantineCorruptFile } from "./manifest-io.ts";
+import { extractTaskArray, loadManifestWithRecovery, loadTasksWithRecovery, loadTasksWithRecoveryAsync } from "./manifest-io.ts";
 import { closeSqliteRunStateStore, getSqliteRunStateStore, isSqliteStateBackend, sqliteDbPath } from "./sqlite-run-state.ts";
 
 export { loadManifestWithRecovery, loadTasksWithRecovery } from "./manifest-io.ts";
@@ -1303,22 +1303,23 @@ export function loadRunManifestById(cwd: string, runId: string): { manifest: Tea
 			"warn",
 		);
 	}
-	// STATE-3: readJsonFile returns undefined for BOTH missing (ENOENT) and corrupt
-	// (SyntaxError). A corrupt manifest currently makes the run silently invisible.
-	// If the file EXISTS but readJsonFile returned undefined, it is corrupt → quarantine
-	// it (preserve for diagnosis) + log + bail. Manifest reconstruction from events is
-	// infeasible (run.created lacks manifest fields), so quarantine+log is the recovery.
+	// STATE-3 + R48-N10a (2026-10-19): readJsonFile returns undefined for missing
+	// (ENOENT), corrupt (SyntaxError), AND transiently-unreadable (EACCES/EPERM —
+	// logged as a warning inside atomic-write.ts readJsonFile). The previous
+	// exists-but-undefined → quarantine heuristic therefore RENAMED a perfectly
+	// VALID manifest to .corrupt-<ts> on a mere read-only status poll whenever a
+	// permission hiccup made the read throw. Delegate the final classification to
+	// the strict reader loadManifestWithRecovery (manifest-io.ts): read errno →
+	// undefined WITHOUT quarantine (file preserved — a later poll with permissions
+	// restored still finds the run); SyntaxError → quarantine + its own STATE-3
+	// error log; transient race where the file now parses → use the recovered
+	// manifest instead of degrading the run. Manifest reconstruction from events
+	// is infeasible (run.created lacks manifest fields), so quarantine+log remains
+	// the recovery for true corruption.
 	if (!manifest && fs.existsSync(manifestPath)) {
-		quarantineCorruptFile(manifestPath);
-		logInternalError(
-			"state-store",
-			new Error(
-				`STATE-3: manifest.json for run ${runId} exists but is unparseable — quarantined. Run treated as missing; preserve the .corrupt-* file for diagnosis.`,
-			),
-			undefined,
-			"error",
-		);
-		return undefined;
+		const recovered = loadManifestWithRecovery(manifestPath, runId);
+		if (!recovered) return undefined;
+		manifest = recovered;
 	}
 	if (!manifest || !validateRunManifestPaths(cwd, runId, manifest, stateRoot, tasksPath)) return undefined;
 	setManifestCache(stateRoot, {
@@ -1483,22 +1484,20 @@ export async function loadRunManifestByIdAsync(
 			"warn",
 		);
 	}
-	// STATE-3 (async twin): readJsonFileAsync returns undefined for BOTH missing (ENOENT)
-	// and corrupt (SyntaxError). Mirror the sync loadRunManifestById STATE-3 fix — if the
-	// file EXISTS but the read returned undefined, it is corrupt → quarantine (preserve for
-	// diagnosis) + log + bail. Manifest reconstruction from events is infeasible (run.created
-	// lacks manifest fields), so quarantine+log is the recovery.
+	// STATE-3 (async twin) + R48-N10a (2026-10-19): readJsonFileAsync returns
+	// undefined for missing (ENOENT), corrupt (SyntaxError), AND transiently-
+	// unreadable (EACCES/EPERM) manifests — the previous exists-but-undefined →
+	// quarantine heuristic renamed a VALID manifest on a permission hiccup. Mirror
+	// the sync fix: delegate to the strict reader loadManifestWithRecovery. It is
+	// sync fs, which is acceptable here — this branch only runs on the rare
+	// exists-but-unreadable path and the async fn already uses sync fs.existsSync
+	// on this exact condition. Read errno → undefined WITHOUT quarantine (valid
+	// file preserved for the next poll); SyntaxError → quarantine + its own
+	// STATE-3 error log; transient race → use the recovered manifest.
 	if (!manifest && fs.existsSync(manifestPath)) {
-		quarantineCorruptFile(manifestPath);
-		logInternalError(
-			"state-store",
-			new Error(
-				`STATE-3 async: manifest.json for run ${runId} exists but is unparseable — quarantined. Run treated as missing; preserve the .corrupt-* file for diagnosis.`,
-			),
-			undefined,
-			"error",
-		);
-		return undefined;
+		const recovered = loadManifestWithRecovery(manifestPath, runId);
+		if (!recovered) return undefined;
+		manifest = recovered;
 	}
 	if (!manifest || !validateRunManifestPaths(cwd, runId, manifest, stateRoot, tasksPath)) return undefined;
 	setManifestCache(stateRoot, {

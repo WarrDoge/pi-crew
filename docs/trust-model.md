@@ -1,7 +1,8 @@
 # pi-crew Trust Model (single source of truth)
 
-**Document version:** 1.0 (WI-6.1 milestone)
-**Date:** 2026-09-10
+**Document version:** 1.1 (2026-10-18 — adds Wave-3 user-scope root-gate to
+boundary 1; corrects `PI_CREW_TRUST_PROJECT_DWF` value form)
+**Date:** 2026-09-10 (v1.0) / 2026-10-18 (v1.1)
 **Owner:** solo maintainer (delegated to upgrade program M6/WI-6.1)
 **Supersedes:** trust-model content previously distributed across
 `docs/bugs/SECURITY-ISSUES.md` (v3.0, last updated 2026-06-03) and
@@ -17,6 +18,11 @@ pi-crew operates across 4 distinct trust boundaries:
 
 1. **Root session / orchestrator** — the pi session that owns the
    broker. Trusted: can issue tokens, can steer, can msg.send.
+   User-scope mutations (config-user / settings-user+theme /
+   autonomy / create-user / update-user / schedule / goal+force)
+   are root-gated since Wave-3 (2026-10-17): worker-origin calls are
+   denied with "root-session required"; reads and project scope
+   stay open.
 2. **Worker (child pi process)** — spawned by the orchestrator via
    `child-pi`. Trusted: has a valid token; CANNOT spawn its own
    grandchildren without delegate.request (gated).
@@ -83,7 +89,7 @@ want strict semantics; default OFF remains.
 | Root session | full | crash → broker shutdown | broker stop() is idempotent |
 | Worker | token (compound key) | revoke token | revokeTaskToken() + post-hello re-check on secret-hash |
 | Guest | nonce + FD-3 protocol | EPERM/SIGTERM | guest exits 0 on EPIPE, host checks nonce every frame |
-| DWF | `PI_CREW_TRUST_PROJECT_DWF=true` | deny | `dwf.trust_denied` event emitted on rejection |
+| DWF | `PI_CREW_TRUST_PROJECT_DWF=1` (literal `1`; the gate compares `!== "1"` — `true` FAILS, see `dynamic-workflow-runner.ts:189`) | deny | `dwf.trust_denied` event emitted on rejection |
 
 ## Cross-references
 

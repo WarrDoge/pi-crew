@@ -275,7 +275,7 @@ To add Tier 1 to CI as a fast-feedback gate (under 30s):
 
 ---
 
-## Tier 1 — Critical unit tests (~19s, 120 tests, the only suite you need for broker/UI changes)
+## Tier 1 — Critical unit tests (~13s, 124 tests, the only suite you need for broker/UI changes)
 
 **What**: run the curated 15-file fast subset.
 
@@ -287,7 +287,7 @@ To add Tier 1 to CI as a fast-feedback gate (under 30s):
 time npm run test:critical
 ```
 
-Expected output: `# tests 120 # pass 120 # fail 0 # cancelled 0 # duration_ms ~19965`. (Count was 97 at v0.9.46, 101 at v0.9.66, 102 at the waitMethodsEnabled flip, 116 since 2026-09-20, **120 @ 2026-10-07** (+`child-executor-heartbeat-pulse.test.ts` → 15 files) — verify with the actual run; the skill's hard-coded numbers drift between releases.) **Since RR-021 round-2 the runner itself fails loudly on `# cancelled N>0`** (dual-reporter TAP scrape — the round-1 unref incident shipped green with 2 cancelled tests), and **round-3 added the missing-file pre-check**: an explicitly-listed file that does not exist now exits 1 naming the path instead of being silently skipped by node:test.
+Expected output: `# tests 124 # pass 124 # fail 0 # cancelled 0 # duration_ms ~12800`. (Count was 97 at v0.9.46, 101 at v0.9.66, 102 at the waitMethodsEnabled flip, 116 since 2026-09-20, 120 @ 2026-10-07, **124 @ 2026-10-18** (+`child-executor-heartbeat-pulse.test.ts` → 15 files) — verify with the actual run; the skill's hard-coded numbers drift between releases.) **Since RR-021 round-2 the runner itself fails loudly on `# cancelled N>0`** (dual-reporter TAP scrape — the round-1 unref incident shipped green with 2 cancelled tests), and **round-3 added the missing-file pre-check**: an explicitly-listed file that does not exist now exits 1 naming the path instead of being silently skipped by node:test.
 
 **References**:
 
@@ -327,7 +327,7 @@ PI_CREW_BROKER=0 npm run test:critical
 PI_CREW_BROKER=1 npm run test:critical
 ```
 
-All three must show `# pass 120 # fail 0`. Measured times in this session (2026-08-11): ~26s for default, ~26s for `PI_CREW_BROKER=0`, ~26s for `PI_CREW_BROKER=1` (varies ±1-2s run-to-run).
+All three must show `# pass 124 # fail 0`. Measured times in this session (2026-08-11): ~26s for default, ~26s for `PI_CREW_BROKER=0`, ~26s for `PI_CREW_BROKER=1` (varies ±1-2s run-to-run).
 
 **References**:
 
@@ -609,7 +609,7 @@ If the two md5s match → session is on the latest code. If not → user must `/
 
 **What**: drive the team tool + subagent tools through a spread of actions from the parent Pi session to prove the full surface works end-to-end, not just one smoke run.
 
-**Why this exists**: Tier 7 proves one team run completes. But pi-crew has **55 `team` actions across 5 domain dispatchers** (`RUN` 10: run/parallel/plan/plans/orchestrate/resume/retry/wait/steer/goal · `STATUS` 16: status/list/get/events/artifacts/summary/graph/search/health/worktrees/checkpoint/cache/explain/onboard/recommend/help · `CONTROL` 7 · `MANAGE` 16 · `AUTOMATE` 6 — `src/schema/team-tool-schema.ts:391-437`) plus the subagent tools (`Agent`, `crew_agent`, `get_subagent_result`, `steer_subagent` — with `crew_agent_result`/`crew_agent_steer` aliases), the worker-side tools (`ask`, `delegate`, `message`), and the `team-settings` config surface, dispatched through several code paths (sync run, async run, chain, parallel, direct subagent). A schema or registration regression can break *some* paths while others still pass. The battery catches path-specific breakage.
+**Why this exists**: Tier 7 proves one team run completes. But pi-crew has **57 `team` actions across 5 domain dispatchers** (`RUN` 10: run/parallel/plan/plans/orchestrate/resume/retry/wait/steer/goal · `STATUS` 17: status/list/get/events/artifacts/breakdown/summary/graph/search/health/worktrees/checkpoint/cache/explain/onboard/recommend/help · `CONTROL` 7 · `MANAGE` 17 · `AUTOMATE` 6 — `src/schema/team-tool-schema.ts:437-489`) plus the subagent tools (`Agent`, `crew_agent`, `get_subagent_result`, `steer_subagent` — with `crew_agent_result`/`crew_agent_steer` aliases), the worker-side tools (`ask`, `delegate`, `message`), and the `team-settings` config surface, dispatched through several code paths (sync run, async run, chain, parallel, direct subagent). A schema or registration regression can break *some* paths while others still pass. The battery catches path-specific breakage.
 
 **When required**: any change to `src/schema/team-tool-schema.ts`, `src/extension/registration/team-tool.ts`, `src/extension/team-tool/*.ts` (handler dispatch), or the subagent-tool registration. Optional but cheap for any change — the read-only actions are free.
 
@@ -1383,7 +1383,7 @@ Use this to answer "đủ full tính năng chưa?" without re-deriving. Every us
 
 | Feature | Code entry | Verify via |
 |---|---|---|
-| Team tool — 56 actions / 5 domains | `src/schema/team-tool-schema.ts:391-437`, dispatch in `src/extension/team-tool/` | 9a (read-only) + 9b/9c/9d/9e/9f theo domain |
+| Team tool — 57 actions / 5 domains | `src/schema/team-tool-schema.ts:437-489`, dispatch in `src/extension/team-tool/` | 9a (read-only) + 9b/9c/9d/9e/9f theo domain |
 | Runtime mode `child-process` (default) | `src/runtime/child-pi/` | 9b sync run + T7 |
 | Runtime mode `scaffold` (dry-run) | `src/runtime/task-runner/pre-execution.ts:176` | 9b `action='plan'`/`'plans'` (preview không spawn) hoặc run với `runtime.mode='scaffold'` |
 | Runtime mode `live-session` (experimental) | `src/runtime/live-session/` | Run với `runtime.mode='live-session'` + irc tool xuất hiện trong worker (`src/runtime/custom-tools/irc-tool.ts`) |
@@ -1464,7 +1464,7 @@ The skill does NOT need to be updated for every commit — only when the cited l
 ## Quick reference — exact commands
 
 ```bash
-# Tier 1 (critical unit, ~19s, 120 tests)
+# Tier 1 (critical unit, ~13s, 124 tests)
 npm run test:critical
 # Tier 2 (3-path proof, broker changes only)
 PI_CREW_BROKER=0 npm run test:critical
@@ -1548,7 +1548,7 @@ PY
 
 Before claiming "tested":
 
-- [ ] Tier 1: `test:critical` fresh-run, all pass (<25s). Count varies by release — was 97 at v0.9.46, 101 at v0.9.66, 102 at the waitMethodsEnabled flip, 116 @ 2026-09-20, **120 @ 2026-10-07**; record the actual count in the report.
+- [ ] Tier 1: `test:critical` fresh-run, all pass (<25s). Count varies by release — was 97 at v0.9.46, 101 at v0.9.66, 102 at the waitMethodsEnabled flip, 116 @ 2026-09-20, 120 @ 2026-10-07, **124 @ 2026-10-18**; record the actual count in the report.
 - [ ] Tier 2: 3-path proof all pass — **required if you touched `src/config/defaults.ts` or `src/extension/registration/lifecycle-handlers.ts`**
 - [ ] Tier 3: `npm run typecheck` exit 0, `npm run build:bundle` exit 0
 - [ ] Tier 4: bundle md5 matches what the session loaded (or user has `/quit`-ed + reopened)
