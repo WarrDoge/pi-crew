@@ -337,6 +337,65 @@ test("happy path: immediate ref, fenced mailbox delivery, budget reserve→roll-
 	}
 });
 
+test("R43-S1: read-only parent (explorer) requesting an executor grandchild is denied with parent-role-escalation", async () => {
+	const s = await scaffoldRunningTask("tier", "explorer");
+	const spawns: GrandchildSpawnInput[] = [];
+	const fakeSpawner = async (input: GrandchildSpawnInput): Promise<GrandchildSpawnResult> => {
+		spawns.push(input);
+		return { ok: true, resultText: "unreachable", usageTokens: 1 };
+	};
+	const { broker, socketPath } = await startBroker({ cwd: s.cwd, nestingEnabled: true, spawner: fakeSpawner });
+	try {
+		const token = broker.issueRunToken(s.runId, s.taskId);
+		const client = await rawConnect(socketPath);
+		try {
+			await hello(client, s.runId, s.taskId, token);
+			const res = await sendDelegate(client, { prompt: "write files for me", role: "executor" });
+			assert.ok(res.error, "explorer parent requesting executor must be rejected");
+			assert.equal(res.error!.code, "policy-denied");
+			assert.match(res.error!.message, /read-only tier/);
+			assert.match(res.error!.message, /transitive containment/);
+			const events = await readEventsUntil(s.eventsPath, (evts) => evts.some((e) => e.type === "delegate.rejected"));
+			const rej = events.find((e) => e.type === "delegate.rejected");
+			assert.ok(rej, "delegate.rejected event must be recorded");
+			assert.equal(rej!.data?.reason, "parent-role-escalation");
+			assert.equal(spawns.length, 0, "no grandchild may be spawned");
+		} finally {
+			client.close();
+		}
+	} finally {
+		await broker.stop();
+		fs.rmSync(s.cwd, { recursive: true, force: true });
+	}
+});
+
+test("R43-S1: executor parent's delegate threads parentRole to the spawner (transitive policy input)", async () => {
+	const s = await scaffoldRunningTask("ptier");
+	const spawns: GrandchildSpawnInput[] = [];
+	const fakeSpawner = async (input: GrandchildSpawnInput): Promise<GrandchildSpawnResult> => {
+		spawns.push(input);
+		return { ok: true, resultText: "did read-only things", usageTokens: 7 };
+	};
+	const { broker, socketPath } = await startBroker({ cwd: s.cwd, nestingEnabled: true, spawner: fakeSpawner });
+	try {
+		const token = broker.issueRunToken(s.runId, s.taskId);
+		const client = await rawConnect(socketPath);
+		try {
+			await hello(client, s.runId, s.taskId, token);
+			const res = await sendDelegate(client, { prompt: "explore", role: "explorer" });
+			assert.ok(res.result, `executor parent delegating explorer must pass: ${JSON.stringify(res)}`);
+			await readEventsUntil(s.eventsPath, (evts) => evts.some((e) => e.type === "delegate.completed"));
+			assert.equal(spawns[0]?.role, "explorer");
+			assert.equal(spawns[0]?.parentRole, "executor", "parent task record role must reach the spawner");
+		} finally {
+			client.close();
+		}
+	} finally {
+		await broker.stop();
+		fs.rmSync(s.cwd, { recursive: true, force: true });
+	}
+});
+
 test("fail-fast: exhausted nested budget rejects immediately (never queues)", async () => {
 	const s = await scaffoldRunningTask("slots");
 	const slowSpawner = () =>

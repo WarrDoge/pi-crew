@@ -14,6 +14,13 @@
  *   apply (`--tools`/`--exclude-tools` from role-tools config) — a
  *   "read-only" explorer/analyst grandchild must actually be read-only
  *   (ADR-5 §9's serialization exemption depends on it).
+ *   R43-S1 (2026-10-19 fix-wave 6): the restrictions are now TRANSITIVE —
+ *   the effective grandchild tool policy is the intersection (min) of the
+ *   PARENT task role's policy and the requested role's policy
+ *   (spawn-policy.ts effectiveGrandchildToolPolicy), applied to the
+ *   in-memory agent config below. The delegate grandchildren are spawned
+ *   from a MINIMAL AgentConfig (no agents/<role>.md frontmatter is read),
+ *   so this is the ONLY argv-level tool cut they receive.
  * - S1#1: the grandchild authenticates under its OWN subId identity
  *   (grandchild-scoped broker token pre-minted by the handler) — never the
  *   parent's task token. Identity fields (`agentId: subId`) match.
@@ -27,11 +34,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentConfig } from "../agents/agent-config.ts";
 import { type ChildPiRunResult, runChildPi } from "./child-pi/child-pi.ts";
+import { effectiveGrandchildToolPolicy } from "./spawn-policy.ts";
 
 export interface GrandchildSpawnInput {
 	cwd: string;
 	runId: string;
 	parentTaskId: string;
+	/** Parent task record role (run-locked read) — R43-S1 transitive tier
+	 *  containment: the grandchild's tool policy is min(parent, requested). */
+	parentRole?: string;
 	/** Nested-slot holder id (minted by the broker handler). */
 	subId: string;
 	prompt: string;
@@ -60,14 +71,26 @@ export interface GrandchildSpawnResult {
 	timedOut?: boolean;
 }
 
-/** Minimal in-memory agent config for a delegate grandchild role. */
-function agentForRole(role: string): AgentConfig {
+/**
+ * Minimal in-memory agent config for a delegate grandchild role.
+ *
+ * R43-S1: applies the EFFECTIVE tool policy — intersection (min) of the
+ * parent task role's policy and the requested grandchild role's policy —
+ * so the pi argv `--tools`/`--exclude-tools` cut reflects the transitive
+ * floor. A read-only parent's grandchild is bash/edit/write-denied even if
+ * the requested role itself is executor-class (defense-in-depth behind the
+ * spawn-policy admission gate).
+ */
+export function grandchildAgentForRole(role: string, parentRole?: string): AgentConfig {
+	const policy = effectiveGrandchildToolPolicy(parentRole, role);
 	return {
 		name: role,
 		description: `delegate grandchild (${role})`,
 		source: "builtin",
 		filePath: "",
 		systemPrompt: "",
+		...(policy.tools !== undefined ? { tools: policy.tools } : {}),
+		...(policy.excludeTools !== undefined ? { disallowedTools: policy.excludeTools } : {}),
 	};
 }
 
@@ -133,8 +156,9 @@ export async function spawnDelegateGrandchild(input: GrandchildSpawnInput): Prom
 		const result: ChildPiRunResult = await runChildPi({
 			cwd: input.cwd,
 			task: input.prompt,
-			agent: agentForRole(input.role),
-			// S1#2: thread the role so role-based tool restrictions apply.
+			// S1#2 + R43-S1: thread the role AND the parent role so the effective
+			// (min-intersected) tool policy applies at the argv level.
+			agent: grandchildAgentForRole(input.role, input.parentRole),
 			role: input.role,
 			...(input.model !== undefined ? { model: input.model } : {}),
 			...(input.maxTurns !== undefined ? { maxTurns: input.maxTurns } : {}),

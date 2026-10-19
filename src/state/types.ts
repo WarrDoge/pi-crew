@@ -399,6 +399,19 @@ export interface TeamRunManifest {
 	runtimeResolution?: RuntimeResolutionState;
 	/** Effective run config snapshot used by async background workers. Optional for backward compatibility. */
 	runConfig?: unknown;
+	/** M1-7 (R47-1 fix 2026-10-19): host-owned verify-gate ground truth — a
+	 *  P1a manifest-hash snapshot + check preset captured in the HOST process
+	 *  at dispatch, BEFORE any worker ran. The verifier pre-gate re-hashes the
+	 *  task cwd against `snapshot` (drift ⇒ gate FAILED, verifier spawns with
+	 *  tamper evidence) and only ever runs `checks` derived from this host
+	 *  read — it never re-reads the worker-mutable task-cwd package.json.
+	 *  Structural shape (the state layer must not import runtime types);
+	 *  optional for backward compatibility — absent ⇒ the gate resolves no
+	 *  checks (fail-closed ⇒ LLM verifier spawns, never a skip). */
+	verifyGateSpec?: {
+		snapshot: Record<string, string>;
+		checks: { name: string; command: string; critical?: boolean }[];
+	};
 	/** Background dispatch discriminator. Default "team-run" runs executeTeamRun; "goal-loop" / "dynamic-workflow" dispatch to their respective runners. Absent = "team-run" for backward compatibility. */
 	runKind?: "team-run" | "goal-loop" | "dynamic-workflow";
 	/** round-14 P1-5: typed workflow arguments accessible in .dwf.ts scripts via ctx.args<T>(). Any JSON value; default {} when unset. */

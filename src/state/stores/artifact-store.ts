@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { logInternalError } from "../../utils/internal-error.ts";
 import { redactSecretString, redactSecrets } from "../../utils/redaction.ts";
 import { resolveRealContainedPath } from "../../utils/safe-paths.ts";
 import { atomicWriteFile } from "../atomic-write.ts";
@@ -133,6 +134,46 @@ export function isArtifactExpired(desc: ArtifactDescriptor, nowMs: number, tempo
 	return false;
 }
 
+export interface PruneExpiredArtifactsOptions {
+	now?: number;
+	temporaryTtlMs?: number;
+	/**
+	 * R44-N1 containment anchor (REQUIRED): the run's HOST-DERIVED artifacts
+	 * root (`<crewRoot>/artifacts/<runId>` — the same convention
+	 * createRunPaths derives; never trust a manifest-declared root). A
+	 * descriptor path is unlinked ONLY when its realpath resolves UNDER this
+	 * anchor. Fail-closed: any realpath/containment failure skips + warns —
+	 * never deletes. Blocks `..` traversal, absolute-outside paths, and
+	 * symlink escapes (a manifest is worker-writable state).
+	 */
+	artifactsRoot: string;
+}
+
+/**
+ * R44-N1: resolve a descriptor path for pruning under a containment anchor.
+ * Returns the REAL (symlink-resolved) path when it is contained, or a reason
+ * to skip: "enoent" (benign — already gone, silent), or "blocked" (warn).
+ * Pure filesystem check — never deletes.
+ */
+function resolvePruneTarget(
+	desc: ArtifactDescriptor,
+	realAnchor: string,
+): { realPath: string } | { skip: "enoent" | "blocked"; reason: string } {
+	let realPath: string;
+	try {
+		realPath = fs.realpathSync(desc.path);
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT") return { skip: "enoent", reason: `target gone: ${desc.path}` };
+		return { skip: "blocked", reason: `realpath failed (${code ?? "unknown"}): ${desc.path}` };
+	}
+	const relative = path.relative(realAnchor, realPath);
+	if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+		return { skip: "blocked", reason: `outside artifacts root ${realAnchor}: ${desc.path} (real: ${realPath})` };
+	}
+	return { realPath };
+}
+
 /**
  * ST-10: Prune expired artifacts by enforcing ArtifactDescriptor.retention/expiresAt.
  *
@@ -142,18 +183,63 @@ export function isArtifactExpired(desc: ArtifactDescriptor, nowMs: number, tempo
  * Unlike {@link cleanupOldArtifacts} (which is filesystem age-based on raw
  * files), this operates on artifact *metadata* from the manifest's `artifacts[]`
  * and deletes specific expired files via their descriptor `path`.
+ *
+ * R44-N1 (fix-wave 6, live-proven HIGH): descriptor paths come from
+ * WORKER-WRITABLE manifests, so every unlink is containment-checked against
+ * the required host-derived `options.artifactsRoot` anchor — realpath both
+ * sides, resolve-inside check (blocks `..`, absolute-outside, symlink
+ * escape), fail-closed skip+warn on ANY failure (never delete what cannot be
+ * verified). Unlinking the symlink-RESOLVED real path means a planted
+ * symlink inside the anchor pointing at an outside victim is BLOCKED (its
+ * realpath escapes the anchor) — the victim can never be reached.
  */
-export function pruneExpiredArtifacts(descriptors: ArtifactDescriptor[], options?: { now?: number; temporaryTtlMs?: number }): number {
-	const nowMs = options?.now ?? Date.now();
-	const temporaryTtlMs = options?.temporaryTtlMs ?? TEMPORARY_RETENTION_TTL_MS;
+export function pruneExpiredArtifacts(descriptors: ArtifactDescriptor[], options: PruneExpiredArtifactsOptions): number {
+	const nowMs = options.now ?? Date.now();
+	const temporaryTtlMs = options.temporaryTtlMs ?? TEMPORARY_RETENTION_TTL_MS;
+	// Anchor validation — fail-closed for the WHOLE batch when the anchor
+	// itself is unusable (missing, a symlink, or unresolvable): a bad anchor
+	// proves nothing, so nothing may be deleted.
+	let realAnchor: string;
+	try {
+		const lstat = fs.lstatSync(options.artifactsRoot);
+		if (lstat.isSymbolicLink()) throw new Error(`artifacts root is a symbolic link`);
+		if (!lstat.isDirectory()) throw new Error(`artifacts root is not a directory`);
+		realAnchor = fs.realpathSync(options.artifactsRoot);
+	} catch (error) {
+		logInternalError(
+			"artifact-store.prune-anchor",
+			error instanceof Error ? error : new Error(String(error)),
+			`artifactsRoot=${options.artifactsRoot} — skipping ${descriptors.length} descriptor(s), nothing deleted`,
+			"warn",
+		);
+		return 0;
+	}
 	let deleted = 0;
 	for (const desc of descriptors) {
 		if (!isArtifactExpired(desc, nowMs, temporaryTtlMs)) continue;
+		const target = resolvePruneTarget(desc, realAnchor);
+		if ("skip" in target) {
+			if (target.skip === "blocked") {
+				// Containment violation / unverifiable path — visible warn, never delete.
+				logInternalError("artifact-store.prune-contained", new Error(target.reason), `producer=${desc.producer}`, "warn");
+			}
+			// "enoent" stays silent — the file was already pruned (best-effort parity
+			// with the pre-R44 behavior of swallowing missing-file unlinks).
+			continue;
+		}
 		try {
-			fs.unlinkSync(desc.path);
+			// Unlink the VERIFIED real path (not the raw descriptor string).
+			fs.unlinkSync(target.realPath);
 			deleted++;
-		} catch {
-			// Best-effort: file may already be removed or path may be stale.
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "ENOENT") continue; // race: already gone
+			logInternalError(
+				"artifact-store.prune-unlink",
+				error instanceof Error ? error : new Error(String(error)),
+				`path=${target.realPath}`,
+				"warn",
+			);
 		}
 	}
 	return deleted;

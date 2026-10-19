@@ -13,8 +13,11 @@ import {
 	DEFAULT_DELEGATE_TIMEOUT_SEC,
 	DELEGATE_ALLOWED_ROLES,
 	type DelegateAdmissionInput,
+	effectiveGrandchildToolPolicy,
 	evaluateDelegateAdmission,
+	parentTaskTier,
 } from "../../../src/runtime/spawn-policy.ts";
+import { READ_ONLY_ROLE_SAMPLE, WRITE_ROLE_SAMPLE } from "./spawn-policy-role-samples.ts";
 
 function baseInput(overrides?: Partial<DelegateAdmissionInput>): DelegateAdmissionInput {
 	return {
@@ -199,4 +202,114 @@ test("gate 8 workspace: no overlap → executor grandchild admitted even without
 		baseInput({ requested: { role: "executor" }, workspace: { serializeEnabled: false, overlappingInFlightExecutors: 0 } }),
 	);
 	assert.equal(d.allowed, true);
+});
+
+// ---------------------------------------------------------------------------
+// R43-S1 (fix-wave 6): transitive role-tier containment. D8 keeps delegation
+// open to every role, but the TIER must be transitive — a read-only parent
+// task is never granted a write-capable (executor-class) grandchild, and the
+// effective grandchild tool policy is min(parent, requested).
+// ---------------------------------------------------------------------------
+
+test("R43-S1 gate 1b parent-role-escalation: read-only parent cannot request an executor grandchild", () => {
+	for (const role of READ_ONLY_ROLE_SAMPLE) {
+		const d = evaluateDelegateAdmission(baseInput({ parentTask: { taskId: "t", role, depth: 1 }, requested: { role: "executor" } }));
+		assert.equal(d.allowed, false, `${role} parent must not spawn an executor grandchild`);
+		assert.equal(d.reason, "parent-role-escalation");
+		assert.match(d.message ?? "", /read-only tier/);
+		assert.match(d.message ?? "", /transitive containment/);
+	}
+});
+
+test("R43-S1 gate 1b: unknown or absent parent role default-denies to read-only (never upgrades)", () => {
+	for (const role of [undefined, "totally-unknown-role", ""]) {
+		const d = evaluateDelegateAdmission(
+			baseInput({ parentTask: { taskId: "t", ...(role !== undefined ? { role } : {}), depth: 1 }, requested: { role: "executor" } }),
+		);
+		assert.equal(d.allowed, false, `parent role ${String(role)} must default-deny to read-only`);
+		assert.equal(d.reason, "parent-role-escalation");
+	}
+	assert.equal(parentTaskTier(undefined), "read_only");
+	assert.equal(parentTaskTier("executor"), "workspace_write");
+});
+
+test("R43-S1 gate 1b: write-capable parent may request an executor grandchild (no false positives)", () => {
+	for (const role of WRITE_ROLE_SAMPLE) {
+		const d = evaluateDelegateAdmission(baseInput({ parentTask: { taskId: "t", role, depth: 1 }, requested: { role: "executor" } }));
+		assert.equal(d.allowed, true, `${role} parent spawning executor must stay admissible`);
+	}
+});
+
+test("R43-S1 gate 1b: read-only parent may still delegate to read-only grandchildren (D8 preserved)", () => {
+	for (const requested of ["explorer", "analyst"]) {
+		for (const parentRole of READ_ONLY_ROLE_SAMPLE) {
+			const d = evaluateDelegateAdmission(
+				baseInput({ parentTask: { taskId: "t", role: parentRole, depth: 1 }, requested: { role: requested } }),
+			);
+			assert.equal(d.allowed, true, `${parentRole} → ${requested} must stay admissible (D8)`);
+		}
+	}
+});
+
+test("R43-S1 gate ORDER: parent-role-escalation precedes trust/depth/slots (role-surface checks first)", () => {
+	const d = evaluateDelegateAdmission(
+		baseInput({
+			parentTask: { taskId: "t", role: "explorer", depth: 99 },
+			requested: { role: "executor" },
+			untrusted: true,
+			slots: { used: 5, max: 5 },
+		}),
+	);
+	assert.equal(d.reason, "parent-role-escalation");
+});
+
+test("R43-S1 effectiveToolPolicy on ALLOW: min(parent, requested) is threaded for the spawner", () => {
+	const d = evaluateDelegateAdmission(
+		baseInput({ parentTask: { taskId: "t", role: "explorer", depth: 1 }, requested: { role: "explorer" } }),
+	);
+	assert.equal(d.allowed, true);
+	assert.ok(d.effectiveToolPolicy);
+	assert.ok(d.effectiveToolPolicy.tools?.includes("read"));
+	assert.ok(!d.effectiveToolPolicy.tools?.includes("bash"));
+	assert.ok(d.effectiveToolPolicy.excludeTools?.includes("bash"));
+});
+
+test("R43-S1 effectiveGrandchildToolPolicy: read-only parent floor applies even to executor requests (defense-in-depth)", () => {
+	const policy = effectiveGrandchildToolPolicy("explorer", "executor");
+	// explorer allowlist wins (intersection with executor's undefined = parent's)
+	assert.deepEqual(policy.tools, ["read", "grep", "find", "ls", "glob", "ask"]);
+	assert.deepEqual(policy.excludeTools, ["edit", "write", "bash", "web"]);
+	assert.ok(!policy.tools?.includes("bash"), "grandchild bash must be denied when parent is read-only");
+});
+
+test("R43-S1 effectiveGrandchildToolPolicy: denylists union across parent and requested", () => {
+	// Reachable surface pair: analyst parent (read-only TIER, config excludes
+	// only edit/write) → executor grandchild — the TIER floor adds bash.
+	const analystToExecutor = effectiveGrandchildToolPolicy("analyst", "executor");
+	assert.deepEqual(analystToExecutor.excludeTools, ["edit", "write", "bash"], "tier floor completes the read-only denylist");
+	assert.equal(analystToExecutor.tools, undefined);
+	// Generic pair (both sides declare): union of both denylists + tier floor
+	// cuts edit/write from writer's own allowlist (analyst parent is read-only tier).
+	const policy = effectiveGrandchildToolPolicy("analyst", "writer");
+	assert.deepEqual([...(policy.excludeTools ?? [])].sort(), ["bash", "edit", "web", "write"]);
+	assert.deepEqual(
+		policy.tools,
+		["read", "ls", "ask"],
+		"parent has no allowlist → requested role's own allowlist, minus the read-only tier floor",
+	);
+});
+
+test("R43-S1 effectiveGrandchildToolPolicy: unrestricted parent (executor) → requested role's own policy", () => {
+	const policy = effectiveGrandchildToolPolicy("executor", "explorer");
+	assert.deepEqual(policy.tools, ["read", "grep", "find", "ls", "glob", "ask"]);
+	assert.deepEqual(policy.excludeTools, ["edit", "write", "bash", "web"]);
+	const unrestricted = effectiveGrandchildToolPolicy("executor", "executor");
+	assert.equal(unrestricted.tools, undefined);
+	assert.equal(unrestricted.excludeTools, undefined);
+});
+
+test("R43-S1 effectiveGrandchildToolPolicy: absent parent role → read-only floor (fail-closed)", () => {
+	const policy = effectiveGrandchildToolPolicy(undefined, "executor");
+	assert.ok(!policy.tools?.includes("bash"));
+	assert.ok(policy.excludeTools?.includes("bash"), "absent parent role must not upgrade the grandchild to write-capable");
 });

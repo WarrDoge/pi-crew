@@ -1589,7 +1589,7 @@ export class CrewBroker {
 				} satisfies TeamTaskState,
 			]);
 			// RR-023 F3: thread the parent's model out of the locked read (gc fallback).
-			return { code: "ok" as const, decision, reserved, executionCwd, parentModel: task.model };
+			return { code: "ok" as const, decision, reserved, executionCwd, parentModel: task.model, parentRole: task.role };
 		});
 		// RR-023 F4 (finding #4): run.lock held by a live cross-process holder —
 		// degrade to a typed busy frame AND a delegate.rejected event (never
@@ -1604,7 +1604,7 @@ export class CrewBroker {
 			this.sendError(conn, id, admissionOutcome.code, admissionOutcome.message);
 			return;
 		}
-		const { decision, reserved, executionCwd, parentModel } = admissionOutcome;
+		const { decision, reserved, executionCwd, parentModel, parentRole } = admissionOutcome;
 		this.recordDelegateEvent(loaded.manifest, "delegate.admitted", parentTaskId, {
 			subId,
 			childDepth: decision.childDepth,
@@ -1632,6 +1632,9 @@ export class CrewBroker {
 					cwd: executionCwd,
 					runId,
 					parentTaskId,
+					// R43-S1: transitive tier containment — the spawner applies
+					// min(parentRole, requestedRole) as the grandchild tool policy.
+					parentRole,
 					subId,
 					prompt: requested.prompt,
 					eventsPath: loaded.manifest.eventsPath,
