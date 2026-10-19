@@ -482,7 +482,11 @@ const EFFECTIVE_DEFAULTS: Record<string, unknown> = {
 	"reliability.ambientStatusInjection": true,
 	"reliability.forcePreflight": false,
 	"reliability.scopeModels": false,
-	"telemetry.enabled": false,
+	// G17/R45-F3: mirror the REAL default — observability installs the metric sink
+	// when `config.telemetry?.enabled !== false` (registration/observability.ts:109),
+	// i.e. an unset key is ENABLED. This duplicated map must track the canonical
+	// behaviour or the overlay shows a stale default.
+	"telemetry.enabled": true,
 	"notifications.enabled": false,
 };
 

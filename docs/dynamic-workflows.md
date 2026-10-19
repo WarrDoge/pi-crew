@@ -275,6 +275,29 @@ script can reach `process`/`require` directly or via constructor walking. The
   (e.g. `require('child'+'_process')`, `globalThis.process.mainModule.require`).
   The real boundary is commit-review + the path-allowlist, not the content check.
 
+### Project-sourced workflows are DEFAULT-DENY (F-01)
+
+`.dwf.ts` files that resolve to a **project** source (`.crew/workflows/`,
+`<proj>/.pi/teams/workflows/`) are refused at run time unless you explicitly opt
+in with the env var `PI_CREW_TRUST_PROJECT_DWF=1`
+(`src/runtime/goal-workflow/dynamic-workflow-runner.ts:189`). The rejected run
+emits a `dwf.trust_denied` event and throws before the script is loaded:
+
+```text
+Project dynamic workflow requires explicit trust. Set PI_CREW_TRUST_PROJECT_DWF=1
+```
+
+The gate compares against the literal string `"1"` — `true`, `yes`, or `on` all
+FAIL closed. Cloning a repo and running its workflow is otherwise arbitrary code
+execution, hence the opt-in.
+
+**Scope of the gate (honest):** only `source === "project"` is gated. **Builtin**
+workflows and **user-scope** workflows (`~/.pi/agent/extensions/pi-crew/workflows/`)
+proceed with **no** trust prompt — they run as ordinary trusted local code. The
+`PI_CREW_TRUST_PROJECT_DWF` gate is therefore not a blanket guarantee that every
+`.dwf.ts` you execute was reviewed: it protects against *repo-supplied* authoring,
+not against user-scope authoring.
+
 ## Determinism (round-13 P0-2)
 
 Dynamic workflow scripts must be **deterministic** — the runner rejects

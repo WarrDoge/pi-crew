@@ -24,7 +24,7 @@ python3 docs/ui-samples/render_png.py
 every `.png` and removes any PNG whose `.txt` no longer exists, so the two
 `ls` listings always match 1:1.
 
-Requirements: Node ≥ 22 (TS runs via `--experimental-strip-types`) and Python 3
+Requirements: Node ≥ 22.19.0 (`engines.node`; TS runs via `--experimental-strip-types`) and Python 3
 with Pillow plus `DejaVuSansMono` (Debian: `fonts-dejavu-core`).
 
 ## Surfaces

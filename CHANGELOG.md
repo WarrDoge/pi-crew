@@ -6,6 +6,57 @@
 
 - **fix(gate): RT24-F1 root-gate config/autonomy read over-block** — `rootGateBlockReason` counted the `args` subcommand carrier as a config patch key, so worker-origin `config {args:"show"}` READS were rejected as "writes user-scope config" (live-caught in the v0.11.24 real-test battery; docblock promised reads open). `args` added to the carrier-key sets for `config` and `autonomy`; unknown junk keys stay write-classified (fail-closed). Pinned: reads with carrier keys open, writes hidden behind the same key still gated (`unset`/patch keys), user config byte-untouched. Live-verified end-to-end (fresh `pi -p`, worker env): read allowed + dumps config; `unset` write gate-blocked verbatim "root-session required".
 
+## [0.11.25] — Fix-wave 6: deep-review R1-R51 close-out (security cluster, state/verification families, doc tail) (2026-10-19)
+
+Close-out wave for the 51-round / ~150-finding deep review recorded in
+`pi-crew-deep-review-2026-10-16.md` (R51 evidence-hardening: 24/24 hardest-class
+findings CONFIRMED, 0 refuted). ~100 work items across 4 milestones, each
+gated on `typecheck` + `test:critical` (124/124) with mutation-pins
+(revert-fix → test RED) on every security item.
+
+### Fixed (M1 — HIGH security cluster, 8 items)
+
+- **fix(config): R24-H1/H2 proto-pollution at the parse boundary** — drop `__proto__`/`constructor`/`prototype` keys in the shared patch/merge helper (config patch, team-settings set/unset, autonomy, i18n `addTranslations` R46-7) instead of mirroring the handler predicate. `team-settings set __proto__.polluted` → clean; `unset __proto__.toString` → rejected. 5 mutation-pins RED.
+- **fix(security): R11-F1/F2 + R11-S1 scope-carrier + workflow-* root-gate** — gate and handlers read the SAME scope source (carrier-key `scope`) with a gate-vs-handler parity matrix for every scope-carrying action; `workflow-create/update/delete/save/import/export` now route through the root-gate (previously ungated). Planted `~/.pi/agent/agents/evil.md` blocked on both paths; worker-origin `workflow-create` blocked. 5/3/1 RED.
+- **fix(prompt): R38-C1 chain-executor worker-text fencing** — worker text fenced (strip ANSI, mark provenance, escape fence) before entering the privileged session.
+- **fix(security): R43-S1 delegate role-tier containment is now TRANSITIVE** — grandchild admission = min(parent tier, requested role tier) via `roleToolPolicy` threading; a read-only parent can no longer spawn a write-capable `executor` grandchild at depth ≥ 2.
+- **fix(artifacts): R44-N1 prune containment** — `unlink` only when the resolved path is under runDir/artifacts (realpath + prefix), blocking `..`/absolute-outside deletion; regression probe (victim file survives).
+- **fix(verify): R47-1 verify-gate ground truth is host-owned** — check commands come from the frozen manifest spec, never re-derived from the worker-mutable task-cwd `package.json`; mismatch → INCONCLUSIVE → verifier spawns (fail-closed). Replay: tampered `scripts.typecheck` now FAILs the gate instead of deterministic PASS + verifier-skip.
+- **fix(config): R45-S2 run-param tier honours the sensitive-drop + kill-switch** — `params.config` can no longer set `executeWorkers:true` over an explicit user `executeWorkers:false`, nor bypass otlp/webhook/policy drops.
+
+### Fixed (M2 — family epics: one change per member-family)
+
+- **fix(prompt/ui/broker): EP1 unfenced-worker-text rollout (≥6 IDs: R4-B1, R11-F2/S3, R31-S1, R38-C1, R46-1, R2-M-B3)** — one `fenceWorkerText()` helper applied at every interpolation of worker text into privileged/orchestrator output (status/dashboard/transcript/tool-result); status-line forgery probe blocked. 5-red/2-red pins.
+- **fix(effectiveness): EP2 provenance-tagged gate-skip (R9-F3 + R47-V7, complementary halves)** — synthesized gate-skip results are tagged `synthetic` and excluded from observable-activity accounting while genuine `delegate.completed` counts; a forged gate PASS is no longer certified "effective".
+- **fix(observability): EP3 read-fault vs corruption + orphan/progress truth (R39-M1/M2/M3, R48-N1/N2/N10a)** — `EACCES`/`EMFILE` no longer quarantine a valid manifest (only SyntaxError does); zombie-sync orphan detection drops the magic-string heuristic; the reaper reclaims PID-1 orphans; transient write errors degrade instead of killing the host. 2-red/1-red/1-red pins.
+- **fix(state): EP4 event-log compaction generation bump (R32-M1 ≡ R4-N1/FS10)** — compaction increments `.gen` so readers cache-miss instead of reading a stale prefix. 3-red pin.
+
+### Fixed (M3 — MED cluster, 28 items)
+
+- **fix(trust-chain): R47-2/V3 fence-escape scrub** — failed-check output entering the bash-capable verifier prompt is now scrubbed/escaped (SEC-4 parity at the dependency seam).
+- **fix(verify): R47-3/V4 `PASS:`/`FAIL:` verdict is a real consumer** — a `FAIL:` verdict now fails the task instead of completing green; `PASS:` is required for "verified".
+- **fix(budget/broker): R43-N1..N4 delegate budget made real** — `tokensGranted` seeded at grant time (unbudgeted delegate refused), delegate spend counted broker-side (not self-reported), terminal signals propagate to grandchildren, grandchild results no longer dropped.
+- **fix(scheduler/state): R21-F1 scoped waitState clear · R22-F2 scheduler persist-in-lock · R23-F1 terminal-write clobber guard on every late path · R33-1 group fan-out dedupe by (group, recipient) · R34 one token unit across 3 call sites.**
+- **fix(lifecycle): R41-1 persistent control-request dedupe (no replay after crash/resume) · R41-4 eviction disposes + aborts with a deadline before removing the record.**
+- **fix(config): R45-F1 `updateConfig` preserves unknown on-disk keys (merge, not replace-whitelist) · R46-7 proto-safe `addTranslations` via the shared helper.**
+- **fix(core-api/robustness): R49-F1 resilient-edit reads a real tool seam (phantom keys gone) · R47-V2/V4adj dead classifier-pre-gate mount removed · R36-1/2 worktree untracked-file artifact + add-failure isolation · R37-1 timeout clamp · R14-1 chain `parallel()` partial-fail visible · R15-1 renderTick async/cached tasks read (bench 0.84→0.014 ms) · R13-1/2 init/cleanup safety · R26-1/2 `prepublishOnly` + real env-vars gate (24 env-param sites migrated) · R18-1/2/3 CI-gate fixes (lazy-import depth-1, template emits, `.js` suffix) · R19-M1 macOS reader · R12-* herdr watcher dispose + caps · R31-1 `AgentOverridesSubmenu.onApply` wired · R28-2 phantom `chain.workflow.md` steps relocated.**
+
+### Changed (M4 — LOW/doc tail, ~60 items: docs follow code)
+
+- **docs: R27 doc-drift ×8** — trust-model v1.2 (DWF gate scope, cold-verifier isolation, telemetry census), `README`/`ui-samples` Node floor `≥ 22.19.0`, README action count 55→57, `publishing.md` test counts (97/120→124) + current config path, `usage.md` `widgetPlacement` default `bottom`, `/team-cleanup` removed (unregistered), `dynamic-workflows.md` default-deny `PI_CREW_TRUST_PROJECT_DWF=1` documented, `read-only-explorer` SKILL tool-availability note (explorer has no `bash`), `CLAUDE.md` Runtime Modes table gains `auto`.
+- **docs: R45-F2/F3/F4** — `autoRepairIntervalMs` comment 60s→300s; both `EFFECTIVE_DEFAULTS` maps report `telemetry.enabled` default ON; `PI_CREW_DEBUG`/`PI_TEAMS_DEBUG` raw-truthiness documented (`=0` still enables → unset to disable) in the registry + troubleshooting.
+- **docs: R48 doctor false-negative catalogue + telemetry egress census** — anomaly-detection matrix in `failure-mode-inventory.md`, operator guidance + mux (R42) sharp edges in `troubleshooting.md`.
+- **docs: R26/R29 packaging notes** — shipped `skills/**/__pycache__`, dev tooling in the tarball, consumer-side `.githooks` referencing unpublished scripts, unbounded `pi-coding-agent` peer, committed-dist requirement.
+- **docs: R28-2/R28-3** — designer/orchestrator capability contradictions documented in-body (the frontmatter-tools de-advertise vs `WRITE_ROLES` decision is left open, see below).
+- **comments (R49-F3/F4/F6/F7, R17-minor):** phantom `pi-core/i18n/*` channels, `pi.on()` never-throws (real degradation = never-fire), crew-cleanup switch-flag vs reason-gate divergence, phantom `ctx.workspaceFolder`, `task.verifier_pre_gate` registration now landed.
+- **docs: R17 event-types CI note** — `docs/TEST_MATRIX.md` records that the LOCAL `check:event-types` is report-only while `ci.yml` runs `--enforce`.
+
+### Known residuals (declared, not hidden)
+
+- `agents/designer.md` / `agents/orchestrator.md` still advertise tool capabilities their permission class denies (`edit`/`write`/`bash` / `delegate`). Both fixes are behaviour-affecting (WRITE_ROLES entry — code — or frontmatter de-advertise — resource metadata); documented in-body pending sign-off.
+- `check:event-types` LOCAL wiring still lacks `--enforce` (one line; verified safe at HEAD).
+- `pi-coding-agent` peer remains unbounded (R49-F2).
+
 ## [0.11.24] — Deep review waves 2-4: terminal-escape injection, broker replay/overflow, state read-error wipes (2026-10-18)
 
 ### Fixed (deep review 2026-10-16/17 — Waves 2-4; report `pi-crew-deep-review-2026-10-16.md`, 128/128 cold-verified)

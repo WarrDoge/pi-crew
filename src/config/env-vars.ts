@@ -277,7 +277,7 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 	},
 	PI_CREW_DEBUG: {
 		name: "PI_CREW_DEBUG",
-		doc: "truthiness enables background debug logging (background-runner.ts:63)",
+		doc: "truthiness enables background debug logging (background-runner.ts:63); RAW truthiness — '0'/'false' still ENABLE, unset to disable (R45-F4)",
 	},
 	PI_CREW_DEBUG_BUDGET: {
 		name: "PI_CREW_DEBUG_BUDGET",
@@ -380,7 +380,7 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 	},
 	PI_TEAMS_DEBUG: {
 		name: "PI_TEAMS_DEBUG",
-		doc: "truthiness gates debug-severity internal-error logging (internal-error.ts:4)",
+		doc: "truthiness gates debug-severity internal-error logging (internal-error.ts:10); RAW truthiness — '0'/'false' still ENABLE, unset to disable (R45-F4)",
 	},
 	PI_TEAMS_MOCK_CHILD_PI: {
 		name: "PI_TEAMS_MOCK_CHILD_PI",

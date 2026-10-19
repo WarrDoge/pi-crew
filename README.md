@@ -52,7 +52,7 @@ pi install npm:pi-crew
 ```
 
 > The `npm:` prefix is required — without it, `pi install` treats the argument
-> as a local path. Requires Node ≥ 22.
+> as a local path. Requires Node ≥ 22.19.0 (`engines.node`).
 
 Local development (from a clone):
 
@@ -176,7 +176,7 @@ config only, so an untrusted repo cannot point your runs at an attacker URL.
 |-----|----------|
 | [docs/README.md](docs/README.md) | index of all docs (living + archive) |
 | [docs/usage.md](docs/usage.md) | usage patterns + config examples |
-| [docs/actions-reference.md](docs/actions-reference.md) | all 55 `team` actions with examples |
+| [docs/actions-reference.md](docs/actions-reference.md) | all 57 `team` actions with examples |
 | [docs/commands-reference.md](docs/commands-reference.md) | slash commands + `/team-api` |
 | [docs/architecture.md](docs/architecture.md) | internal architecture + run flow |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | common errors, recovery, error codes |
