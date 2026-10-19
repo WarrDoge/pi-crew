@@ -63,6 +63,7 @@
  */
 import * as fs from "node:fs";
 import type { JsonlParseFailure } from "../../utils/incremental-reader.ts";
+import { bumpGenerationUnlocked } from "./event-log-rotation.ts";
 
 export type PoisonFailure = JsonlParseFailure;
 
@@ -231,7 +232,12 @@ function persistPoisonMarkers(
 
 /** Last resort — quarantineCorruptFile pattern (manifest-io.ts:22-28): rename
  *  the events file to `<name>.corrupt-<ts>` (preserved for debugging) and drop
- *  the sidecar so a future log at the same path starts clean. Best-effort. */
+ *  the sidecar so a future log at the same path starts clean. Best-effort.
+ *  EP4/FS10 residual (wave-6 M4-R2): the rename is a file-instance change at
+ *  the SAME path, so bump the generation sidecar (shared helper from M2-4 /
+ *  event-log-rotation) — a byte-offset cursor holding the old generation then
+ *  detects the change and resets instead of resuming past the (now absent)
+ *  file's old offsets. */
 function quarantinePoisonedEventsFile(eventsPath: string): void {
 	const quarantinePath = `${eventsPath}.corrupt-${Date.now()}`;
 	try {
@@ -239,6 +245,15 @@ function quarantinePoisonedEventsFile(eventsPath: string): void {
 	} catch (error) {
 		console.error(`[poison-marker] quarantine rename failed for ${eventsPath} (file left in place):`, error);
 		return;
+	}
+	try {
+		// EP4/FS10: bump .gen AFTER a successful rename so readers see the new
+		// file instance. Upstream imported-by-us module (event-log-rotation)
+		// already imports poisonMarkerPath from here — a cycle, but both sides
+		// are hoisted function declarations, so the binding is live at call time.
+		bumpGenerationUnlocked(eventsPath);
+	} catch {
+		/* best-effort: a failed gen bump must not fail the quarantine */
 	}
 	try {
 		fs.rmSync(poisonMarkerPath(eventsPath), { force: true });

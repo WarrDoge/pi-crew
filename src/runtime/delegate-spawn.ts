@@ -14,6 +14,13 @@
  *   apply (`--tools`/`--exclude-tools` from role-tools config) — a
  *   "read-only" explorer/analyst grandchild must actually be read-only
  *   (ADR-5 §9's serialization exemption depends on it).
+ *   R43-S1 (2026-10-19 fix-wave 6): the restrictions are now TRANSITIVE —
+ *   the effective grandchild tool policy is the intersection (min) of the
+ *   PARENT task role's policy and the requested role's policy
+ *   (spawn-policy.ts effectiveGrandchildToolPolicy), applied to the
+ *   in-memory agent config below. The delegate grandchildren are spawned
+ *   from a MINIMAL AgentConfig (no agents/<role>.md frontmatter is read),
+ *   so this is the ONLY argv-level tool cut they receive.
  * - S1#1: the grandchild authenticates under its OWN subId identity
  *   (grandchild-scoped broker token pre-minted by the handler) — never the
  *   parent's task token. Identity fields (`agentId: subId`) match.
@@ -27,11 +34,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentConfig } from "../agents/agent-config.ts";
 import { type ChildPiRunResult, runChildPi } from "./child-pi/child-pi.ts";
+import { effectiveGrandchildToolPolicy } from "./spawn-policy.ts";
 
 export interface GrandchildSpawnInput {
 	cwd: string;
 	runId: string;
 	parentTaskId: string;
+	/** Parent task record role (run-locked read) — R43-S1 transitive tier
+	 *  containment: the grandchild's tool policy is min(parent, requested). */
+	parentRole?: string;
 	/** Nested-slot holder id (minted by the broker handler). */
 	subId: string;
 	prompt: string;
@@ -48,6 +59,13 @@ export interface GrandchildSpawnInput {
 	/** Grandchild-scoped broker credentials (S1#1 — NEVER the parent token). */
 	brokerSpawn?: { socketPath: string; token: string };
 	onSpawn?: (pid: number | null) => void;
+	/** M3-5 / R43-N3: owner-side cancellation. The broker's delegate abort
+	 *  registry aborts this on run terminalise / budget abort / broker stop, so
+	 *  a grandchild can no longer outlive its run by up to its own 24h deadline
+	 *  (pre-fix: fire-and-forget spawner with no abort path). Aborting produces
+	 *  `{ ok: false, cancelled: true }` — distinct from the deadline
+	 *  `timedOut` outcome so the settle path can audit which one happened. */
+	signal?: AbortSignal;
 }
 
 export interface GrandchildSpawnResult {
@@ -55,19 +73,36 @@ export interface GrandchildSpawnResult {
 	/** Fenced-ish result text (caller fences before mailbox delivery). */
 	resultText: string;
 	/** Usage in tokens for roll-up (input+output+cache summed over
-	 *  message_end events); undefined = unattributed. */
+	 *  message_end events); undefined = unattributed.
+	 *  M3-4/R44-N4: AUDIT ONLY — the budget charge is the host-side
+	 *  reservation, never this self-attested number. */
 	usageTokens?: number;
 	timedOut?: boolean;
+	/** M3-5/R43-N3: the OWNER aborted the spawn (run terminalise / budget abort
+	 *  / broker stop) — distinct from the grandchild's own deadline. */
+	cancelled?: boolean;
 }
 
-/** Minimal in-memory agent config for a delegate grandchild role. */
-function agentForRole(role: string): AgentConfig {
+/**
+ * Minimal in-memory agent config for a delegate grandchild role.
+ *
+ * R43-S1: applies the EFFECTIVE tool policy — intersection (min) of the
+ * parent task role's policy and the requested grandchild role's policy —
+ * so the pi argv `--tools`/`--exclude-tools` cut reflects the transitive
+ * floor. A read-only parent's grandchild is bash/edit/write-denied even if
+ * the requested role itself is executor-class (defense-in-depth behind the
+ * spawn-policy admission gate).
+ */
+export function grandchildAgentForRole(role: string, parentRole?: string): AgentConfig {
+	const policy = effectiveGrandchildToolPolicy(parentRole, role);
 	return {
 		name: role,
 		description: `delegate grandchild (${role})`,
 		source: "builtin",
 		filePath: "",
 		systemPrompt: "",
+		...(policy.tools !== undefined ? { tools: policy.tools } : {}),
+		...(policy.excludeTools !== undefined ? { disallowedTools: policy.excludeTools } : {}),
 	};
 }
 
@@ -118,7 +153,18 @@ export async function spawnDelegateGrandchild(input: GrandchildSpawnInput): Prom
 	const artifactsRoot = grandchildArtifactsRoot(input.cwd, input.runId, input.parentTaskId, input.subId);
 	fs.mkdirSync(artifactsRoot, { recursive: true });
 
+	// M3-5/R43-N3: two abort sources — this spawn's own deadline and the
+	// OWNER (broker abort registry). `ownerAborted` distinguishes them for the
+	// settle audit; the AbortController it drives is the single signal handed to
+	// runChildPi, so both paths kill the child the same way.
 	const abort = new AbortController();
+	let ownerAborted = false;
+	const onOwnerAbort = (): void => {
+		ownerAborted = true;
+		abort.abort(input.signal?.reason);
+	};
+	if (input.signal?.aborted) onOwnerAbort();
+	else input.signal?.addEventListener("abort", onOwnerAbort, { once: true });
 	const timer = setTimeout(() => abort.abort(), input.timeoutSec * 1000);
 	timer.unref?.();
 
@@ -133,8 +179,9 @@ export async function spawnDelegateGrandchild(input: GrandchildSpawnInput): Prom
 		const result: ChildPiRunResult = await runChildPi({
 			cwd: input.cwd,
 			task: input.prompt,
-			agent: agentForRole(input.role),
-			// S1#2: thread the role so role-based tool restrictions apply.
+			// S1#2 + R43-S1: thread the role AND the parent role so the effective
+			// (min-intersected) tool policy applies at the argv level.
+			agent: grandchildAgentForRole(input.role, input.parentRole),
 			role: input.role,
 			...(input.model !== undefined ? { model: input.model } : {}),
 			...(input.maxTurns !== undefined ? { maxTurns: input.maxTurns } : {}),
@@ -154,13 +201,19 @@ export async function spawnDelegateGrandchild(input: GrandchildSpawnInput): Prom
 		const ok = result.exitCode === 0;
 		return { ok, resultText: grandchildResultText(result), ...(usageTokens !== undefined ? { usageTokens } : {}) };
 	} catch (error) {
-		const timedOut = abort.signal.aborted;
+		const timedOut = abort.signal.aborted && !ownerAborted;
+		const cancelled = ownerAborted;
 		return {
 			ok: false,
-			timedOut,
-			resultText: timedOut ? "[delegate timed out]" : `delegate spawn failed: ${(error as Error).message}`,
+			...(cancelled ? { cancelled } : { timedOut }),
+			resultText: cancelled
+				? "[delegate cancelled: run terminated]"
+				: timedOut
+					? "[delegate timed out]"
+					: `delegate spawn failed: ${(error as Error).message}`,
 		};
 	} finally {
 		clearTimeout(timer);
+		input.signal?.removeEventListener("abort", onOwnerAbort);
 	}
 }

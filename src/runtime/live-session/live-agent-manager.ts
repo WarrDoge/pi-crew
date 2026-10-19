@@ -85,6 +85,50 @@ const liveAgents = new Map<string, LiveAgentHandle>();
 const MAX_LIVE_AGENTS = 5_000;
 
 /**
+ * R41-4 (M3-12): hard deadline for `session.abort()`.
+ *
+ * terminateLiveAgent awaited abort() with NO deadline: a session whose abort
+ * never settles (hung tool / provider holding the turn) deferred the whole
+ * teardown (dispose + registry removal + worker kill) forever, so the record
+ * stayed "running" and the process leaked. Mirrors the in-file
+ * Promise.race-with-timeout pattern in live-session-runtime.ts
+ * (bindExtensions 30s / control 30s).
+ */
+const LIVE_AGENT_ABORT_DEADLINE_MS = 10_000;
+
+async function abortLiveSessionWithDeadline(handle: LiveAgentHandle, deadlineMs: number = LIVE_AGENT_ABORT_DEADLINE_MS): Promise<void> {
+	const abort = handle.session.abort;
+	if (typeof abort !== "function") return;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const deadline = new Promise<void>((resolve) => {
+		timer = setTimeout(() => {
+			logInternalError(
+				"live-agent-manager.abort-timeout",
+				new Error(`session.abort() did not settle within ${deadlineMs}ms`),
+				`agentId=${handle.agentId}`,
+			);
+			resolve();
+		}, deadlineMs);
+		// NOTE: deliberately NOT unref'd. A ref'd timer is what lets the deadline
+		// actually fire when nothing else keeps the event loop alive (an unref'd
+		// deadline on an awaited race can never settle — the RR-021 unref
+		// incident). The wait is bounded by deadlineMs, so it cannot leak.
+	});
+	try {
+		// The abort promise is left to settle on its own after the deadline;
+		// only the RACE is bounded (teardown must not be deferred).
+		await Promise.race([Promise.resolve(abort.call(handle.session)), deadline]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
+/** @internal — test seam for the R41-4 abort deadline (see live-agent-manager-eviction tests). */
+export const __test__abortLiveSessionWithDeadline = abortLiveSessionWithDeadline;
+/** @internal — the production abort deadline, exposed so tests can assert its magnitude. */
+export const __test__LIVE_AGENT_ABORT_DEADLINE_MS = LIVE_AGENT_ABORT_DEADLINE_MS;
+
+/**
  * List all live agents for a specific workspace.
  * Only agents belonging to the given workspaceId are returned.
  */
@@ -128,17 +172,23 @@ export function registerLiveAgent(
 	// evict the oldest completed agent (already finished, so caller no
 	// longer needs it). If none exist, evict the oldest running one with
 	// a warning so memory stays bounded.
+	// R41-4 (M3-12): eviction used to be a bare map.delete — the evicted
+	// session was never aborted/disposed, and the cap could therefore drop a
+	// RUNNING record while its session kept executing (an untracked live
+	// worker). Both branches now go through evictLiveAgentForCap, which
+	// initiates abort() (bounded by a deadline) and disposes before removing
+	// the record. Also: "oldest completed" is now picked by completedAtMs, not
+	// by insertion order (Map order says nothing about completion time).
 	if (liveAgents.size >= MAX_LIVE_AGENTS) {
-		const completed = [...liveAgents.entries()].find(([, h]) => h.activity.completedAtMs > 0);
+		const completed = [...liveAgents.entries()]
+			.filter(([, h]) => h.activity.completedAtMs > 0)
+			.sort((a, b) => a[1].activity.completedAtMs - b[1].activity.completedAtMs)[0];
 		if (completed) {
-			liveAgents.delete(completed[0]);
-			invalidateSortedLiveAgents();
+			evictLiveAgentForCap(completed[0], completed[1], `liveAgents at cap ${MAX_LIVE_AGENTS}`);
 		} else {
-			const oldestKey = liveAgents.keys().next().value;
-			if (oldestKey !== undefined) {
-				logInternalError("live-agent-manager.cap", new Error(`liveAgents at cap ${MAX_LIVE_AGENTS}; evicting oldest ${oldestKey}`));
-				liveAgents.delete(oldestKey);
-				invalidateSortedLiveAgents();
+			const oldest = liveAgents.entries().next().value;
+			if (oldest) {
+				evictLiveAgentForCap(oldest[0], oldest[1], `liveAgents at cap ${MAX_LIVE_AGENTS} with no completed agent`);
 			}
 		}
 	}
@@ -260,6 +310,33 @@ function markLiveAgentHandleTerminated(handle: LiveAgentHandle): void {
 }
 
 /**
+ * R41-4 (M3-12): cap eviction = abort (deadline-bounded) + dispose + delete.
+ *
+ * Order matters: abort() is INITIATED first (it is the only channel that
+ * cancels an in-flight turn), then the handle is marked terminal, the session
+ * disposed and the record removed. registerLiveAgent is synchronous, so the
+ * abort promise itself cannot be awaited — it runs fire-and-forget through
+ * abortLiveSessionWithDeadline, so a never-settling abort cannot keep the
+ * session alive past the deadline (and never blocks the registration).
+ *
+ * The delete is identity-checked: only the exact handle being evicted is
+ * removed, so a handle re-registered for the same agentId can never be
+ * dropped by this path.
+ */
+function evictLiveAgentForCap(agentId: string, handle: LiveAgentHandle, reason: string): void {
+	logInternalError("live-agent-manager.cap", new Error(`${reason}; evicting ${agentId}`));
+	const aborting = abortLiveSessionWithDeadline(handle).catch((error) => {
+		logInternalError("live-agent-manager.cap-abort", error, `agentId=${agentId}`);
+	});
+	markLiveAgentHandleTerminated(handle);
+	safeDisposeLiveSession(handle);
+	if (liveAgents.get(agentId) === handle) liveAgents.delete(agentId);
+	invalidateSortedLiveAgents();
+	// Fire-and-forget by design — see docblock. Keeps the timer promise observed.
+	void aborting;
+}
+
+/**
  * U4 hung-tool escape hatch — drop-reference.
  *
  * Synchronous last resort for a session whose prompt() will never settle
@@ -308,11 +385,18 @@ export async function terminateLiveAgent(
 		/* non-critical */
 	}
 	try {
-		await handle.session.abort?.();
+		// R41-4 (M3-12): abort must not defer teardown — a hung abort() used to
+		// leave the handle registered as "running" forever. Bounded by
+		// LIVE_AGENT_ABORT_DEADLINE_MS; teardown runs either way (finally).
+		await abortLiveSessionWithDeadline(handle);
 	} finally {
 		markLiveAgentHandleTerminated(handle);
 		safeDisposeLiveSession(handle);
-		liveAgents.delete(handle.agentId); // Move AFTER abort completes to prevent race
+		// Move AFTER abort completes to prevent race — and identity-check the
+		// entry so a handle re-registered for the same agentId during the
+		// bounded abort is not removed (R41-4 sibling invariant to the cap
+		// eviction path).
+		if (liveAgents.get(handle.agentId) === handle) liveAgents.delete(handle.agentId);
 		invalidateSortedLiveAgents();
 		// WI-5 (SDD-4): if the session still backs a live worker process that
 		// abort()/dispose() failed to stop, signal it last so terminate cannot

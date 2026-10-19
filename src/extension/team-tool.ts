@@ -1230,6 +1230,9 @@ export async function handleTeamTool(params: TeamToolParamsValue, ctx: TeamConte
 	// actions (schedule mutations, goal start/force, user-scope config/settings/
 	// create/update, autonomy, settings theme) are reserved for the user's
 	// ROOT session. Non-root callers (workers) can still write project scope.
+	// Wave-6 (R11-F1/R11-S1): scope resolves from config.scope only, and
+	// workflow-create/save/delete are ALWAYS worker-gated (.dwf.ts ACE),
+	// import/export at user scope.
 	// Single chokepoint: every domain router dispatch passes through here.
 	const rootGateReason = rootGateBlockReason(params);
 	if (rootGateReason) {

@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { createRunPaths, loadRunManifestById } from "../state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../state/types.ts";
+import { clampTimerDelayMs } from "../utils/timer-limits.ts";
 import { isFinishedRunStatus } from "./process-status.ts";
 
 export interface RunWaitResult {
@@ -178,7 +179,14 @@ export async function waitForRun(
 	cwd: string,
 	options: { timeoutMs?: number; pollIntervalMs?: number } = {},
 ): Promise<RunWaitResult> {
-	const { timeoutMs = 300_000, pollIntervalMs = 500 } = options;
+	const defaultedTimeoutMs = options.timeoutMs ?? 300_000;
+	// R37-F1: the caller's timeout comes from `resolveRunDeadline().deadlineMs`
+	// (extension/team-tool/run.ts) and from the `wait` action. A value above
+	// 2^31-1 overflows `setTimeout` in raceRunPromise → fires in ~1 ms → the
+	// waiter rejects instantly ("waitForRun timed out after 2.5e9ms"). Clamp at
+	// THIS boundary too (defense in depth — the caller may pass anything).
+	const timeoutMs = clampTimerDelayMs(defaultedTimeoutMs) ?? 300_000;
+	const { pollIntervalMs = 500 } = options;
 	const deadline = Date.now() + timeoutMs;
 
 	// A detach requested before this waiter existed applies to it (and is

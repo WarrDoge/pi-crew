@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { logInternalError } from "../../utils/internal-error.ts";
 import { redactSecretString, redactSecrets } from "../../utils/redaction.ts";
 import { resolveRealContainedPath } from "../../utils/safe-paths.ts";
 import { atomicWriteFile } from "../atomic-write.ts";
@@ -133,6 +134,46 @@ export function isArtifactExpired(desc: ArtifactDescriptor, nowMs: number, tempo
 	return false;
 }
 
+export interface PruneExpiredArtifactsOptions {
+	now?: number;
+	temporaryTtlMs?: number;
+	/**
+	 * R44-N1 containment anchor (REQUIRED): the run's HOST-DERIVED artifacts
+	 * root (`<crewRoot>/artifacts/<runId>` — the same convention
+	 * createRunPaths derives; never trust a manifest-declared root). A
+	 * descriptor path is unlinked ONLY when its realpath resolves UNDER this
+	 * anchor. Fail-closed: any realpath/containment failure skips + warns —
+	 * never deletes. Blocks `..` traversal, absolute-outside paths, and
+	 * symlink escapes (a manifest is worker-writable state).
+	 */
+	artifactsRoot: string;
+}
+
+/**
+ * R44-N1: resolve a descriptor path for pruning under a containment anchor.
+ * Returns the REAL (symlink-resolved) path when it is contained, or a reason
+ * to skip: "enoent" (benign — already gone, silent), or "blocked" (warn).
+ * Pure filesystem check — never deletes.
+ */
+function resolvePruneTarget(
+	desc: ArtifactDescriptor,
+	realAnchor: string,
+): { realPath: string } | { skip: "enoent" | "blocked"; reason: string } {
+	let realPath: string;
+	try {
+		realPath = fs.realpathSync(desc.path);
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT") return { skip: "enoent", reason: `target gone: ${desc.path}` };
+		return { skip: "blocked", reason: `realpath failed (${code ?? "unknown"}): ${desc.path}` };
+	}
+	const relative = path.relative(realAnchor, realPath);
+	if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+		return { skip: "blocked", reason: `outside artifacts root ${realAnchor}: ${desc.path} (real: ${realPath})` };
+	}
+	return { realPath };
+}
+
 /**
  * ST-10: Prune expired artifacts by enforcing ArtifactDescriptor.retention/expiresAt.
  *
@@ -142,18 +183,63 @@ export function isArtifactExpired(desc: ArtifactDescriptor, nowMs: number, tempo
  * Unlike {@link cleanupOldArtifacts} (which is filesystem age-based on raw
  * files), this operates on artifact *metadata* from the manifest's `artifacts[]`
  * and deletes specific expired files via their descriptor `path`.
+ *
+ * R44-N1 (fix-wave 6, live-proven HIGH): descriptor paths come from
+ * WORKER-WRITABLE manifests, so every unlink is containment-checked against
+ * the required host-derived `options.artifactsRoot` anchor — realpath both
+ * sides, resolve-inside check (blocks `..`, absolute-outside, symlink
+ * escape), fail-closed skip+warn on ANY failure (never delete what cannot be
+ * verified). Unlinking the symlink-RESOLVED real path means a planted
+ * symlink inside the anchor pointing at an outside victim is BLOCKED (its
+ * realpath escapes the anchor) — the victim can never be reached.
  */
-export function pruneExpiredArtifacts(descriptors: ArtifactDescriptor[], options?: { now?: number; temporaryTtlMs?: number }): number {
-	const nowMs = options?.now ?? Date.now();
-	const temporaryTtlMs = options?.temporaryTtlMs ?? TEMPORARY_RETENTION_TTL_MS;
+export function pruneExpiredArtifacts(descriptors: ArtifactDescriptor[], options: PruneExpiredArtifactsOptions): number {
+	const nowMs = options.now ?? Date.now();
+	const temporaryTtlMs = options.temporaryTtlMs ?? TEMPORARY_RETENTION_TTL_MS;
+	// Anchor validation — fail-closed for the WHOLE batch when the anchor
+	// itself is unusable (missing, a symlink, or unresolvable): a bad anchor
+	// proves nothing, so nothing may be deleted.
+	let realAnchor: string;
+	try {
+		const lstat = fs.lstatSync(options.artifactsRoot);
+		if (lstat.isSymbolicLink()) throw new Error(`artifacts root is a symbolic link`);
+		if (!lstat.isDirectory()) throw new Error(`artifacts root is not a directory`);
+		realAnchor = fs.realpathSync(options.artifactsRoot);
+	} catch (error) {
+		logInternalError(
+			"artifact-store.prune-anchor",
+			error instanceof Error ? error : new Error(String(error)),
+			`artifactsRoot=${options.artifactsRoot} — skipping ${descriptors.length} descriptor(s), nothing deleted`,
+			"warn",
+		);
+		return 0;
+	}
 	let deleted = 0;
 	for (const desc of descriptors) {
 		if (!isArtifactExpired(desc, nowMs, temporaryTtlMs)) continue;
+		const target = resolvePruneTarget(desc, realAnchor);
+		if ("skip" in target) {
+			if (target.skip === "blocked") {
+				// Containment violation / unverifiable path — visible warn, never delete.
+				logInternalError("artifact-store.prune-contained", new Error(target.reason), `producer=${desc.producer}`, "warn");
+			}
+			// "enoent" stays silent — the file was already pruned (best-effort parity
+			// with the pre-R44 behavior of swallowing missing-file unlinks).
+			continue;
+		}
 		try {
-			fs.unlinkSync(desc.path);
+			// Unlink the VERIFIED real path (not the raw descriptor string).
+			fs.unlinkSync(target.realPath);
 			deleted++;
-		} catch {
-			// Best-effort: file may already be removed or path may be stale.
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "ENOENT") continue; // race: already gone
+			logInternalError(
+				"artifact-store.prune-unlink",
+				error instanceof Error ? error : new Error(String(error)),
+				`path=${target.realPath}`,
+				"warn",
+			);
 		}
 	}
 	return deleted;
@@ -231,4 +317,93 @@ export function writeArtifact(artifactsRoot: string, options: ArtifactWriteOptio
 		contentHash,
 		retention: options.retention ?? "run",
 	};
+}
+
+// ── Read-side integrity (M3-27 / R44-N3) ────────────────────────────────────
+//
+// Round 44 (probe r50b-s3/n3): `contentHash` was stamped at WRITE time and then
+// consumed for display (`inspect.ts`), as a cache key (`task-output-context.ts`)
+// and for the write-skip compare (`finalize-run.ts`) — but NEVER verified on a
+// read. A worker (or anything else with same-uid write access) could rewrite
+// `artifacts/<run>/results/<task>.md` between the write and the leader's read
+// and the tampered body was served with `hash-mismatch-but-still-served: true`.
+//
+// `readVerifiedArtifact` is that missing read path: it re-hashes the bytes on
+// disk and compares them to the descriptor's pinned `contentHash`. The result is
+// a discriminated union so callers must decide what a mismatch means (refuse the
+// evidence, flag it, or re-read) instead of silently consuming bytes.
+
+/** Why a verified read did not return trusted content. */
+export type ArtifactVerifyFailure = "missing" | "unreadable" | "hash-mismatch" | "no-pinned-hash" | "outside-artifacts-root";
+
+export type ArtifactReadResult =
+	| {
+			ok: true;
+			content: string;
+			/** sha256 of the bytes just read (always matches `contentHash`). */
+			contentHash: string;
+	  }
+	| {
+			ok: false;
+			reason: ArtifactVerifyFailure;
+			/** Bytes as read (absent when the file could not be read at all) —
+			 *  surfaced for diagnostics only; never treat as trusted evidence. */
+			content?: string;
+			/** sha256 of the bytes on disk, when they were read. */
+			actualHash?: string;
+			/** The descriptor's pinned hash, when it had one. */
+			expectedHash?: string;
+	  };
+
+export interface ArtifactVerifyOptions {
+	/** When supplied, the artifact path must resolve INSIDE this root
+	 *  (realpath-contained, mirrors the R44-N1 prune containment). */
+	artifactsRoot?: string;
+	/** Require a pinned `contentHash` on the descriptor. Default false: a
+	 *  descriptor written before hashes existed returns
+	 *  `{ ok: false, reason: "no-pinned-hash" }` so a caller that NEEDS
+	 *  integrity can fail closed without guessing. */
+	requirePinnedHash?: boolean;
+}
+
+/**
+ * R44-N3 read-side verification: read an artifact and verify its pinned sha256.
+ *
+ * Never throws (a missing/unreadable file is a `{ ok: false }` result — this is
+ * called from evidence paths that must degrade, not crash).
+ */
+export function readVerifiedArtifact(
+	descriptor: Pick<ArtifactDescriptor, "path" | "contentHash">,
+	options: ArtifactVerifyOptions = {},
+): ArtifactReadResult {
+	if (options.artifactsRoot !== undefined) {
+		try {
+			resolveRealContainedPath(path.resolve(options.artifactsRoot), descriptor.path);
+		} catch {
+			return {
+				ok: false,
+				reason: "outside-artifacts-root",
+				...(descriptor.contentHash ? { expectedHash: descriptor.contentHash } : {}),
+			};
+		}
+	}
+	let content: string;
+	try {
+		content = fs.readFileSync(descriptor.path, "utf-8");
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		return {
+			ok: false,
+			reason: code === "ENOENT" ? "missing" : "unreadable",
+			...(descriptor.contentHash ? { expectedHash: descriptor.contentHash } : {}),
+		};
+	}
+	const actualHash = hashContent(content);
+	const expectedHash = descriptor.contentHash;
+	if (expectedHash === undefined) {
+		if (options.requirePinnedHash === true) return { ok: false, reason: "no-pinned-hash", content, actualHash };
+		return { ok: true, content, contentHash: actualHash };
+	}
+	if (actualHash !== expectedHash) return { ok: false, reason: "hash-mismatch", content, actualHash, expectedHash };
+	return { ok: true, content, contentHash: actualHash };
 }

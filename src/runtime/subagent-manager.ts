@@ -133,6 +133,13 @@ export function removePersistedSubagentRecord(cwd: string, id: string): boolean 
 }
 
 /**
+ * F12-N1: how many terminal records the in-memory manager retains. Terminal
+ * records carry the full prompt + result text; only the most recent ones are
+ * kept (older ones remain readable from disk via readPersistedSubagentRecord).
+ */
+export const MAX_TERMINAL_SUBAGENT_RECORDS = 50;
+
+/**
  * Predicate: should this record's persisted file be deleted on terminal status?
  * Only abnormal terminations (cancelled / stopped / terminated-flag) are wiped.
  * Successful runs (`completed`) and agent errors (`failed`, `error`) keep their audit trail.
@@ -442,6 +449,7 @@ export class SubagentManager {
 					if (shouldDeleteOnTerminalStatus(record)) {
 						removePersistedSubagentRecord(options.cwd, record.id);
 					}
+					this.evictTerminalRecords();
 					this.onComplete?.(record);
 				}
 				this.drainQueue();
@@ -472,6 +480,7 @@ export class SubagentManager {
 		// the next widget/dashboard tick.
 		if (cwd) savePersistedSubagentRecord(cwd, record);
 		if (cwd) removePersistedSubagentRecord(cwd, record.id);
+		this.evictTerminalRecords();
 	}
 
 	private createRunSignal(id: string, signal?: AbortSignal): AbortSignal {
@@ -493,6 +502,26 @@ export class SubagentManager {
 		this.controllerCleanup.get(id)?.();
 		this.controllerCleanup.delete(id);
 		this.controllers.delete(id);
+	}
+
+	/**
+	 * F12-N1: bound the in-memory terminal-record history. Insertion order (spawn
+	 * order) decides which entries go first, so the newest agents stay inspectable
+	 * while the lifetime of the process no longer accumulates prompt/result text.
+	 */
+	private evictTerminalRecords(): void {
+		const terminal = [...this.records.values()].filter(
+			(record) => record.status !== "running" && record.status !== "queued" && record.status !== "blocked",
+		);
+		const excess = terminal.length - MAX_TERMINAL_SUBAGENT_RECORDS;
+		if (excess <= 0) return;
+		for (const record of terminal.slice(0, excess)) {
+			this.records.delete(record.id);
+			this.cwdByRecord.delete(record.id);
+			this.controllerCleanup.get(record.id)?.();
+			this.controllerCleanup.delete(record.id);
+			this.controllers.delete(record.id);
+		}
 	}
 
 	private drainQueue(): void {

@@ -30,6 +30,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type Static, Type } from "@sinclair/typebox";
+import { getCrewEnv } from "../config/env-vars.ts";
 import { defineTool, type ExtensionAPI, type ToolDefinition } from "../extension/pi-api.ts";
 import { EngineManager, type ExecuteResult } from "../runtime/scratchpad/engine.ts";
 import { appendEventBuffered, appendEventFireAndForget } from "../state/event-log/event-log.ts";
@@ -77,8 +78,8 @@ function emitScratchpadMetric(
 	data: Record<string, unknown>,
 	appendEvent: typeof appendEventFireAndForget = appendEventFireAndForget,
 ): void {
-	const eventsPath = env[PI_CREW_EVENTS_PATH_ENV];
-	const runId = env[PI_CREW_RUN_ID_ENV];
+	const eventsPath = getCrewEnv(PI_CREW_EVENTS_PATH_ENV, env);
+	const runId = getCrewEnv(PI_CREW_RUN_ID_ENV, env);
 	if (!eventsPath || !runId) return;
 	// Fire-and-forget semantics (H1): a throwing writer (sync or async) must
 	// never break the cell. The real appendEventFireAndForget already catches
@@ -87,7 +88,7 @@ function emitScratchpadMetric(
 		appendEventBuffered(eventsPath, {
 			type,
 			runId,
-			taskId: env[PI_CREW_TASK_ID_ENV],
+			taskId: getCrewEnv(PI_CREW_TASK_ID_ENV, env),
 			data,
 		}).catch((e) => logInternalError("scratchpad_lifecycle.buffered", e, `type=${type}`));
 	} catch {
@@ -224,10 +225,10 @@ export interface SnapshotEnvValidation {
  * write to a guessed location.
  */
 export function validateSnapshotEnv(env: NodeJS.ProcessEnv = process.env): SnapshotEnvValidation {
-	const taskId = env[PI_CREW_TASK_ID_ENV];
-	const artifactsRoot = env[PI_CREW_ARTIFACTS_ROOT_ENV];
-	const snapshotPath = env[PI_CREW_SCRATCHPAD_SNAPSHOT_ENV];
-	const attempt = env[PI_CREW_ATTEMPT_ENV] ?? "0";
+	const taskId = getCrewEnv(PI_CREW_TASK_ID_ENV, env);
+	const artifactsRoot = getCrewEnv(PI_CREW_ARTIFACTS_ROOT_ENV, env);
+	const snapshotPath = getCrewEnv(PI_CREW_SCRATCHPAD_SNAPSHOT_ENV, env);
+	const attempt = getCrewEnv(PI_CREW_ATTEMPT_ENV, env) ?? "0";
 
 	if (!taskId) return { valid: false, reason: `missing ${PI_CREW_TASK_ID_ENV}`, attempt };
 	if (!artifactsRoot) return { valid: false, reason: `missing ${PI_CREW_ARTIFACTS_ROOT_ENV}`, attempt };
@@ -277,8 +278,8 @@ export interface RestoreEnvValidation {
  * no restore, empty namespace, execute continues, message never leaks paths.
  */
 export function validateRestoreEnv(env: NodeJS.ProcessEnv = process.env, restorePath: string): RestoreEnvValidation {
-	const taskId = env[PI_CREW_TASK_ID_ENV];
-	const artifactsRoot = env[PI_CREW_ARTIFACTS_ROOT_ENV];
+	const taskId = getCrewEnv(PI_CREW_TASK_ID_ENV, env);
+	const artifactsRoot = getCrewEnv(PI_CREW_ARTIFACTS_ROOT_ENV, env);
 	if (!taskId) return { valid: false, reason: `missing ${PI_CREW_TASK_ID_ENV}` };
 	if (!artifactsRoot) return { valid: false, reason: `missing ${PI_CREW_ARTIFACTS_ROOT_ENV}` };
 	try {
@@ -299,7 +300,7 @@ export function validateRestoreEnv(env: NodeJS.ProcessEnv = process.env, restore
 		if (st.isSymbolicLink() || !st.isFile()) return { valid: false, reason: "restore-path-not-regular-file" };
 		if (st.size > SNAPSHOT_MAX_BYTES) return { valid: false, reason: "restore-path-over-cap" };
 		// (4) mtime pin (swap-detection hint — forgeable, never authn).
-		const pinned = env[PI_CREW_SCRATCHPAD_RESTORE_MTIME_ENV];
+		const pinned = getCrewEnv(PI_CREW_SCRATCHPAD_RESTORE_MTIME_ENV, env);
 		if (pinned) {
 			const pinnedMs = Number.parseFloat(pinned);
 			if (Number.isFinite(pinnedMs) && Math.abs(st.mtimeMs - pinnedMs) > RESTORE_MTIME_TOLERANCE_MS) {
@@ -483,7 +484,7 @@ export function createExecuteTool(engine: EngineManager, deps: Partial<Scratchpa
 		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
 			const env = deps.env ?? process.env;
 			// 1. Dormant check (lớp 2 — defense in depth behind the registration gate).
-			if (env[PI_CREW_SCRATCHPAD_ENV] !== "1") {
+			if (getCrewEnv(PI_CREW_SCRATCHPAD_ENV, env) !== "1") {
 				throw new Error("scratchpad is dormant");
 			}
 			// 2. F12: terminal shutdown state — a distinct system error, not "wedged".
@@ -650,7 +651,7 @@ export function registerScratchpadLifecycle(pi: ExtensionAPI, options: Scratchpa
 		// Reset first: each register is a fresh worker session (a session reload
 		// re-arms restore via the env — NIT-2a, module-scope is intentional).
 		const env = options.env ?? process.env;
-		const restorePath = env[PI_CREW_SCRATCHPAD_RESTORE_ENV];
+		const restorePath = getCrewEnv(PI_CREW_SCRATCHPAD_RESTORE_ENV, env);
 		if (restorePath) {
 			const m = restorePath.match(/\.attempt-(\d+)\.snapshot\.json$/);
 			restorePending = { path: restorePath, attempt: m ? Number.parseInt(m[1], 10) : 0 };
@@ -676,5 +677,5 @@ export function registerScratchpadLifecycle(pi: ExtensionAPI, options: Scratchpa
  * the single source of truth per F15.
  */
 export function shouldRegisterScratchpadTool(env: NodeJS.ProcessEnv = process.env): boolean {
-	return env[PI_CREW_SCRATCHPAD_ENV] === "1" && env[PI_CREW_KIND_ENV] === "subagent";
+	return getCrewEnv(PI_CREW_SCRATCHPAD_ENV, env) === "1" && getCrewEnv(PI_CREW_KIND_ENV, env) === "subagent";
 }

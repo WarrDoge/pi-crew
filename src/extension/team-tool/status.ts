@@ -3,15 +3,17 @@ import { applyAttentionState, formatActivityAge, resolveCrewControlConfig } from
 import { extractCommandTrace } from "../../runtime/command-trace.ts";
 import { readCrewAgents } from "../../runtime/crew-agent-records.ts";
 import { deadletterStatusLine } from "../../runtime/deadletter.ts";
-import { evaluateRunEffectiveness } from "../../runtime/effectiveness.ts";
+import { delegateCompletedTaskIdsFromEvents, evaluateRunEffectiveness } from "../../runtime/effectiveness.ts";
 import { computePhaseProgress } from "../../runtime/phase-progress.ts";
 import { checkProcessLiveness, isActiveRunStatus } from "../../runtime/process-status.ts";
+import { stripWorkerEscapes } from "../../runtime/sanitize/worker-text.ts";
 import { formatTaskGraphLines, waitingReason } from "../../runtime/task-display.ts";
 import { verifyTaskCompletion } from "../../runtime/verification/completion-guard.ts";
 import type { TeamToolParamsValue } from "../../schema/team-tool-schema.ts";
 import { withRunLockSync } from "../../state/coordination/locks.ts";
 import { readDeliveryState, readMailbox } from "../../state/coordination/mailbox.ts";
 import { appendEvent, readEventsCursor } from "../../state/event-log/event-log.ts";
+import { getTasksCorruptionReport } from "../../state/stores/manifest-io.ts";
 import { loadRunManifestById, saveRunTasks, updateRunStatus } from "../../state/stores/state-store.ts";
 import { aggregateUsage, formatCost, formatUsage } from "../../state/usage.ts";
 import { formatDuration } from "../../ui/format-helpers.ts";
@@ -19,6 +21,7 @@ import { goalAchievedStatusLabel } from "../../ui/goal-flag.ts";
 import { locateRunCwd } from "../team-tool.ts";
 import type { PiTeamsToolResult } from "../tool-result.ts";
 import { result, type TeamContext } from "./context.ts";
+import { stuckTasksFromRecords } from "./health-monitor.ts";
 import { paramRequired } from "./param-error.ts";
 import { RUN_NOT_FOUND_HINT } from "./run-not-found.ts";
 
@@ -106,6 +109,31 @@ export function transitionStaleAsyncUnderLock(
 		transitioned = { manifest: failed, tasks: freshTasks };
 	});
 	return transitioned;
+}
+
+/**
+ * R46-1 / EP1 (unfenced-worker-text rollout): worker-authored values reach the
+ * orchestrator-facing status text from several places — child stderr flows
+ * VERBATIM into `task.error` / `failureCause` / `agent.error`
+ * (child-executor.ts attemptErrorFor), tool names/activity states arrive from
+ * worker JSON events, and event/attention messages are appended by crew code
+ * that embeds worker text. Interpolated raw, any of them can forge a fresh
+ * column-0 status row (e.g. a fake `✓ verifier [completed]` line, fabricated
+ * task/agent rows or `Progress: 100%`) and smuggle terminal escapes
+ * (ANSI color, OSC-52 clipboard writes) into the LEADER's status view.
+ *
+ * Shape: these are inline `key=value` fields inside dense single-line rows, so
+ * a multi-line provenance fence would break the row grammar. Route each value
+ * through the SHARED strip cascade (`stripWorkerEscapes`, not reimplemented)
+ * and collapse newlines/CRs to a single space — the R46-1 "newline-collapse"
+ * fix (the finding prescribes "newline-collapse or structural quoting in both
+ * status builders"). The stripped value can no longer start a new line, so
+ * forged rows are structurally impossible and escapes never reach the session.
+ */
+function sanitizeStatusField(value: string): string {
+	return stripWorkerEscapes(value)
+		.replace(/[\n\r]+/g, " ")
+		.trim();
 }
 
 export function handleStatus(params: TeamToolParamsValue, ctx: TeamContext): PiTeamsToolResult {
@@ -225,21 +253,43 @@ export function handleStatus(params: TeamToolParamsValue, ctx: TeamContext): PiT
 		tasks,
 		executeWorkers: manifest.runtimeResolution?.kind !== "scaffold",
 		runtimeConfig: cfg.runtime,
+		// EP2 parity rider (wave-6 M4-R2): finalize-run passes the delegate.completed
+		// id set so a grandchild delegate task (real output delivered via the broker
+		// mailbox, no usage/transcript of its own) is NOT misread as no-observed-work.
+		// status omitted it, so the SAME run rendered a phantom `noObservedWork` row
+		// here while finalize counted it as work. `allEvents` is the bounded
+		// cursor/tail read above (not the full readEvents call finalize uses) —
+		// best-effort parity: a delegate.completed event that has already scrolled
+		// out of the tail window is not recoverable here, matching the reader's
+		// bounded contract.
+		delegateCompleted: delegateCompletedTaskIdsFromEvents(allEvents),
 	});
 	const noObservedWorkTasks = effectiveness.noObservedWorkTaskIds
 		.map((id) => tasks.find((task) => task.id === id))
 		.filter((task): task is (typeof tasks)[number] => task !== undefined);
-	const attentionTasks = effectiveness.needsAttentionTaskIds
+	// R48-N1 (fix-wave 6, EP3): fold an EXTERNAL liveness signal into the attention
+	// surface. `effectiveness.needsAttentionTaskIds` is worker-SELF-REPORTED
+	// (activityState === "needs_attention"); a dead sync host reports nothing and
+	// the run renders "running / needsAttention=none / 0%" forever. Consult the
+	// timestamp-based stuck-task signal (heartbeat/activity age) for active runs so
+	// an unresponsive/frozen task is surfaced even with zero self-report.
+	const externallyStuckTasks = isActiveRunStatus(manifest.status) ? stuckTasksFromRecords(tasks, manifest.runId, Date.now()) : [];
+	const externallyStuckIds = new Set(externallyStuckTasks.map((stuck) => stuck.taskId));
+	const needsAttentionIds = [...new Set([...effectiveness.needsAttentionTaskIds, ...externallyStuckIds])];
+	const attentionTasks = needsAttentionIds
 		.map((id) => tasks.find((task) => task.id === id))
 		.filter((task): task is (typeof tasks)[number] => task !== undefined);
 	const activeAgents = crewAgents.filter((agent) => agent.status === "running");
 	const completedAgents = crewAgents.filter((agent) => agent.status !== "running");
 	const waitingTasks = tasks.filter((task) => task.status === "queued" || task.status === "waiting");
 	const agentLine = (agent: (typeof crewAgents)[number]): string =>
-		`- ${agent.id} [${agent.status}] ${agent.role} -> ${agent.agent} runtime=${agent.runtime}${agent.model ? ` model=${agent.model}` : ""}${agent.usage ? ` usage=${formatUsage(agent.usage)}` : ""}${agent.usage?.cost ? ` cost=${formatCost(agent.usage.cost)}` : ""}${agent.progress?.activityState ? ` activityState=${agent.progress.activityState}` : ""}${formatActivityAge(agent) ? ` activity=${formatActivityAge(agent)}` : ""}${agent.progress?.currentTool ? ` tool=${agent.progress.currentTool}` : ""}${agent.toolUses ? ` tools=${agent.toolUses}` : ""}${!agent.usage && agent.progress?.tokens ? ` tokens=${agent.progress.tokens}` : ""}${agent.progress?.turns ? ` turns=${agent.progress.turns}` : ""}${agent.jsonEvents !== undefined ? ` jsonEvents=${agent.jsonEvents}` : ""}${agent.outputPath ? ` output=${agent.outputPath}` : ""}${agent.transcriptPath ? ` transcript=${agent.transcriptPath}` : ""}${agent.statusPath ? ` status=${agent.statusPath}` : ""}${agent.error ? ` error=${agent.error}` : ""}`;
+		`- ${agent.id} [${agent.status}] ${agent.role} -> ${agent.agent} runtime=${agent.runtime}${agent.model ? ` model=${agent.model}` : ""}${agent.usage ? ` usage=${formatUsage(agent.usage)}` : ""}${agent.usage?.cost ? ` cost=${formatCost(agent.usage.cost)}` : ""}${agent.progress?.activityState ? ` activityState=${sanitizeStatusField(agent.progress.activityState)}` : ""}${formatActivityAge(agent) ? ` activity=${formatActivityAge(agent)}` : ""}${agent.progress?.currentTool ? ` tool=${sanitizeStatusField(agent.progress.currentTool)}` : ""}${agent.toolUses ? ` tools=${agent.toolUses}` : ""}${!agent.usage && agent.progress?.tokens ? ` tokens=${agent.progress.tokens}` : ""}${agent.progress?.turns ? ` turns=${agent.progress.turns}` : ""}${agent.jsonEvents !== undefined ? ` jsonEvents=${agent.jsonEvents}` : ""}${agent.outputPath ? ` output=${agent.outputPath}` : ""}${agent.transcriptPath ? ` transcript=${agent.transcriptPath}` : ""}${agent.statusPath ? ` status=${agent.statusPath}` : ""}${agent.error ? ` error=${sanitizeStatusField(agent.error)}` : ""}`;
 	// G19 (W-E Phase 1): surface the goal-achievement verdict on terminal runs —
 	// ⚠ false-green warning line; silent while running, when achieved, or when
 	// the run predates the assessment (goalAchieved undefined).
+	// R39-M2 (fix-wave 6, EP3): if the tasks load above recovered from a corrupt
+	// tasks.json, surface the drop instead of a clean "completed 100%".
+	const corruptionReport = getTasksCorruptionReport(manifest.runId);
 	const goalLine = goalAchievedStatusLabel(manifest);
 	const lines = [
 		`Run: ${manifest.runId}`,
@@ -268,10 +318,10 @@ export function handleStatus(params: TeamToolParamsValue, ctx: TeamContext): PiT
 		...(tasks.length
 			? tasks.map(
 					(task) =>
-						`- ${task.id} [${task.status}] ${task.role} -> ${task.agent}${task.taskPacket ? ` scope=${task.taskPacket.scope}` : ""}${task.verification ? ` green=${task.verification.observedGreenLevel}/${task.verification.requiredGreenLevel}` : ""}${task.modelAttempts?.length ? ` attempts=${task.modelAttempts.length}` : ""}${task.modelRouting ? ` modelRouting=${task.modelRouting.requested ? `${task.modelRouting.requested}->` : ""}${task.modelRouting.resolved}${task.modelRouting.usedAttempt ? ` attempt=${task.modelRouting.usedAttempt + 1}` : ""}` : ""}${task.agentProgress?.activityState ? ` activityState=${task.agentProgress.activityState}` : ""}${(() => {
+						`- ${task.id} [${task.status}] ${task.role} -> ${task.agent}${task.taskPacket ? ` scope=${task.taskPacket.scope}` : ""}${task.verification ? ` green=${task.verification.observedGreenLevel}/${task.verification.requiredGreenLevel}` : ""}${task.modelAttempts?.length ? ` attempts=${task.modelAttempts.length}` : ""}${task.modelRouting ? ` modelRouting=${task.modelRouting.requested ? `${task.modelRouting.requested}->` : ""}${task.modelRouting.resolved}${task.modelRouting.usedAttempt ? ` attempt=${task.modelRouting.usedAttempt + 1}` : ""}` : ""}${task.agentProgress?.activityState ? ` activityState=${sanitizeStatusField(task.agentProgress.activityState)}` : ""}${(() => {
 							const t = extractCommandTrace(task.agentProgress?.recentTools);
 							return t.summary ? ` ${t.summary}` : "";
-						})()}${attentionByTask.get(task.id)?.data?.reason ? ` attention=${String(attentionByTask.get(task.id)?.data?.reason)}` : ""}${task.jsonEvents !== undefined ? ` jsonEvents=${task.jsonEvents}` : ""}${task.usage ? ` usage=${JSON.stringify(task.usage)}` : ""}${task.resultArtifact ? ` result=${task.resultArtifact.path}` : ""}${task.transcriptArtifact ? ` transcript=${task.transcriptArtifact.path}` : ""}${task.worktree ? ` worktree=${task.worktree.path}` : ""}${task.error ? ` error=${task.error}` : ""}${task.failureCause ? ` failureCause=${task.failureCause}` : ""}`,
+						})()}${attentionByTask.get(task.id)?.data?.reason ? ` attention=${sanitizeStatusField(String(attentionByTask.get(task.id)?.data?.reason))}` : ""}${task.jsonEvents !== undefined ? ` jsonEvents=${task.jsonEvents}` : ""}${task.usage ? ` usage=${JSON.stringify(task.usage)}` : ""}${task.resultArtifact ? ` result=${task.resultArtifact.path}` : ""}${task.transcriptArtifact ? ` transcript=${task.transcriptArtifact.path}` : ""}${task.worktree ? ` worktree=${task.worktree.path}` : ""}${task.error ? ` error=${sanitizeStatusField(task.error)}` : ""}${task.failureCause ? ` failureCause=${sanitizeStatusField(task.failureCause)}` : ""}`,
 				)
 			: ["- (none)"]),
 		`Task counts: ${[...counts.entries()].map(([status, count]) => `${status}=${count}`).join(", ") || "none"}`,
@@ -281,7 +331,13 @@ export function handleStatus(params: TeamToolParamsValue, ctx: TeamContext): PiT
 		`- observable=${effectiveness.observable}/${Math.max(1, effectiveness.completed)} completed tasks`,
 		`- workerExecution=${effectiveness.workerExecution} guard=${effectiveness.guardMode} severity=${effectiveness.severity}`,
 		`- noObservedWork=${effectiveness.noObservedWorkTaskIds.length ? effectiveness.noObservedWorkTaskIds.join(",") : "none"}`,
-		`- needsAttention=${effectiveness.needsAttentionTaskIds.length ? effectiveness.needsAttentionTaskIds.join(",") : "none"}`,
+		`- needsAttention=${needsAttentionIds.length ? needsAttentionIds.join(",") : "none"}`,
+		`- unresponsive=${externallyStuckTasks.length ? externallyStuckTasks.map((stuck) => `${stuck.taskId}(${stuck.detail})`).join(",") : "none"}`,
+		...(corruptionReport
+			? [
+					`⚠ State recovery: tasks.json was corrupt; reconstructed ${corruptionReport.reconstructedCount} task(s) from events${corruptionReport.droppedIds.length ? `, ${corruptionReport.droppedIds.length} DROPPED (${corruptionReport.droppedIds.join(",")})` : ""} — run is DEGRADED.`,
+				]
+			: []),
 		"Completion verification",
 		...(tasks.filter((t) => t.status === "completed").length
 			? tasks
@@ -316,7 +372,7 @@ export function handleStatus(params: TeamToolParamsValue, ctx: TeamContext): PiT
 		...(events.length
 			? events.map(
 					(event) =>
-						`- ${event.time} ${event.type}${event.taskId ? ` ${event.taskId}` : ""}${event.message ? `: ${event.message}` : ""}`,
+						`- ${event.time} ${event.type}${event.taskId ? ` ${event.taskId}` : ""}${event.message ? `: ${sanitizeStatusField(event.message)}` : ""}`,
 				)
 			: ["- (none)"]),
 	];
@@ -382,7 +438,7 @@ export function buildCompactStatus(
 	if (failedOrAttention.length > 0) {
 		lines.push("Issues:");
 		for (const t of failedOrAttention) {
-			lines.push(`- ${t.id} [${t.status}] ${t.role}: ${t.error ?? "(no error detail)"}`);
+			lines.push(`- ${t.id} [${t.status}] ${t.role}: ${t.error ? sanitizeStatusField(t.error) : "(no error detail)"}`);
 		}
 	}
 	lines.push("Tip: pass details=true for full output (task graph, agents, effectiveness, events).");

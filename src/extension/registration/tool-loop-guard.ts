@@ -215,7 +215,9 @@ export function createLoopGuardState() {
 /**
  * Install the loop guard on a Pi instance. Both hooks are best-effort:
  * older Pi versions without these events are tolerated (same pattern as
- * installResourcesDiscoverHook).
+ * installResourcesDiscoverHook). R49-F4: `pi.on()` never THROWS on an unknown
+ * event name (pi 0.77/1.0.4 verified) — so the try/catch below is defensive
+ * only, and the real older-host degradation is a NEVER-FIRING hook.
  */
 export function installToolLoopGuard(pi: ExtensionAPI): void {
 	const state = createLoopGuardState();
@@ -228,7 +230,7 @@ export function installToolLoopGuard(pi: ExtensionAPI): void {
 			return undefined;
 		});
 	} catch {
-		/* older Pi without tool_call events */
+		/* R49-F4: defensive only — pi.on() does not throw on unknown events; the hook simply never fires */
 	}
 	try {
 		pi.on("tool_result", (event: { toolName: string; input?: unknown; content?: unknown }) => {
@@ -238,6 +240,6 @@ export function installToolLoopGuard(pi: ExtensionAPI): void {
 			return { content: [...existing, ...appends] };
 		});
 	} catch {
-		/* older Pi without tool_result events */
+		/* R49-F4: defensive only — pi.on() does not throw on unknown events; the hook simply never fires */
 	}
 }

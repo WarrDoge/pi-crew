@@ -137,10 +137,12 @@ describe("resolveToolPolicy — denylist is additive (merged)", () => {
 			name: "custom",
 			disallowedTools: undefined,
 		});
-		const policy = resolveToolPolicy(agent, "writer"); // writer excludes bash,web,ask_question
+		const policy = resolveToolPolicy(agent, "writer"); // writer excludes bash,web (ask_question was a dead entry — no such host tool; removed 2026-10-19 fix-wave 6)
 		assert.ok(policy.excludeTools?.includes("bash"));
 		assert.ok(policy.excludeTools?.includes("web"));
-		assert.ok(policy.excludeTools?.includes("ask_question"));
+		// dead-entry regression pin: the nonexistent `ask_question` name must not
+		// reappear in any role's exclude list (the live tool is `ask`).
+		assert.ok(!policy.excludeTools?.includes("ask_question"));
 	});
 
 	it("no denylist anywhere → excludeTools undefined", () => {

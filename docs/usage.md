@@ -42,7 +42,7 @@ Supported fields:
     "requirePlanApproval": false
   },
   "ui": {
-    "widgetPlacement": "aboveEditor",
+    "widgetPlacement": "bottom",
     "widgetMaxLines": 8,
     "powerbar": true,
     "dashboardPlacement": "right",
@@ -239,6 +239,12 @@ Dirty worktrees are preserved unless `force: true` is provided.
 
 ## Slash commands
 
+> **`/team-cleanup <runId>` does not exist** (R27-D1). The registered commands
+> are `/team-manager` (and its alias `/team-cleanup-menu`) — runId-targeted
+> cleanup is the `cleanup` action on the `team` tool (`team action='cleanup'
+> runId=…`). Only `team-cleanup-menu` is registered
+> (`src/extension/registration/commands/manage.ts:99-107`).
+
 ```text
 /teams
 /team-run default "Implement login with tests"
@@ -251,7 +257,6 @@ Dirty worktrees are preserved unless `force: true` is provided.
 /team-events team_...
 /team-artifacts team_...
 /team-worktrees team_...
-/team-cleanup team_...
 /team-forget team_... --confirm
 /team-export team_...
 /team-import .crew/artifacts/team_.../export/run-export.json   # or .pi/teams/artifacts/... on legacy layout

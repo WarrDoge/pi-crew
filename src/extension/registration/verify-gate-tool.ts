@@ -33,7 +33,6 @@ import { type Static, Type } from "@sinclair/typebox";
 import type { MetricRegistry } from "../../observability/metric-registry.ts";
 import {
 	DEFAULT_VERIFY_GATE_TIMEOUT_MS,
-	defaultVerifyGateChecks,
 	renderVerifyGateContext,
 	runVerifyGate,
 	type VerifyGateCheck,
@@ -59,7 +58,7 @@ const VerifyGateToolParams = Type.Object({
 			}),
 			{
 				description:
-					"Explicit checks. Defaults to the repo preset: package.json scripts 'typecheck' + 'test:critical' when present. Add grep evidence lines here (e.g. `grep -c \"<marker>\" dist/index.mjs`).",
+					'Explicit checks — REQUIRED for a meaningful verdict (M1-7: the gate never derives commands from a worker-mutable package.json). Without checks the verdict is INCONCLUSIVE (escalate). Add grep evidence lines here (e.g. `grep -c "<marker>" dist/index.mjs`).',
 			},
 		),
 	),
@@ -152,7 +151,12 @@ export function registerVerifyGateTool(pi: ExtensionAPI, deps: VerifyGateToolDep
 		}),
 		async execute(_id, params: Static<typeof VerifyGateToolParams>, signal, _onUpdate, ctx) {
 			const cwd = params.cwd && params.cwd.trim().length > 0 ? params.cwd : ctx.cwd;
-			const checks: VerifyGateCheck[] = params.checks ?? defaultVerifyGateChecks(cwd);
+			// M1-7 (R47-1): NO package.json fallback — the task/session cwd is
+			// worker-mutable, so deriving checks from it at call time let a worker
+			// grade its own work (tampered `scripts.typecheck: "exit 0"` ⇒ PASS).
+			// Callers must pass explicit checks; without them the gate is
+			// INCONCLUSIVE (escalate — never a PASS-shaped verdict).
+			const checks: VerifyGateCheck[] = params.checks ?? [];
 			// Nested-limit guards — validate BEFORE any executeTool call.
 			if (checks.length > VERIFY_GATE_TOOL_MAX_CHECKS) {
 				return {

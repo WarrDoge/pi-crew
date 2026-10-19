@@ -341,9 +341,9 @@ describe("pollWorkerInbox", () => {
 				"no false 'delivered' record for the failed send (sender-side row stays 'queued')",
 			);
 			assert.equal(
-				deliveryAfterFailure.requestIds?.["inbox:run-1:task-2:r5-1"],
+				deliveryAfterFailure.requestIds?.["inbox:task-2:run-1:task-2:r5-1"],
 				undefined,
-				"requestId index untouched for the failed send",
+				"requestId index untouched for the failed send (recipient-scoped key, M3-9/R33-1)",
 			);
 			// Next tick: the row is re-picked (seen released, durable record absent).
 			const retry = pollWorkerInbox(pickup);

@@ -481,29 +481,42 @@ test("(bug-44) executor drops a 'chain' workflow override and falls back to defa
 test("(bug-44) handleRun with workflow='chain' (no chain param) falls back to team default workflow", async () => {
 	const cwd = makeTempCwd();
 	const ctx: TeamContext = { cwd };
-	// Use config.executeWorkers=false so the run resolves to the blocked/scaffold
-	// path (fast, no subagent spawn). The point is that it must NOT fail fast with
-	// a workflow-validation error about the `chain` workflow — it must resolve to
-	// the team's default workflow (fast-fix) instead, as seen in the run manifest.
-	const res = await handleRun(
-		{
-			action: "run",
-			goal: "verify bug-44 fallback",
-			team: "fast-fix",
-			workflow: "chain",
-			config: { executeWorkers: false },
-		},
-		ctx,
-	);
-	const text = textFromToolResult(res);
-	assert.doesNotMatch(
-		text,
-		/Workflow 'chain' is not valid for team|references unknown team role/,
-		"must not fail fast with the chain-workflow validation error",
-	);
-	if (res.details.runId) {
-		const loaded = loadRunManifestById(cwd, res.details.runId);
-		assert.equal(loaded?.manifest.workflow, "fast-fix", "manifest must record the team default workflow");
+	// M1-8 (R45-S2): run params can no longer carry executeWorkers — the
+	// sensitive-marked key is dropped from the run-param tier by design (the
+	// kill-switch is user-config-only), so the old config:{executeWorkers:false}
+	// no longer suppresses the spawn. Use the mock child-pi seam instead: the
+	// run stays fast and spawn-free, and the point of the test (workflow='chain'
+	// resolves to the team default workflow instead of failing validation) is
+	// unaffected.
+	const prevMock = process.env.PI_TEAMS_MOCK_CHILD_PI;
+	const prevAllow = process.env.PI_CREW_ALLOW_MOCK;
+	process.env.PI_TEAMS_MOCK_CHILD_PI = "json-success";
+	process.env.PI_CREW_ALLOW_MOCK = "1";
+	try {
+		const res = await handleRun(
+			{
+				action: "run",
+				goal: "verify bug-44 fallback",
+				team: "fast-fix",
+				workflow: "chain",
+			},
+			ctx,
+		);
+		const text = textFromToolResult(res);
+		assert.doesNotMatch(
+			text,
+			/Workflow 'chain' is not valid for team|references unknown team role/,
+			"must not fail fast with the chain-workflow validation error",
+		);
+		if (res.details.runId) {
+			const loaded = loadRunManifestById(cwd, res.details.runId);
+			assert.equal(loaded?.manifest.workflow, "fast-fix", "manifest must record the team default workflow");
+		}
+	} finally {
+		if (prevMock === undefined) delete process.env.PI_TEAMS_MOCK_CHILD_PI;
+		else process.env.PI_TEAMS_MOCK_CHILD_PI = prevMock;
+		if (prevAllow === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
+		else process.env.PI_CREW_ALLOW_MOCK = prevAllow;
 	}
 });
 

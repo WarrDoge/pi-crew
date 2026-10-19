@@ -300,7 +300,12 @@ test("happy path: immediate ref, fenced mailbox delivery, budget reserve→roll-
 			assert.ok(events.some((e) => e.type === "delegate.completed"));
 			const rolled = events.find((e) => e.type === "delegate.rolled_up");
 			assert.ok(rolled, "roll-up event");
-			assert.equal(rolled!.data?.actualTokens, 300);
+			// M3-4 / R44-N4 (fix-wave 6): the charge is the BROKER-SIDE reservation
+			// (500), not the child's self-reported 300 — a self-attesting child must
+			// not be able to refund budget it consumed. The self-report is kept as an
+			// audit field only.
+			assert.equal(rolled!.data?.chargedTokens, 500);
+			assert.equal(rolled!.data?.selfReportedTokens, 300);
 
 			// Fenced result delivered to the parent task's mailbox inbox file
 			// (<stateRoot>/mailbox/tasks/<taskId>/inbox.jsonl).
@@ -315,9 +320,10 @@ test("happy path: immediate ref, fenced mailbox delivery, budget reserve→roll-
 			assert.match(last.body, /--- delegate gc-/);
 			assert.match(last.body, /grandchild did the thing/);
 
-			// Budget reconciled: 10000 granted, 300 spent (500 reserved → 300 actual).
+			// M3-4 / R44-N4: no settle-time refund — 10000 granted, the full 500
+			// reservation charged (pre-fix: 300, i.e. refunded on the child's claim).
 			const parent = fresh.tasks.find((t) => t.id === s.taskId)!;
-			assert.equal(parent.allocation?.tokensSpent, 300);
+			assert.equal(parent.allocation?.tokensSpent, 500);
 
 			// Spawner received depthOverride from the RECORD (grandchild = 2).
 			assert.equal(spawns[0]?.depthOverride, 2);
@@ -328,6 +334,149 @@ test("happy path: immediate ref, fenced mailbox delivery, budget reserve→roll-
 			// Slot released → a second delegate is admitted (no exhaustion).
 			const res2 = await sendDelegate(client, { prompt: "again" }, "dlg-2");
 			assert.ok(res2.result, `second delegate after release must be admitted: ${JSON.stringify(res2)}`);
+		} finally {
+			client.close();
+		}
+	} finally {
+		await broker.stop();
+		fs.rmSync(s.cwd, { recursive: true, force: true });
+	}
+});
+
+test("M3-3/R43-N1: run budgetTotal SEEDS the parent grant — a budgeted delegate is admitted in production shape", async () => {
+	// Production shape: the run carries a budgetTotal and the task record has NO
+	// allocation of its own (nothing ever produced `tokensGranted` pre-fix, so
+	//every budgeted delegate was denied "budget-insufficient").
+	const s = await scaffoldRunningTask("seed");
+	const loaded = loadRunManifestById(s.cwd, s.runId)!;
+	saveRunManifest({ ...loaded.manifest, status: "running", budgetTotal: 100_000 }, { allowTerminalExit: true });
+	assert.equal(loadRunManifestById(s.cwd, s.runId)!.tasks[0]?.allocation, undefined, "no allocation on the task record");
+
+	const fakeSpawner = async (): Promise<GrandchildSpawnResult> => ({ ok: true, resultText: "seeded", usageTokens: 10 });
+	const { broker, socketPath } = await startBroker({ cwd: s.cwd, nestingEnabled: true, spawner: fakeSpawner });
+	try {
+		const token = broker.issueRunToken(s.runId, s.taskId);
+		const client = await rawConnect(socketPath);
+		try {
+			await hello(client, s.runId, s.taskId, token);
+			const res = await sendDelegate(client, { prompt: "budgeted work", budgetTokens: 500 });
+			assert.ok(res.result, `seeded-grant delegate must be admitted: ${JSON.stringify(res)}`);
+			assert.equal(res.result!.ok, true);
+			// The reservation SEEDED the allocation the gate admitted against.
+			const parent = loadRunManifestById(s.cwd, s.runId)!.tasks.find((t) => t.id === s.taskId)!;
+			assert.equal(parent.allocation?.tokensGranted, 100_000, "run budgetTotal seeded tokensGranted");
+			assert.equal(parent.allocation?.tokensSpent, 500, "reservation charged (M3-4: no self-report refund)");
+			const events = await readEventsUntil(s.eventsPath, (evts) => evts.some((e) => e.type === "delegate.admitted"));
+			const admitted = events.find((e) => e.type === "delegate.admitted");
+			assert.equal(admitted?.data?.unmetered, undefined, "a metered admit is not flagged unmetered");
+			assert.equal(admitted?.data?.reservedTokens, 500);
+		} finally {
+			client.close();
+		}
+	} finally {
+		await broker.stop();
+		fs.rmSync(s.cwd, { recursive: true, force: true });
+	}
+});
+
+test("M3-3/R43-N1: no run budget + no task allocation → explicit budget-not-granted (not the accidental 0-remaining)", async () => {
+	const s = await scaffoldRunningTask("nogrant");
+	const fakeSpawner = async (): Promise<GrandchildSpawnResult> => ({ ok: true, resultText: "never spawned" });
+	const { broker, socketPath } = await startBroker({ cwd: s.cwd, nestingEnabled: true, spawner: fakeSpawner });
+	try {
+		const token = broker.issueRunToken(s.runId, s.taskId);
+		const client = await rawConnect(socketPath);
+		try {
+			await hello(client, s.runId, s.taskId, token);
+			const res = await sendDelegate(client, { prompt: "budgeted work", budgetTokens: 500 });
+			assert.ok(res.error, "budgeted delegate without a grant must be refused");
+			assert.equal(res.error!.code, "policy-denied");
+			assert.match(res.error!.message, /no token budget granted/);
+			const events = await readEventsUntil(s.eventsPath, (evts) => evts.some((e) => e.type === "delegate.rejected"));
+			assert.equal(events.find((e) => e.type === "delegate.rejected")?.data?.reason, "budget-not-granted");
+		} finally {
+			client.close();
+		}
+	} finally {
+		await broker.stop();
+		fs.rmSync(s.cwd, { recursive: true, force: true });
+	}
+});
+
+test("M3-3/R43-N1: unmetered delegate is admitted by the broker AND audited as unmetered", async () => {
+	const s = await scaffoldRunningTask("unmetered");
+	const fakeSpawner = async (): Promise<GrandchildSpawnResult> => ({ ok: true, resultText: "unmetered ok" });
+	const { broker, socketPath } = await startBroker({ cwd: s.cwd, nestingEnabled: true, spawner: fakeSpawner });
+	try {
+		const token = broker.issueRunToken(s.runId, s.taskId);
+		const client = await rawConnect(socketPath);
+		try {
+			await hello(client, s.runId, s.taskId, token);
+			const res = await sendDelegate(client, { prompt: "no budget" });
+			assert.ok(res.result, `unmetered delegate stays available (explicit allow): ${JSON.stringify(res)}`);
+			const events = await readEventsUntil(s.eventsPath, (evts) => evts.some((e) => e.type === "delegate.admitted"));
+			const admitted = events.find((e) => e.type === "delegate.admitted");
+			assert.equal(admitted?.data?.unmetered, true, "the unmetered allow is traceable, never silent");
+			assert.equal(admitted?.data?.reservedTokens, undefined, "nothing reserved");
+		} finally {
+			client.close();
+		}
+	} finally {
+		await broker.stop();
+		fs.rmSync(s.cwd, { recursive: true, force: true });
+	}
+});
+
+test("R43-S1: read-only parent (explorer) requesting an executor grandchild is denied with parent-role-escalation", async () => {
+	const s = await scaffoldRunningTask("tier", "explorer");
+	const spawns: GrandchildSpawnInput[] = [];
+	const fakeSpawner = async (input: GrandchildSpawnInput): Promise<GrandchildSpawnResult> => {
+		spawns.push(input);
+		return { ok: true, resultText: "unreachable", usageTokens: 1 };
+	};
+	const { broker, socketPath } = await startBroker({ cwd: s.cwd, nestingEnabled: true, spawner: fakeSpawner });
+	try {
+		const token = broker.issueRunToken(s.runId, s.taskId);
+		const client = await rawConnect(socketPath);
+		try {
+			await hello(client, s.runId, s.taskId, token);
+			const res = await sendDelegate(client, { prompt: "write files for me", role: "executor" });
+			assert.ok(res.error, "explorer parent requesting executor must be rejected");
+			assert.equal(res.error!.code, "policy-denied");
+			assert.match(res.error!.message, /read-only tier/);
+			assert.match(res.error!.message, /transitive containment/);
+			const events = await readEventsUntil(s.eventsPath, (evts) => evts.some((e) => e.type === "delegate.rejected"));
+			const rej = events.find((e) => e.type === "delegate.rejected");
+			assert.ok(rej, "delegate.rejected event must be recorded");
+			assert.equal(rej!.data?.reason, "parent-role-escalation");
+			assert.equal(spawns.length, 0, "no grandchild may be spawned");
+		} finally {
+			client.close();
+		}
+	} finally {
+		await broker.stop();
+		fs.rmSync(s.cwd, { recursive: true, force: true });
+	}
+});
+
+test("R43-S1: executor parent's delegate threads parentRole to the spawner (transitive policy input)", async () => {
+	const s = await scaffoldRunningTask("ptier");
+	const spawns: GrandchildSpawnInput[] = [];
+	const fakeSpawner = async (input: GrandchildSpawnInput): Promise<GrandchildSpawnResult> => {
+		spawns.push(input);
+		return { ok: true, resultText: "did read-only things", usageTokens: 7 };
+	};
+	const { broker, socketPath } = await startBroker({ cwd: s.cwd, nestingEnabled: true, spawner: fakeSpawner });
+	try {
+		const token = broker.issueRunToken(s.runId, s.taskId);
+		const client = await rawConnect(socketPath);
+		try {
+			await hello(client, s.runId, s.taskId, token);
+			const res = await sendDelegate(client, { prompt: "explore", role: "explorer" });
+			assert.ok(res.result, `executor parent delegating explorer must pass: ${JSON.stringify(res)}`);
+			await readEventsUntil(s.eventsPath, (evts) => evts.some((e) => e.type === "delegate.completed"));
+			assert.equal(spawns[0]?.role, "explorer");
+			assert.equal(spawns[0]?.parentRole, "executor", "parent task record role must reach the spawner");
 		} finally {
 			client.close();
 		}

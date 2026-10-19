@@ -272,6 +272,124 @@ describe("handleSettings unset", () => {
 
 // ─── handleSettings — unknown subcommand ──────────────────────────────────────
 
+// ─── R45-S1 (deep-review 2026-10-19): list/json sensitive redaction ─────────
+//
+// `list` and `json` dump the WHOLE effective config. Before R45-S1 they did
+// NOT run the US-030 redaction that `get` applies — so `team-settings list`
+// leaked webhook.secret / otlp.headers etc. verbatim into the transcript,
+// bypassing the `get` redaction entirely. All tests sandbox HOME + USERPROFILE
+// + PI_CREW_HOME + cwd so the real ~/.pi config is never read or written.
+
+describe("handleSettings list/json sensitive redaction (R45-S1)", () => {
+	function withSandboxedHome(fn: (home: string, cwd: string) => void): void {
+		const savedHome = process.env.HOME;
+		const savedProfile = process.env.USERPROFILE;
+		const savedCrewHome = process.env.PI_CREW_HOME;
+		// PI_TEAMS_HOME wins over PI_CREW_HOME (env-vars.ts mirrorPrecedence
+		// "teams"), and scripts/test-runner.mjs sets BOTH — override both or the
+		// fixture config lands outside the sandbox home.
+		const savedTeamsHome = process.env.PI_TEAMS_HOME;
+		const home = createTrackedTempDir("settings-redact-home-");
+		const cwd = createTrackedTempDir("settings-redact-cwd-");
+		process.env.HOME = home;
+		process.env.USERPROFILE = home;
+		process.env.PI_CREW_HOME = home;
+		process.env.PI_TEAMS_HOME = home;
+		try {
+			fn(home, cwd);
+		} finally {
+			if (savedHome === undefined) delete process.env.HOME;
+			else process.env.HOME = savedHome;
+			if (savedProfile === undefined) delete process.env.USERPROFILE;
+			else process.env.USERPROFILE = savedProfile;
+			if (savedCrewHome === undefined) delete process.env.PI_CREW_HOME;
+			else process.env.PI_CREW_HOME = savedCrewHome;
+			if (savedTeamsHome === undefined) delete process.env.PI_TEAMS_HOME;
+			else process.env.PI_TEAMS_HOME = savedTeamsHome;
+			removeTrackedTempDir(home);
+			removeTrackedTempDir(cwd);
+		}
+	}
+
+	function writeUserConfig(home: string): void {
+		const dir = path.join(home, ".pi", "agent");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "pi-crew.json"),
+			JSON.stringify({
+				notifications: {
+					webhook: {
+						url: "https://hooks.example.com/T0/RAW_WEBHOOK_SECRET",
+						enabled: true,
+						secret: "whsec-R45S1-marker-secret",
+					},
+				},
+				otlp: {
+					enabled: true,
+					endpoint: "https://otel.example.com?token=RAW_OTLP_TOKEN",
+					headers: { "x-api-key": "RAW_HEADER_KEY" },
+				},
+			}),
+		);
+	}
+
+	const RAW_SECRETS = ["whsec-R45S1-marker-secret", "RAW_WEBHOOK_SECRET", "RAW_OTLP_TOKEN", "RAW_HEADER_KEY"];
+
+	it("list does not leak schema-marked sensitive values and shows the redaction marker", () => {
+		withSandboxedHome((home, cwd) => {
+			writeUserConfig(home);
+			const text = textFromToolResult(handleSettings(makeConfig("list"), makeCtx(cwd)));
+			for (const secret of RAW_SECRETS) {
+				assert.ok(!text.includes(secret), `list must not leak ${secret}, got: ${text.slice(0, 400)}`);
+			}
+			// Redaction (marker at the sensitive key), not omission of the key.
+			// flattenConfig renders multi-key sections as JSON blocks, so the
+			// marker appears as `"key": "***(redacted — sensitive)"` inside the
+			// section block, not as a dotted top-level line.
+			assert.ok(
+				text.includes('"webhook": "***(redacted — sensitive)"'),
+				`expected redacted webhook entry, got: ${text.slice(0, 400)}`,
+			);
+			assert.ok(
+				text.includes('"endpoint": "***(redacted — sensitive)"') && text.includes('"headers": "***(redacted — sensitive)"'),
+				`expected redacted otlp.endpoint + otlp.headers entries, got: ${text.slice(0, 400)}`,
+			);
+			// Non-sensitive values in the same sections stay visible.
+			assert.ok(text.includes('"enabled": true'), `non-sensitive sibling must stay visible, got: ${text.slice(0, 400)}`);
+		});
+	});
+
+	it("json does not leak schema-marked sensitive values and shows the redaction marker", () => {
+		withSandboxedHome((home, cwd) => {
+			writeUserConfig(home);
+			const text = textFromToolResult(handleSettings(makeConfig("json"), makeCtx(cwd)));
+			for (const secret of RAW_SECRETS) {
+				assert.ok(!text.includes(secret), `json must not leak ${secret}, got: ${text.slice(0, 400)}`);
+			}
+			assert.ok(
+				text.includes('"notifications":') && text.includes("***(redacted — sensitive)"),
+				`expected redacted marker inside the JSON dump, got: ${text.slice(0, 400)}`,
+			);
+			assert.ok(text.includes('"otlp":') && !text.includes("RAW_OTLP_TOKEN"), `otlp must be present but redacted`);
+			// Non-sensitive sibling survives.
+			assert.ok(text.includes('"enabled": true'), `non-sensitive sibling must stay visible, got: ${text.slice(0, 400)}`);
+		});
+	});
+
+	it("get stays redacted for the same keys (no drift between surfaces)", () => {
+		withSandboxedHome((home, cwd) => {
+			writeUserConfig(home);
+			for (const key of ["notifications.webhook", "notifications.webhook.secret", "otlp.headers"]) {
+				const text = textFromToolResult(handleSettings(makeConfig(`get ${key}`), makeCtx(cwd)));
+				for (const secret of RAW_SECRETS) {
+					assert.ok(!text.includes(secret), `get ${key} must not leak ${secret}, got: ${text.slice(0, 300)}`);
+				}
+				assert.ok(text.includes("redacted"), `get ${key} must show the redaction marker, got: ${text.slice(0, 300)}`);
+			}
+		});
+	});
+});
+
 describe("handleSettings unknown subcommand", () => {
 	it("returns error for unknown subcommand", () => {
 		const tmp = createTrackedTempDir("settings-unknown-");
@@ -380,5 +498,45 @@ describe("handleSettings ui.* keys (M1-9)", () => {
 			const outcome = validateConfig({ ui: { widgetRowStyle: "detailed" } });
 			assert.equal(outcome.hasErrors, true, "validateConfig() must flag the retired ui.widgetRowStyle");
 		});
+	});
+});
+
+// ─── R45-S1 (wave-6 M4-R2): getNested read-side inherited-member guard ────────
+// `get <key>` resolved INHERITED members because the walker had no own-property
+// check — `get __proto__.toString` walked Object.prototype and formatValue
+// printed the function source; `get constructor` returned Object. The write
+// path already refused dangerous segments (isDangerousPath in setNested); this
+// pins the read path's matching guard (Object.hasOwn at each hop).
+
+describe("handleSettings get — inherited-member guard (R45-S1)", () => {
+	it("does not resolve __proto__ / inherited Object.prototype members", () => {
+		const tmp = createTrackedTempDir("settings-inherited-");
+		try {
+			const proto = textFromToolResult(handleSettings(makeConfig("get __proto__.toString"), makeCtx(tmp)));
+			assert.ok(!proto.includes("native code"), `__proto__.toString must not leak the function source, got: ${proto}`);
+			assert.ok(proto.includes("__proto__.toString = <not set>"), `expected an unset value, got: ${proto}`);
+
+			const ctor = textFromToolResult(handleSettings(makeConfig("get constructor"), makeCtx(tmp)));
+			assert.ok(!ctor.includes("function Object"), `constructor must not resolve to Object, got: ${ctor}`);
+			assert.ok(ctor.includes("constructor = <not set>"), `expected an unset value, got: ${ctor}`);
+
+			const nested = textFromToolResult(handleSettings(makeConfig("get constructor.prototype.toString"), makeCtx(tmp)));
+			assert.ok(!nested.includes("native code"), `nested inherited hop must not leak, got: ${nested}`);
+		} finally {
+			removeTrackedTempDir(tmp);
+		}
+	});
+
+	it("control: a real OWN nested key still resolves", () => {
+		const tmp = createTrackedTempDir("settings-ownkey-");
+		try {
+			// `limits.maxConcurrentWorkers` is a real own key — the guard must not break
+			// legitimate reads (value comes from the loaded effective config or its default).
+			const text = textFromToolResult(handleSettings(makeConfig("get limits.maxConcurrentWorkers"), makeCtx(tmp)));
+			assert.match(text, /limits\.maxConcurrentWorkers = \d+/, `own key must still resolve, got: ${text}`);
+			assert.ok(!text.includes("<not set>"), `own key must not read as unset, got: ${text}`);
+		} finally {
+			removeTrackedTempDir(tmp);
+		}
 	});
 });

@@ -20,6 +20,7 @@ import * as path from "node:path";
 import test from "node:test";
 import type { PiTeamsToolResult } from "../../../../src/extension/tool-result.ts";
 import {
+	MAX_TERMINAL_SUBAGENT_RECORDS,
 	readPersistedSubagentRecord,
 	SubagentManager,
 	type SubagentRecord,
@@ -323,4 +324,70 @@ test("SubagentManager.setMaxConcurrent clamps to at least 1", () => {
 	const manager = new SubagentManager(2);
 	manager.setMaxConcurrent(-5);
 	// Should not throw
+});
+
+// ── F12-N1 pins (wave-6 M3-26): terminal records must not accumulate ──────
+// `records`/`cwdByRecord` were never pruned at terminal status (only the run
+// controllers were) — every completed agent kept its full prompt + result text
+// for the extension lifetime.
+
+test("F12-N1: terminal records are evicted beyond the retained bound", async () => {
+	const dir = makeTempDir();
+	const manager = new SubagentManager();
+	try {
+		const spawned: SubagentRecord[] = [];
+		const total = MAX_TERMINAL_SUBAGENT_RECORDS + 7;
+		for (let i = 0; i < total; i++) {
+			spawned.push(
+				manager.spawn(
+					{ cwd: dir, type: "t", description: `d${i}`, prompt: `prompt-${i}`, background: false },
+					makeRunner(makeResult("done")),
+				),
+			);
+		}
+		for (const record of spawned) await record.promise;
+		await new Promise((resolve) => setImmediate(resolve));
+
+		const terminal = manager.listAgents().filter((r) => r.status === "completed" || r.status === "error");
+		assert.equal(terminal.length, MAX_TERMINAL_SUBAGENT_RECORDS, "terminal history must be bounded");
+		assert.equal(manager.getRecord(spawned[0]!.id), undefined, "the oldest terminal record is evicted");
+		assert.ok(manager.getRecord(spawned[total - 1]!.id), "the newest terminal record is retained");
+	} finally {
+		void manager.abortAll();
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("F12-N1: a live (non-terminal) record is never evicted by terminal churn", async () => {
+	const dir = makeTempDir();
+	const manager = new SubagentManager();
+	try {
+		let release: (() => void) | undefined;
+		const pending = new Promise<PiTeamsToolResult>((resolve) => {
+			release = () => resolve(makeResult("late"));
+		});
+		const live = manager.spawn(
+			{ cwd: dir, type: "live", description: "live", prompt: "stay alive", background: false },
+			async () => pending,
+		);
+
+		for (let i = 0; i < MAX_TERMINAL_SUBAGENT_RECORDS + 5; i++) {
+			const record = manager.spawn(
+				{ cwd: dir, type: "t", description: `d${i}`, prompt: `p${i}`, background: false },
+				makeRunner(makeResult("done")),
+			);
+			await record.promise;
+		}
+		await new Promise((resolve) => setImmediate(resolve));
+
+		const retained = manager.getRecord(live.id);
+		assert.ok(retained, "the live record must survive terminal eviction churn");
+		assert.equal(retained?.status, "running");
+
+		release?.();
+		await live.promise;
+	} finally {
+		void manager.abortAll();
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
 });

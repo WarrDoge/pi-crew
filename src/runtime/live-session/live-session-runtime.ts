@@ -892,6 +892,13 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 		const agentId = `${input.manifest.runId}:${input.task.id}`;
 		const inherited =
 			input.runtimeConfig?.inheritContext === true && input.parentContext ? ` with inherited context: ${input.parentContext}` : "";
+		// M3-2 (R47-3/V4): the verifier output contract requires a PASS:/FAIL:
+		// verdict line; the mock must emit contract-shaped output for verifier-role
+		// tasks or the (now real) verdict consumer marks the evidence unverified
+		// and the green contract blocks the run (fail-closed — correct for real
+		// verifiers, wrong for the success mock).
+		const mockVerdictSuffix = input.task.role === "verifier" ? "\nPASS: mock verifier — mock live-session success" : "";
+		const mockText = `Mock live-session success for ${input.agent.name}${inherited}${mockVerdictSuffix}`;
 		const event = {
 			type: "message_end",
 			message: {
@@ -899,7 +906,7 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 				content: [
 					{
 						type: "text",
-						text: `Mock live-session success for ${input.agent.name}${inherited}`,
+						text: mockText,
 					},
 				],
 			},
@@ -945,7 +952,7 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 		// the batched writers here — tests read these files right after return.
 		flushPendingSidechainWrites();
 		if (isCurrent()) input.onEvent?.(event);
-		const stdout = `Mock live-session success for ${input.agent.name}${inherited}`;
+		const stdout = mockText;
 		if (isCurrent()) input.onOutput?.(stdout);
 		updateLiveAgentStatus(agentId, "completed");
 		markLiveAgentCompleted(agentId);

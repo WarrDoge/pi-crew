@@ -129,3 +129,76 @@ test("clean fixture passes: declared deps, LAZY-marked dynamic import, type-posi
 	const result = runGate(dir);
 	assert.equal(result.status, 0, `gate output:\n${result.stdout}\n${result.stderr}`);
 });
+
+// ── R18-1 / R18-3: git-tracked mixed tree + `.js`-suffixed specifiers ───────
+//
+// Both pins need a MIXED tree: a real git index with nested `src/**` files, so
+// the old `git ls-files -- "src/**/*.ts"` pathspec returns a NON-empty list and
+// the fs-walk fallback (which DOES see depth-1 files) never runs — exactly the
+// repo shape where the CI blind spot existed.
+
+function initGitFixture(name: string): string {
+	const dir = makeFixture(name);
+	const run = (...args: string[]): void => {
+		const res = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+		assert.equal(res.status, 0, `git ${args.join(" ")} failed: ${res.stderr}`);
+	};
+	run("init", "-q");
+	return dir;
+}
+
+/** Stage the fixture files so `git ls-files` sees them (index-only: no commit,
+ *  no identity required). Called AFTER the files are written. */
+function stageAll(dir: string): void {
+	const res = spawnSync("git", ["add", "-A"], { cwd: dir, encoding: "utf8" });
+	assert.equal(res.status, 0, `git add failed: ${res.stderr}`);
+}
+
+test("R18-1: a depth-1 file (src/errors.ts) is dep-checked in a git-tracked mixed tree", () => {
+	const dir = initGitFixture("depth1-mixed");
+	writeFixturePkg(dir, {});
+	// A NESTED file keeps the tracked list non-empty — `src/**/*.ts` needs a
+	// directory level, so the pre-fix pathspec returned ONLY this file and the
+	// fs-walk fallback (which does see depth-1) never fired. This is the exact
+	// repo shape (545 of 547 files seen).
+	mkdirSync(join(dir, "src", "nested"), { recursive: true });
+	writeFileSync(join(dir, "src", "nested", "deep.ts"), ["export const ok = 1;", ""].join("\n"), "utf8");
+	// depth-1 violation: undeclared import at the src/ root
+	writeFileSync(join(dir, "src", "errors.ts"), ['import { pad } from "leftpad";', "export const x = pad;", ""].join("\n"), "utf8");
+	stageAll(dir);
+	const result = runGate(dir);
+	assert.equal(result.status, 1, `depth-1 file must be scanned. gate output:\n${result.stdout}\n${result.stderr}`);
+	const all = result.stdout + result.stderr;
+	assert.match(all, /src[\\/]errors\.ts:1/);
+	assert.match(all, /leftpad is not declared/);
+});
+
+test("R18-1: a depth-1 file with an unmarked runtime import() is LAZY-checked too", () => {
+	const dir = initGitFixture("depth1-lazy");
+	writeFixturePkg(dir, {});
+	mkdirSync(join(dir, "src", "nested"), { recursive: true });
+	writeFileSync(join(dir, "src", "nested", "deep.ts"), ["export const ok = 1;", ""].join("\n"), "utf8");
+	writeFileSync(
+		join(dir, "src", "i18n.ts"),
+		["export const boot = async () => {", '\tconst m = await import("./nested/deep.ts");', "\treturn m;", "};", ""].join("\n"),
+		"utf8",
+	);
+	stageAll(dir);
+	const result = runGate(dir);
+	assert.equal(result.status, 1, `gate output:\n${result.stdout}\n${result.stderr}`);
+	assert.match(result.stdout + result.stderr, /src[\\/]i18n\.ts:2/);
+});
+
+test("R18-3: a `.js`-suffixed relative import resolves to its `.ts` file (forbid + budget see the edge)", () => {
+	const dir = initGitFixture("js-suffix");
+	writeFixturePkg(dir, {});
+	mkdirSync(join(dir, "src", "test"), { recursive: true });
+	writeFileSync(join(dir, "src", "test", "evil.ts"), ["export const evil = 1;", ""].join("\n"), "utf8");
+	// TS ESM style: the emitted specifier is `.js`, the file on disk is `.ts`.
+	writeFileSync(join(dir, "src", "a.ts"), ['export { evil } from "./test/evil.js";', ""].join("\n"), "utf8");
+	writeFileSync(join(dir, "index.bundle.ts"), ['export * from "./src/a.js";', ""].join("\n"), "utf8");
+	stageAll(dir);
+	const result = runGate(dir);
+	assert.equal(result.status, 1, `the .js edge must enter the graph. gate output:\n${result.stdout}\n${result.stderr}`);
+	assert.match(result.stdout + result.stderr, /must not reach test\//);
+});

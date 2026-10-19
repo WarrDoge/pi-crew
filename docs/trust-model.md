@@ -1,7 +1,8 @@
 # pi-crew Trust Model (single source of truth)
 
-**Document version:** 1.0 (WI-6.1 milestone)
-**Date:** 2026-09-10
+**Document version:** 1.2 (2026-10-19 — adds DWF gate scope, cold-verifier
+isolation residual, observability/telemetry census note; fix-wave 6 / M4)
+**Date:** 2026-09-10 (v1.0) / 2026-10-18 (v1.1) / 2026-10-19 (v1.2)
 **Owner:** solo maintainer (delegated to upgrade program M6/WI-6.1)
 **Supersedes:** trust-model content previously distributed across
 `docs/bugs/SECURITY-ISSUES.md` (v3.0, last updated 2026-06-03) and
@@ -17,13 +18,21 @@ pi-crew operates across 4 distinct trust boundaries:
 
 1. **Root session / orchestrator** — the pi session that owns the
    broker. Trusted: can issue tokens, can steer, can msg.send.
+   User-scope mutations (config-user / settings-user+theme /
+   autonomy / create-user / update-user / schedule / goal+force)
+   are root-gated since Wave-3 (2026-10-17): worker-origin calls are
+   denied with "root-session required"; reads and project scope
+   stay open.
 2. **Worker (child pi process)** — spawned by the orchestrator via
    `child-pi`. Trusted: has a valid token; CANNOT spawn its own
    grandchildren without delegate.request (gated).
 3. **Guest (scratchpad cell)** — in-process vm.Script in the worker;
    can run user-supplied JS with a namespace.
 4. **DWF (project-defined workflow)** — TS file in the project root
-   `.dwf.ts`. Trusted only with explicit `PI_CREW_TRUST_PROJECT_DWF`.
+   `.dwf.ts`. Trusted only with explicit `PI_CREW_TRUST_PROJECT_DWF=1`.
+   **The gate is PROJECT-source only**: builtin workflows and user-scope
+   workflows (`~/.pi/agent/extensions/pi-crew/workflows/`) run without the
+   gate (`dynamic-workflow-runner.ts:189`; see the DWF row below).
 
 Each boundary has a documented FAIL-CLOSED/FAIL-OPEN default and a
 known list of accepted risks.
@@ -83,7 +92,38 @@ want strict semantics; default OFF remains.
 | Root session | full | crash → broker shutdown | broker stop() is idempotent |
 | Worker | token (compound key) | revoke token | revokeTaskToken() + post-hello re-check on secret-hash |
 | Guest | nonce + FD-3 protocol | EPERM/SIGTERM | guest exits 0 on EPIPE, host checks nonce every frame |
-| DWF | `PI_CREW_TRUST_PROJECT_DWF=true` | deny | `dwf.trust_denied` event emitted on rejection |
+| DWF (**project** source only) | `PI_CREW_TRUST_PROJECT_DWF=1` (literal `1`; the gate compares `!== "1"` — `true` FAILS, see `dynamic-workflow-runner.ts:189`) | deny | `dwf.trust_denied` event emitted on rejection |
+| DWF (builtin + user source) | **trusted, ungated** — no env var required | arbitrary code execution if the file is hostile | none enforced; authoring hygiene only |
+
+### Cold-verifier isolation is PROMPT-ONLY (R47-4, documented residual)
+
+`cold-verifier` is advertised as an *independent* check, but its independence
+is a **prompt directive, not a mechanical boundary**:
+
+- It is a **WRITE role** (`src/runtime/role-permission.ts:18` `WRITE_ROLES`)
+  with `bash`, so it can run arbitrary host commands.
+- It **shares the cwd and the run artifact directory** with the work it is
+  verifying, and `inheritProjectContext: true` means it reads the same
+  worker-editable `AGENTS.md` / `CLAUDE.md` / `.crew/knowledge.md` context
+  (`agents/cold-verifier.md`).
+- The deterministic verify-gate runs only for `role === "verifier"`
+  (`src/runtime/task-runner.ts:162`); `cold-verifier` has **no**
+  mechanical fence at all.
+
+Consequence: a cold-verifier is a *fresh perspective*, not a tamper-proof one.
+Treat it as advisory unless the surrounding workspace is trusted.
+
+### Observability / telemetry census (R48, documented residual)
+
+When the metric sink or OTLP export is active (`config.telemetry.enabled !== false`
+— i.e. **default ON**; see `src/extension/registration/observability.ts:109`),
+metric labels and exported attributes can carry **goal text, run/task ids, and
+filesystem paths off the host** to whatever OTLP endpoint is configured. This is
+intended behaviour, not a bug, but it is a **privacy-relevant egress path**:
+set `telemetry.enabled: false` (or leave `otlp.enabled` unset) on repositories
+whose goal text is sensitive. See `docs/troubleshooting.md` for the doctor
+false-negative catalogue (disk-full / state perms / orphan processes / broken
+`node_modules` are NOT detected).
 
 ## Cross-references
 

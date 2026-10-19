@@ -1,4 +1,5 @@
 import { renderAskAnswer } from "../../prompt/prompt-runtime.ts";
+import { repointWaitState } from "../../runtime/broker/protocol/wait-resolve.ts";
 import { readCrewAgents, recordFromTask, saveCrewAgents } from "../../runtime/crew-agent-records.ts";
 import { isWaitingWorkerAlive } from "../../runtime/dispatch-batch.ts";
 import { checkProcessLiveness } from "../../runtime/process-status.ts";
@@ -243,12 +244,18 @@ export function handleRespond(params: TeamToolParamsValue, ctx: TeamContext): Pi
 		let manifest = fresh.manifest;
 		if (requeuedIds.length > 0) {
 			saveRunTasks(fresh.manifest, updatedTasks);
-			// WP-2 review round 1 (P3): clear manifest.waitState when its park was
-			// requeued — mirror the broker's clearWaitState guard (taskId match),
-			// else the stale pointer shields the run from staleness repair for
-			// the full 24h TTL and leaves a stale marker in the manifest/UI.
+			// WP-2 review round 1 (P3) + M4-R1(b) (fix-wave 6 residual): when the slot
+			// pointed at a REQUEUED park, scoped-forget it — but never by blind
+			// clearing. Another task may still be parked and this single slot is the
+			// only thing shielding it (isWaitAnswerPending reads just this field), so
+			// re-point it at the surviving park (latest deadline wins, mirroring
+			// wait.resolve's repointedWaitState); it is cleared only when this was
+			// the last live park. The clear remains the correct outcome there — the
+			// pre-fix guard left the stale pointer shielding the run for the full
+			// 24h TTL with a stale marker in the manifest/UI.
 			if (manifest.waitState && requeuedIds.includes(manifest.waitState.taskId)) {
-				manifest = { ...manifest, waitState: undefined, updatedAt: new Date().toISOString() };
+				const waitState = repointWaitState(updatedTasks, manifest.waitState, (candidateId) => requeuedIds.includes(candidateId));
+				manifest = { ...manifest, waitState, updatedAt: new Date().toISOString() };
 				saveRunManifest(manifest);
 			}
 			if (

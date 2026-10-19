@@ -76,6 +76,8 @@ function installTurnReconcileHook(pi: ExtensionAPI, ctx: RegistrationContext): v
 			}
 		});
 	} catch {
+		// R49-F4: `pi.on()` never throws on an unknown event (pi 0.77/1.0.4) — this
+		// catch is defensive; the real older-host degradation is a NEVER-FIRING hook.
 		/* older Pi without before_agent_start — rely on the interval alone */
 	}
 }

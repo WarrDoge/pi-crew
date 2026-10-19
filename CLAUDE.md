@@ -61,9 +61,10 @@ source of truth is `allActionLiterals` in `src/schema/team-tool-schema.ts`
 
 | Mode | Description |
 |------|-------------|
-| `child-process` (default) | Spawn real `pi` child processes for task execution |
-| `scaffold` | Dry-run mode — preview prompts without executing |
-| `live-session` (experimental) | In-process session-based execution |
+| `auto` (default) | Resolves at dispatch: `child-process` unless `runtime.preferLiveSession: true` and the live runtime is available (`src/runtime/model/runtime-resolver.ts:93,119-130`) |
+| `child-process` | Force real `pi` child processes for task execution |
+| `scaffold` | Dry-run mode — preview prompts without executing (also the forced outcome when `executeWorkers:false` / `PI_CREW_EXECUTE_WORKERS=0`) |
+| `live-session` (experimental) | In-process session-based execution; falls back to `child-process` unless `runtime.allowChildProcessFallback:false` |
 
 Workers run as **full `pi` sessions by default** — extensions, skills, and tools
 are inherited like the main session; restrictions are per-agent opt-in via
@@ -111,10 +112,11 @@ Custom agents/teams/workflows are YAML files with routing metadata (triggers, us
 
 Config (`pi-crew.json`) merge order DIFFERS from resource discovery:
 
-`builtin (package defaults) < project (.pi/pi-crew.json) < user (~/.pi/pi-crew.json)`
+`builtin (package defaults) < project (<crewRoot>/config.json, alt .pi/pi-crew.json) < user (~/.pi/agent/pi-crew.json)`
 
 User config always wins. Sensitive fields in project config are sanitized
-via `sanitizeProjectConfig()`. See `src/config/config.ts:1170-1181`.
+via `sanitizeProjectConfig()` (`src/config/sanitize-project-config.ts`,
+merge order at `src/config/config.ts:396-424`).
 
 ## Common Commands
 

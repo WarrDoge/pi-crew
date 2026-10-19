@@ -89,7 +89,11 @@ export function handleWorkflowCreate(params: TeamToolParamsValue, ctx: TeamConte
 		return result(`workflow-create rejected: ${validationError}`, { action: "workflow-create", status: "error" }, true);
 	}
 	try {
-		const scope = (params.scope === "user" ? "user" : "project") as "user" | "project";
+		// R11-F1 (fix-wave 6, M1-2): scope reads the canonical carrier
+		// `config.scope` (same source as the root-gate and every other
+		// scope-bearing handler), defaulting to project like handleImport —
+		// top-level `params.scope` no longer diverges from the gate's read.
+		const scope = (params.config?.scope === "user" ? "user" : "project") as "user" | "project";
 		const filePath = resolveWorkflowWritePath(ctx.cwd, name, scope);
 		writeFileSync(filePath, script, "utf-8");
 		return result(

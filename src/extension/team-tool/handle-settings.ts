@@ -1,4 +1,5 @@
 import { loadConfig, updateConfig } from "../../config/config.ts";
+import { isDangerousPath } from "../../config/config-validation.ts";
 import { suggestConfigKey } from "../../config/suggestions.ts";
 import { collectSensitiveConfigPaths } from "../../schema/sensitive-config-paths.ts";
 import { discoverPiThemes, formatThemesListing, setPiTheme } from "../../ui/theme-discovery.ts";
@@ -60,7 +61,11 @@ const EFFECTIVE_DEFAULTS: Record<string, unknown> = {
 	"reliability.ambientStatusInjection": true,
 	"reliability.forcePreflight": false,
 	"reliability.scopeModels": false,
-	"telemetry.enabled": false,
+	// R45-F3: the real default is ON — observability installs the metric sink when
+	// `config.telemetry?.enabled !== false` (registration/observability.ts:109), so
+	// an unset key means enabled. This map only drives the "(default)" display;
+	// `false` here printed a wrong default for `team-settings get telemetry.enabled`.
+	"telemetry.enabled": true,
 	"notifications.enabled": false,
 };
 
@@ -69,6 +74,12 @@ const EFFECTIVE_DEFAULTS: Record<string, unknown> = {
 // ---------------------------------------------------------------------------
 
 function setNested(obj: Record<string, unknown>, path: string, value: unknown): void {
+	// R24-H1 (M1-1): walking a raw dotted key through `target["__proto__"]`
+	// resolves to Object.prototype via the [[Prototype]] getter — the write
+	// then lands on Object.prototype BEFORE configPatchFromConfig sanitizes.
+	// Refuse dangerous segments at the walker (shared proto-safe helpers in
+	// config-validation.ts).
+	if (isDangerousPath(path)) return;
 	const keys = path.split(".");
 	let target: Record<string, unknown> = obj;
 	for (let i = 0; i < keys.length - 1; i++) {
@@ -81,10 +92,17 @@ function setNested(obj: Record<string, unknown>, path: string, value: unknown): 
 }
 
 function getNested(obj: Record<string, unknown>, path: string): unknown {
+	// R45-S1 read-side (wave-6 M4-R2): mirror the write path's guard. A raw
+	// dotted key resolves INHERITED members without an own-property check —
+	// `get __proto__.toString` / `get constructor` walk Object.prototype and the
+	// value is printed by formatValue (function source) and returned in the typed
+	// result. Refuse any hop the object does not OWN. (The write path already
+	// rejects dangerous segments via isDangerousPath in setNested.)
 	const keys = path.split(".");
 	let current: unknown = obj;
 	for (const key of keys) {
 		if (!current || typeof current !== "object") return undefined;
+		if (!Object.hasOwn(current, key)) return undefined;
 		current = (current as Record<string, unknown>)[key];
 	}
 	return current;
@@ -92,7 +110,12 @@ function getNested(obj: Record<string, unknown>, path: string): unknown {
 
 function formatValue(value: unknown, key?: string): string {
 	if (value === undefined || value === null) {
-		const def = key ? EFFECTIVE_DEFAULTS[key] : undefined;
+		// R45-S1 read-side (wave-6 M4-R2): `EFFECTIVE_DEFAULTS` is a plain object
+		// literal, so an unguarded `EFFECTIVE_DEFAULTS["constructor"]` resolves the
+		// INHERITED Object constructor and prints its source — the same
+		// inherited-member leak as the getNested walker (pinned by
+		// `get constructor`). Require an OWN entry.
+		const def = key && Object.hasOwn(EFFECTIVE_DEFAULTS, key) ? EFFECTIVE_DEFAULTS[key] : undefined;
 		if (def !== undefined) return `${String(def)} (default)`;
 		return "<not set>";
 	}
@@ -143,6 +166,43 @@ function flattenConfig(obj: unknown, prefix: string = ""): string[] {
 		}
 	}
 	return lines;
+}
+
+// ---------------------------------------------------------------------------
+// Sensitive-value redaction (US-030 / R45-S1)
+// ---------------------------------------------------------------------------
+
+/** Marker printed in place of a schema-marked sensitive value. */
+const SENSITIVE_REDACTION_MARKER = "***(redacted — sensitive)";
+
+/** Schema-marked sensitive dotted paths — computed once from the same source
+ * the `get` path historically used, so `get`/`list`/`json` can never drift. */
+const SENSITIVE_CONFIG_PATHS = collectSensitiveConfigPaths();
+
+function isSensitiveConfigPath(dotted: string): boolean {
+	return SENSITIVE_CONFIG_PATHS.some((p) => dotted === p || dotted.startsWith(`${p}.`));
+}
+
+/**
+ * R45-S1 (deep-review 2026-10-19): `list` and `json` dump the WHOLE effective
+ * config, so without redaction they bypass the `get` path's US-030 redaction
+ * and echo sensitive values (webhook.secret, otlp.headers, …) verbatim into
+ * the session transcript — any in-session agent can read tool output. Returns
+ * a deep clone with every sensitive-marked value replaced by the marker;
+ * undefined/null are kept as-is (they leak nothing and stay invisible in both
+ * output formats).
+ */
+function redactSensitiveConfig(value: unknown, prefix: string = ""): unknown {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+	const out: Record<string, unknown> = {};
+	for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+		const dotted = prefix ? `${prefix}.${key}` : key;
+		out[key] =
+			isSensitiveConfigPath(dotted) && child !== undefined && child !== null
+				? SENSITIVE_REDACTION_MARKER
+				: redactSensitiveConfig(child, dotted);
+	}
+	return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -318,7 +378,8 @@ export function handleSettings(params: { config?: Record<string, unknown> }, ctx
 	// team-settings list — show ALL effective values (not just KNOWN_KEYS)
 	if (!args || args === "list") {
 		const lines = ["pi-crew effective settings:", `Config file: ${loaded.path}`, ""];
-		const flatLines = flattenConfig(effective);
+		// R45-S1: full dump must pass through the same redaction as `get`.
+		const flatLines = flattenConfig(redactSensitiveConfig(effective));
 		if (flatLines.length > 0) {
 			lines.push(...flatLines);
 		} else {
@@ -344,7 +405,8 @@ export function handleSettings(params: { config?: Record<string, unknown> }, ctx
 			`// Sources: ${loaded.paths?.join(", ") ?? loaded.path}`,
 			...(loaded.warnings?.map((w) => `// WARNING: ${w}`) ?? []),
 			"",
-			JSON.stringify(effective, null, 2),
+			// R45-S1: full dump must pass through the same redaction as `get`.
+			JSON.stringify(redactSensitiveConfig(effective), null, 2),
 		];
 		return result(lines.join("\n"), { ...OK } as never);
 	}
@@ -475,11 +537,11 @@ export function handleSettings(params: { config?: Record<string, unknown> }, ctx
 		// US-030 security review: a value whose dotted path is schema-marked
 		// sensitive (webhook.secret, otlp.headers, …) must not be echoed into
 		// the session transcript — any in-session agent can read tool output.
-		const sensitive = collectSensitiveConfigPaths().some((path) => key === path || key.startsWith(`${path}.`));
+		const sensitive = isSensitiveConfigPath(key);
 		const rendered = sensitive
 			? value === undefined || value === null
 				? "<not set>"
-				: "***(redacted — sensitive)"
+				: SENSITIVE_REDACTION_MARKER
 			: formatValue(value, key);
 		return result(`${key} = ${rendered}${note}`, {
 			...OK,
@@ -492,6 +554,10 @@ export function handleSettings(params: { config?: Record<string, unknown> }, ctx
 	if (args.startsWith("unset ")) {
 		const key = args.slice(6).trim();
 		if (!key) return result("Usage: team-settings unset <key>", { ...ERR }, true);
+		// R24-H2 (M1-1): refuse reserved Object.prototype key paths at the
+		// boundary — `unset __proto__.toString` would otherwise delete
+		// Object.prototype.toString via the [[Prototype]] getter walk.
+		if (isDangerousPath(key)) return result(`Refusing to unset '${key}': reserved Object.prototype key path`, { ...ERR }, true);
 		try {
 			const saved = updateConfig({}, { cwd: ctx.cwd, scope, unsetPaths: [key] });
 			return result(`Unset ${key}\nSaved to: ${saved.path}`, {
@@ -516,6 +582,10 @@ export function handleSettings(params: { config?: Record<string, unknown> }, ctx
 		const key = rest.slice(0, spaceIdx);
 		const rawValue = rest.slice(spaceIdx + 1).trim();
 		if (!key) return result("Usage: team-settings set <key> <value>", { ...ERR }, true);
+		// R24-H1 (M1-1): refuse reserved Object.prototype key paths at the
+		// boundary — `set __proto__.polluted 1` would otherwise pollute
+		// Object.prototype via the [[Prototype]] getter walk in setNested.
+		if (isDangerousPath(key)) return result(`Refusing to set '${key}': reserved Object.prototype key path`, { ...ERR }, true);
 
 		const value = parseValue(rawValue);
 		const patch: Record<string, unknown> = {};

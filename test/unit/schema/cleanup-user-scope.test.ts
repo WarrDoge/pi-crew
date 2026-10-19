@@ -59,17 +59,30 @@ describe("team action=cleanup scope=user — user-level junk (Issue #35)", () =>
 		fs.rmSync(tempCwd, { recursive: true, force: true });
 	});
 
-	it("removes the pi-crew user state dir (~/.pi/agent/extensions/pi-crew/)", async () => {
+	it("removes the pi-crew user state dir (~/.pi/agent/extensions/pi-crew/) with force=true", async () => {
 		const crewStateDir = path.join(tempHome, ".pi", "agent", "extensions", "pi-crew");
 		fs.writeFileSync(path.join(crewStateDir, "state", "marker.json"), "{}");
 		assert.ok(fs.existsSync(crewStateDir));
 
-		const r = await handleCleanup(params({ scope: "user", confirm: true }), makeCtx(tempCwd));
+		const r = await handleCleanup(params({ scope: "user", confirm: true, force: true }), makeCtx(tempCwd));
 		const text = textFromToolResult(r);
 
 		assert.match(text, /pi-crew user state dir/);
 		assert.match(text, /removed:/);
 		assert.ok(!fs.existsSync(crewStateDir), "user state dir must be removed");
+	});
+
+	it("F13-B: preserves the user state dir without force=true (confirm alone must not wipe it)", async () => {
+		const crewStateDir = path.join(tempHome, ".pi", "agent", "extensions", "pi-crew");
+		fs.writeFileSync(path.join(crewStateDir, "state", "marker.json"), "{}");
+
+		const r = await handleCleanup(params({ scope: "user", confirm: true }), makeCtx(tempCwd));
+		const text = textFromToolResult(r);
+
+		assert.match(text, /preserved: .*pass force: true to remove/);
+		assert.ok(!/\bremoved: .*extensions\/pi-crew/.test(text), "must not claim removal");
+		assert.ok(fs.existsSync(crewStateDir), "user state dir preserved without force");
+		assert.ok(fs.existsSync(path.join(crewStateDir, "state", "marker.json")), "state files preserved");
 	});
 
 	it("preserves pi-crew.json by default (may hold user-customized settings)", async () => {
@@ -121,12 +134,23 @@ describe("team action=cleanup scope=user — user-level junk (Issue #35)", () =>
 		const crewStateDir = path.join(tempHome, ".pi", "agent", "extensions", "pi-crew");
 		fs.writeFileSync(path.join(crewStateDir, "state", "marker.json"), "{}");
 
-		const r = await handleCleanup(params({ scope: "user", dryRun: true }), makeCtx(tempCwd));
+		const r = await handleCleanup(params({ scope: "user", dryRun: true, force: true }), makeCtx(tempCwd));
 		const text = textFromToolResult(r);
 
 		assert.match(text, /would remove/);
 		assert.match(text, /dry-run preview/);
 		assert.ok(fs.existsSync(crewStateDir), "nothing removed in dry-run");
+	});
+
+	it("F13-B: dryRun without force previews PRESERVATION of the user state dir", async () => {
+		const crewStateDir = path.join(tempHome, ".pi", "agent", "extensions", "pi-crew");
+		fs.writeFileSync(path.join(crewStateDir, "state", "marker.json"), "{}");
+
+		const r = await handleCleanup(params({ scope: "user", dryRun: true }), makeCtx(tempCwd));
+		const text = textFromToolResult(r);
+
+		assert.match(text, /would preserve: .*pass force: true to remove/);
+		assert.ok(fs.existsSync(crewStateDir), "nothing removed");
 	});
 
 	it("handles a clean install (no pi-crew state) gracefully", async () => {

@@ -386,7 +386,10 @@ export interface CrewReliabilityConfig {
 	retryPolicy?: CrewRetryPolicyConfig;
 	autoRecover?: boolean;
 	deadletterThreshold?: number;
-	/** Interval (ms) for periodic stale-run auto-repair. Default 60_000 (60s). Set to 0 to disable. */
+	/** Interval (ms) for periodic stale-run auto-repair. Default 300_000 (5min) —
+	 *  the canonical value lives in the `?? 300_000` fallback at
+	 *  `src/extension/registration/observability.ts:256` (RT-F2 raised it from 60s;
+	 *  R45-F2). Set to 0 to disable. */
 	autoRepairIntervalMs?: number;
 	/** Remove /tmp/pi-crew-* directories after their orphaned runs are reconciled. Default: true. */
 	cleanupOrphanedTempDirs?: boolean;

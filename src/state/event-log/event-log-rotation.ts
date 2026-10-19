@@ -167,7 +167,9 @@ export interface CompactionResult {
  * 3. Atomically write (atomicWriteFile handles temp-file + rename)
  * 4. Re-read to detect events appended during the window
  * 5. If events were lost, append them
- * 6. Return compaction stats
+ * 6. Bump the `.gen` generation sidecar (EP4/R32-M1) so byte-offset cursors
+ *    echoing the pre-compaction generation re-read instead of resuming mid-file
+ * 7. Return compaction stats
  */
 export function compactEventLog(
 	eventsPath: string,
@@ -404,6 +406,21 @@ export function applyCompactionUnlocked(
 		logInternalError("event-log-rotation.compact", err, `eventsPath=${eventsPath}`);
 		return undefined;
 	}
+	// EP4 (R32-M1 ≡ R4-N1/FS10, fix-wave 6): compaction REWRITES the live log at
+	// the same path (atomicWriteFile → temp+rename, a NEW inode) and drops the
+	// events before the kept window. Without a generation bump, a byte-offset
+	// cursor reader echoing the pre-compaction `generation` (readEventsCursor's
+	// cache-key, cursor.ts) still matches the live sidecar and resumes from its
+	// old offset — which now points into the MIDDLE of the rewritten file — so
+	// it silently skips the kept-window head it never delivered. The `shrank`
+	// fallback does NOT cover this: it only fires when the file is shorter than
+	// the caller's offset. Bump here so EVERY compaction path (compactEventLog /
+	// compactPreparedEventLog / applyCompactionAppendGuarded + the inline call
+	// sites in event-log.ts) invalidates stale cursors exactly like rotation
+	// (rotateEventLogUnlocked). A no-op compaction never reaches this point —
+	// prepareCompaction returns undefined when originalCount <= compactToCount —
+	// so the generation stays stable when nothing was truncated.
+	bumpGenerationUnlocked(eventsPath);
 	// U22 fix round: the compacted file is NEW content at the same path — every
 	// old poison marker is meaningless (its byteOffset now names an arbitrary
 	// line of the rewritten file). Drop the sidecar so a stale marker can never
@@ -466,9 +483,10 @@ export function applyCompactionUnlocked(
 /**
  * R-03: Path of the generation sidecar for an events file. Mirrors the
  * `.seq` sidecar pattern. The generation is bumped every time the events
- * file is rotated (truncated + archived), so readers holding a byte-offset
- * cursor can detect their offset is stale and re-read from the start of the
- * new file instead of missing the post-rotation events.
+ * file is REWRITTEN in place with different content — rotation (truncated +
+ * archived) or compaction (prefix dropped, kept window rewritten) — so
+ * readers holding a byte-offset cursor can detect their offset is stale and
+ * re-read from the start of the new file instead of missing events.
  */
 export function generationPath(eventsPath: string): string {
 	return `${eventsPath}.gen`;
@@ -500,11 +518,15 @@ export function currentGeneration(eventsPath: string): number {
 
 /**
  * R-03: Atomically bump and persist the generation sidecar. Called by
- * `rotateEventLogUnlocked` after truncating the events file. Assumes the
+ * `rotateEventLogUnlocked` after truncating the events file, by
+ * `applyCompactionUnlocked` after rewriting it (EP4/R32-M1), and by
+ * `quarantinePoisonedEventsFile` after renaming the poisoned file away
+ * (EP4/FS10 residual, wave-6 M4-R2 — a rename is the same file-instance
+ * change at the SAME path, so byte-offset cursors must reset). Assumes the
  * caller already holds the event-log lock (or accepts the unlocked race).
  * Returns the new generation value.
  */
-function bumpGenerationUnlocked(eventsPath: string): number {
+export function bumpGenerationUnlocked(eventsPath: string): number {
 	const next = currentGeneration(eventsPath) + 1;
 	try {
 		atomicWriteFile(generationPath(eventsPath), String(next));

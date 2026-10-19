@@ -10,6 +10,7 @@ import { ROLE_TOOL_CONFIGS, getRestrictedRoles } from "../src/config/role-tools.
 import { permissionForRole } from "../src/runtime/role-permission.ts";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const header = `# Role → Tools reference (generated)
 

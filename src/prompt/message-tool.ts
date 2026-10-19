@@ -118,7 +118,7 @@ export interface MessageTool {
  *  the injected env object, never a raw process.env.PI_CREW_* member, so the
  *  check:env-vars gate stays green). */
 export function shouldRegisterMessageTool(env: NodeJS.ProcessEnv = process.env): boolean {
-	return env[PI_CREW_MSG_ENABLED_ENV] === "1";
+	return getCrewEnv(PI_CREW_MSG_ENABLED_ENV, env) === "1";
 }
 
 export function createMessageTool(deps: MessageToolDeps = {}): MessageTool {

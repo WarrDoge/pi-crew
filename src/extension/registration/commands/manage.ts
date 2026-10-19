@@ -99,8 +99,10 @@ export function registerManageCommands(pi: ExtensionAPI, deps: RegisterTeamComma
 		description: "Open the pi-crew interactive menu (list/run/status/cleanup/manage resources/doctor)",
 		handler: handleTeamManagerCommand,
 	});
-	// Backward-compat alias: this command was originally registered as "team-cleanup"
-	// (the interactive menu predates the runId-targeted cleanup action). Keep both so
+	// Backward-compat alias: the interactive menu originally shipped under a
+	// runId-targeted name; `/team-cleanup` itself was NEVER registered (R27-D1) —
+	// the live names are `/team-manager` and this `/team-cleanup-menu` alias, so
+	// docs must not advertise `/team-cleanup <runId>`. Keep both.
 
 	pi.registerCommand("team-cleanup-menu", {
 		description: "Alias for /team-manager (pi-crew interactive menu)",
@@ -218,6 +220,11 @@ export function registerManageCommands(pi: ExtensionAPI, deps: RegisterTeamComma
 			// LAZY: load withSessionId only when needed for skill-create command
 			const { withSessionId } = await import("../../team-tool/context.ts");
 			const sessionId = withSessionId(ctx);
+			// R49-F7: `ctx.workspaceFolder` is a PHANTOM read — it is a VS-Code-era
+			// field that pi's ExtensionCommandContext does not define (absent in the
+			// resolved 0.77/1.0.4 api literal), so the optional chain always falls back
+			// to `process.cwd()`. Harmless (the fallback is correct) but do not treat
+			// this branch as a real cwd override.
 			const cwd =
 				(
 					ctx as unknown as {

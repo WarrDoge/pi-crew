@@ -182,6 +182,9 @@ export class ChainRunner {
 		const startTime = Date.now();
 		let totalTokens = 0;
 		const allHandoffs: HandoffSummary[] = [];
+		// R14-C5: a break leaves later steps UNEXECUTED. Tracked explicitly so the
+		// success predicate cannot report a truncated chain as complete.
+		let brokeEarly = false;
 
 		for (let i = 0; i < spec.steps.length; i++) {
 			const step = spec.steps[i];
@@ -228,6 +231,7 @@ export class ChainRunner {
 				} else {
 					// Stop chain on step failure unless configured to continue
 					if (!spec.continueOnError && !step.continueOnError) {
+						brokeEarly = true;
 						break;
 					}
 				}
@@ -261,15 +265,25 @@ export class ChainRunner {
 
 				// Stop chain on failure unless configured to continue
 				if (!spec.continueOnError && !step.continueOnError) {
+					brokeEarly = true;
 					break;
 				}
 			}
 		}
 
+		// R14-C5 (false-green): the old predicate was `every(outcome !== "failure")`,
+		// so a `partial` step — which breaks the chain exactly like a failure — still
+		// produced success:true, and dispatch printed "Chain completed" + status ok
+		// for a chain whose remaining steps never ran. An empty spec was vacuously
+		// green for the same reason. Success now requires: at least one step, no
+		// early break, every planned step executed, and every outcome `success`.
+		const allStepsExecuted = stepResults.length === spec.steps.length;
+		const allOutcomesSuccessful = stepResults.every((s) => s.outcome === "success");
+
 		return {
 			steps: stepResults,
 			totalDuration: Date.now() - startTime,
-			success: stepResults.every((s) => s.outcome !== "failure"),
+			success: spec.steps.length > 0 && !brokeEarly && allStepsExecuted && allOutcomesSuccessful,
 			totalTokens: totalTokens > 0 ? totalTokens : undefined,
 			totalHandoffs: allHandoffs,
 		};
@@ -403,34 +417,39 @@ export class ChainRunner {
 
 	/**
 	 * Convert DSL AST steps (from chain-parser) to ChainSpec.
+	 *
+	 * R14-C1: `parallel(...)` groups are FLATTENED into ordered steps. They used to
+	 * be parked in `step.context.parallel`, which no consumer ever read — the whole
+	 * group collapsed into one step literally named "parallel" and never ran its
+	 * members. Chain execution is sequential by contract (see runChain), so the
+	 * members run in source order and each keeps its own step result, which means a
+	 * failing member stays visible instead of vanishing into a dropped group.
 	 */
 	private dslToChainSpec(dslSteps: DSLChainStep[], chainString: string): ChainSpec {
-		const steps: ChainStep[] = dslSteps.map((dslStep, index) => {
-			// For parallel groups, use a synthetic step name
+		const steps: ChainStep[] = [];
+
+		// Recursive so nested groups (parallel(a, parallel(b, c))) flatten too.
+		const pushStep = (dslStep: DSLChainStep): void => {
 			if (dslStep.parallel) {
-				return {
-					name: dslStep.name,
-					context: {
-						parallel: dslStep.parallel.map((p) => ({
-							name: p.name,
-							loopCount: p.loopCount,
-							withContext: p.withContext,
-							args: p.args,
-						})),
-					},
-					loopCount: dslStep.loopCount,
-				};
+				for (const member of dslStep.parallel) pushStep(member);
+				return;
 			}
+
 			const step: ChainStep = { name: dslStep.name };
-			if (dslStep.loopCount)
-				step.context = {
-					...step.context,
-					loopCount: dslStep.loopCount,
-				};
+
+			// '@team' reference — same resolution the simple parser applies to @refs.
+			if (dslStep.name.startsWith("@")) {
+				const team = this.sanitizeIdentifier(dslStep.name.slice(1));
+				if (team.length > 0) step.team = team;
+			}
+
+			if (dslStep.loopCount) step.context = { ...step.context, loopCount: dslStep.loopCount };
 			if (dslStep.withContext) step.context = { ...step.context, withContext: true };
 			if (dslStep.args && dslStep.args.length > 0) step.context = { ...step.context, args: dslStep.args };
-			return step;
-		});
+			steps.push(step);
+		};
+
+		for (const dslStep of dslSteps) pushStep(dslStep);
 
 		// Extract global overrides using existing logic
 		const globalModel = this.extractGlobalFlag(chainString, "global-model");

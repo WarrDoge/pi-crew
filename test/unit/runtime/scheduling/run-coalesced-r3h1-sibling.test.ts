@@ -108,6 +108,12 @@ test("R3-H1 structural: no dispatch save site persists the raw updatedTasks clos
 	// All three swapped sites are present (pre-dispatch ×2 + terminal write).
 	const swaps = src.match(/await repairGroupTerminalWrite\(manifest, taskIds, updatedTasks\)/g) ?? [];
 	assert.ok(swaps.length >= 3, `expected >= 3 repairGroupTerminalWrite call sites, found ${swaps.length}`);
-	// The merge helper itself only persists the fresh-read merged array.
-	assert.ok(src.includes("await saveRunTasksAsync(manifest, merged)"), "merge helpers persist the fresh-read merged array");
+	// The merge helper itself only persists the fresh-read merged array — now
+	// inside the group run lock (M3-8/R23-F1: the read+write must be one
+	// critical section, and the body must stay synchronous so a concurrently
+	// dispatching singleton's sync run-lock write cannot fail-fast on it).
+	assert.ok(
+		src.includes("await withGroupRunLock(manifest, () =>") && src.includes("saveRunTasksCoalesced(manifest, merged, true)"),
+		"merge helpers persist the fresh-read merged array under the group run lock",
+	);
 });

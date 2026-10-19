@@ -21,6 +21,7 @@
  *  5. Otherwise → blocked with a reason telling the user what to pass.
  */
 
+import { getCrewEnv } from "../../config/env-vars.ts";
 import { currentCrewDepth } from "../../runtime/model/pi-args.ts";
 
 export const DESTRUCTIVE_TEAM_ACTIONS = new Set([
@@ -91,6 +92,19 @@ export function shouldBlockDestructiveTeamAction(action: string | undefined, inp
  *   - `create` /  — when resolved scope is `user` (create defaults to user;
  *   - `update`     update is gated at the resolved resource's scope — see
  *                   the post-`resolveMutable` call in management.ts).
+ *   - `workflow-` — ALWAYS (fix-wave 6, R11-S1): .dwf.ts scripts are
+ *     `create`/    arbitrary code auto-loaded by every future session —
+ *     `save`/      project tier included (`.crew/workflows/` is discovered
+ *     `delete`     per-repo) and delete reaches the user tier. This is a
+ *                  deliberate exception to "project stays worker-reachable".
+ *                  workflow-get/list (reads) stay open.
+ *   - `import` /  — at resolved scope `user` only (project/default open,
+ *   - `export`      mirroring handleImport's project default).
+ *
+ * Scope source (fix-wave 6, R11-F1): the canonical carrier is `config.scope`
+ * — the ONE key every scope-bearing handler reads. Top-level `params.scope`
+ * is ignored by the gate (as it already is by the handlers) so divergent
+ * carriers cannot smuggle a user-tier write past the gate.
  *
  * Reads (config/status/list, settings list/get, schedule `scheduled`) are
  * never gated. `dryRun` previews that write nothing pass through, mirroring
@@ -112,7 +126,7 @@ export class RootSessionRequiredError extends Error {
  * in-repo (broker tests).
  */
 export function isRootSession(env: NodeJS.ProcessEnv = process.env): boolean {
-	if (env.PI_CREW_KIND === "subagent") return false;
+	if (getCrewEnv("PI_CREW_KIND", env) === "subagent") return false;
 	try {
 		return currentCrewDepth(env) === 0;
 	} catch {
@@ -142,7 +156,9 @@ export function assertRootOnlyAction(
 		new RootSessionRequiredError(
 			`root-session required: team action '${action}'${subcommand ? ` (${subcommand})` : ""} ${what}. ` +
 				"This session is a pi-crew worker (PI_CREW_KIND/subagent or depth>0); user-tier state persists beyond the task and is reserved for the user's root pi session. " +
-				(what.includes("project") ? "" : "Re-run with scope:'project' for project-local effects, or from the root session."),
+				(what.includes("project")
+					? ""
+					: "Re-run with config: {scope: 'project'} for project-local effects, or from the root session."),
 		);
 	switch (action) {
 		case "schedule":
@@ -171,6 +187,24 @@ export function assertRootOnlyAction(
 		case "update":
 			if (scope === "user") return detail("rewrites a user-tier resource loaded by every future session");
 			return undefined;
+		case "workflow-create":
+		case "workflow-save":
+			// R11-S1 (fix-wave 6 M1-3): a .dwf.ts is arbitrary code auto-loaded by
+			// every future session in the discovery dirs — project tier included
+			// (`.crew/workflows/` of this repo). Unconditional for workers, like
+			// autonomy: no worker-reachable scope (confirm:true is caller-
+			// controlled and thus no barrier).
+			return detail("writes a dynamic-workflow .dwf.ts script auto-loaded by future sessions (arbitrary-code surface)");
+		case "workflow-delete":
+			// The target's tier is resolved from the named workflow at delete time
+			// (not from params) and includes the user tier — fail closed for workers.
+			return detail("deletes a persistent dynamic-workflow file (user tier included)");
+		case "import":
+			if (scope === "user") return detail("imports a run bundle into user-scope state (all future sessions)");
+			return undefined;
+		case "export":
+			if (scope === "user") return detail("writes a user-scope run export (all future sessions)");
+			return undefined;
 		default:
 			return undefined;
 	}
@@ -186,6 +220,9 @@ export interface RootGateParamsLike {
 	subAction?: unknown;
 	/** Advisory-only dryRun preview flag. */
 	dryRun?: unknown;
+	/** Destructive-gate confirm flag — caller-controlled, so the root-gate
+	 * deliberately does NOT treat it as a bypass (R11-S1 pin). */
+	confirm?: unknown;
 	config?: unknown;
 }
 
@@ -193,15 +230,29 @@ function configRecord(config: unknown): Record<string, unknown> {
 	return config && typeof config === "object" && !Array.isArray(config) ? (config as Record<string, unknown>) : {};
 }
 
-function resolveScopeParam(params: RootGateParamsLike): RootGateScope {
+/**
+ * R11-F1 (fix-wave 6, M1-2): the canonical scope carrier is `config.scope` —
+ * the same key every scope-bearing handler reads (create/settings/config in
+ * their dispatch paths, import and workflow-create in their handlers). The
+ * previous `params.scope ?? config.scope` read let a divergent
+ * `{scope: "project", config: {scope: "user"}}` payload pass the gate while
+ * the handler wrote the user tier. Handlers ignore top-level `scope`, so the
+ * gate must too. Per-action defaults mirror each handler's own default when
+ * the carrier is absent: import/export default `project` (handleImport),
+ * everything else defaults `user` (fail-closed, like create/settings/config).
+ */
+function resolveScopeParam(params: RootGateParamsLike, action?: string): RootGateScope {
 	const fromConfig = configRecord(params.config).scope;
-	const raw = params.scope ?? fromConfig;
-	return raw === "project" ? "project" : "user";
+	if (fromConfig === "project") return "project";
+	if (fromConfig === "user") return "user";
+	return action === "import" || action === "export" ? "project" : "user";
 }
 
 /**
  * Facade resolver: derive (subcommand, scope) from raw team-tool params for
  * the gated actions and decide whether a NON-ROOT session must be blocked.
+ * R11-F1: scope resolves from `config.scope` only (canonical carrier — see
+ * {@link resolveScopeParam}); top-level `scope` never influences the gate.
  * `update` is special: its effective write scope is the matched resource's
  * scope, unknown until `resolveMutable` — the facade blocks explicit
  * `scope:"user"` and management.ts gates the resolved case.
@@ -216,7 +267,7 @@ export function rootGateBlockReason(params: RootGateParamsLike, env: NodeJS.Proc
 		(typeof params.subAction === "string" ? params.subAction : undefined) ??
 		(typeof cfg.subAction === "string" ? cfg.subAction : undefined);
 	const subcommand = typeof rawSub === "string" ? rawSub.toLowerCase() : undefined;
-	const scope = resolveScopeParam(params);
+	const scope = resolveScopeParam(params, action);
 	const force = params.force === true || cfg.force === true;
 
 	// Reads / previews never gated (destructive-gate dryRun convention).

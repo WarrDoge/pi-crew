@@ -13,7 +13,8 @@ const legacyConfigPath = path.join(agentDir, "extensions", "pi-crew", "config.js
  * Default config written to `~/.pi/agent/pi-crew.json` on fresh installs.
  *
  * WI-1b.2 (G17): this object is intentionally an embedded literal — install.mjs
- * runs under bare `node` as the `pi-crew` bin (engines floor is >=22.0.0; .ts
+ * runs under bare `node` as the `pi-crew` bin (engines floor is >=22.19.0 — the
+ * pre-R29-F3 comment said >=22.0.0; .ts
  * imports would require >=22.18 or `--experimental-strip-types`, which the npm
  * bin shim cannot pass). Runtime jiti/esbuild loading was rejected as a
  * postinstall failure surface; build-time codegen would need package.json /

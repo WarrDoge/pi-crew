@@ -27,6 +27,8 @@ import {
 } from "../../extension/run-maintenance.ts";
 import { type BrokerSpawnCredentials, setActiveBrokerIssuer, setActiveBrokerRevoker } from "../../runtime/broker/broker-issuer.ts";
 import { CrewBroker } from "../../runtime/broker/crew-broker.ts";
+import { setActiveDelegateAborter } from "../../runtime/broker/delegate/delegate-abort.ts";
+import { DEFAULT_LOCK_BUSY_RETRY_DELAYS_MS, withRunLockBusyRetryAsync } from "../../runtime/broker/protocol/lock-busy.ts";
 import { terminateActiveChildPiProcesses } from "../../runtime/child-pi/child-pi.ts";
 import type { createManifestCache } from "../../runtime/manifest-cache.ts";
 import { configuredModelInfosFromPiConfig } from "../../runtime/model/model-fallback.ts";
@@ -40,7 +42,8 @@ import { tryRegisterSessionCleanup } from "../../runtime/session-resources.ts";
 import { createSessionSnapshot } from "../../runtime/session-snapshot.ts";
 import { applyCrewSettingsTiersToConfig, loadCrewSettingsTiers, scheduledJobsHiddenCountOf } from "../../runtime/settings-store.ts";
 import type { ReconcileResult } from "../../runtime/stale-reconciler.ts";
-import { loadRunManifestById } from "../../state/stores/state-store.ts";
+import { loadRunManifestById, saveRunManifest } from "../../state/stores/state-store.ts";
+import type { TeamRunManifest } from "../../state/types.ts";
 import { installInlinePanel } from "../../ui/inline-panel/index.ts";
 import { clearSessionSwitchInFlight, markSessionSwitchInFlight } from "../../ui/inline-panel/view-session-store.ts";
 import { registerPiCrewPowerbarSegments, resetPowerbarDedupState, updatePiCrewPowerbar } from "../../ui/powerbar-publisher.ts";
@@ -532,6 +535,56 @@ async function runDeferredSessionCleanup(
 	}
 }
 
+/** Manifest keys the scheduler stamps for traceability. They are NOT declared
+ *  on TeamRunManifest (carried as extra keys, exactly like the pre-fix inline
+ *  write did) — the provenance stamp is advisory metadata, never read back by
+ *  any consumer. */
+type SchedulerProvenanceFields = { schedulerJobId: string; schedulerName: string };
+
+/**
+ * M3-7 (R22-F2 / F22-2, fix-wave 6): stamp scheduler provenance on a scheduled
+ * run's manifest WITHOUT racing the runner.
+ *
+ * Pre-fix the executor did `atomicWriteJson(stateRoot + "/manifest.json",
+ * {...loaded.manifest, schedulerJobId, schedulerName})` — a RAW write that
+ * (a) bypassed run.lock, so it interleaved with team-runner's saveRunManifest /
+ * saveRunManifestAsync, and (b) bypassed the write-layer terminal-preserve
+ * guard, so a cancel/reconciler flip landing in the window was RESURRECTED to
+ * "running" while usage/artifacts were reverted to the pre-write snapshot. It
+ * fired on EVERY scheduled fire.
+ *
+ * Fix: re-read INSIDE run.lock (bounded busy-retry) and persist through
+ * `saveRunManifest`, which applies `preserveDiskTerminalStatus` (never erases a
+ * terminal disk status) and invalidates/repopulates the manifest cache. Read +
+ * write under the same lock closes the lost-update window by construction.
+ *
+ * Best-effort by contract (provenance must never break a scheduled fire): a
+ * pruned run, exhausted lock budget or write fault logs at warn and returns
+ * false.
+ *
+ * @internal exported for the M3-7 unit pin
+ * (test/unit/runtime/scheduling/scheduler-provenance-lock.test.ts).
+ */
+export async function stampSchedulerRunProvenance(cwd: string, runId: string, job: { id: string; name: string }): Promise<boolean> {
+	try {
+		const loaded = loadRunManifestById(cwd, runId);
+		if (!loaded) return false; // run pruned/unknown — nothing to stamp
+		const provenance: SchedulerProvenanceFields = { schedulerJobId: job.id, schedulerName: job.name };
+		await withRunLockBusyRetryAsync(loaded.manifest, DEFAULT_LOCK_BUSY_RETRY_DELAYS_MS, async () => {
+			// Fresh reload INSIDE the lock (respond.ts:42-43 discipline): outside
+			// would reintroduce the exact lost-update window being closed.
+			const fresh = loadRunManifestById(loaded.manifest.cwd, runId);
+			if (!fresh) return; // pruned between the outer load and the lock
+			const next: TeamRunManifest & SchedulerProvenanceFields = { ...fresh.manifest, ...provenance };
+			saveRunManifest(next);
+		});
+		return true;
+	} catch (error) {
+		logInternalError("scheduler.stamp-provenance", error, `runId=${runId} jobId=${job.id}`, "warn");
+		return false;
+	}
+}
+
 /**
  * Build a CrewScheduler wired to the current session. The scheduler's
  * executor closure invokes handleTeamTool lazily — the heavy team-tool
@@ -596,22 +649,11 @@ export function setupCrewScheduler(
 					const runId = runResult?.details?.runId;
 					if (runId && typeof runId === "string") {
 						crewScheduler?.recordSpawnedRun(job.id, runId);
-						// Update run manifest with scheduler provenance for traceability
-						try {
-							const cwd = extensionCtx.cwd ?? process.cwd();
-							const loaded = loadRunManifestById(cwd, runId);
-							if (loaded) {
-								// LAZY: defer dynamic import of atomic-write.ts to its call site.
-								const { atomicWriteJson } = await import("../../state/atomic-write.ts");
-								atomicWriteJson(loaded.manifest.stateRoot + "/manifest.json", {
-									...loaded.manifest,
-									schedulerJobId: job.id,
-									schedulerName: job.name,
-								});
-							}
-						} catch {
-							/* best-effort provenance tracking */
-						}
+						// Update run manifest with scheduler provenance for traceability.
+						// M3-7 (R22-F2): lock-held + terminal-preserving (was a raw
+						// atomicWriteJson outside run.lock that could resurrect a
+						// terminal status). Best-effort by contract.
+						await stampSchedulerRunProvenance(extensionCtx.cwd ?? process.cwd(), runId, job);
 					}
 					// R6-2(b) + I6 (round-6 audit): update state FIRST, then persist the
 					// UPDATED job. The old order persisted the fire-time snapshot (still
@@ -690,7 +732,7 @@ export interface CrewBrokerLifecycleController {
 }
 
 function isRootSession(env: NodeJS.ProcessEnv = process.env): boolean {
-	if (env.PI_CREW_KIND === "subagent") return false;
+	if (getCrewEnv("PI_CREW_KIND", env) === "subagent") return false;
 	try {
 		return currentCrewDepth(env) === 0;
 	} catch {
@@ -847,6 +889,24 @@ export function installCrewBrokerLifecycleController(_pi: ExtensionAPI, _ctx: Re
 	};
 	setActiveBrokerRevoker(revokeForTask);
 
+	// M3-5 / R43-N3: publish the delegate canceller alongside the revoker. The
+	// run-terminal paths (budget abort / cancellation → budget-enforcement.ts
+	// terminaliseRunWithDrain) call it so in-flight DELEGATE grandchildren are
+	// aborted instead of outliving the run to their own 24h deadline. Same
+	// self-gating as the revoker: no bound broker ⇒ nothing to cancel.
+	const abortDelegatesForRun = (runId: string, reason: string): number => {
+		if (!runId || typeof runId !== "string") return 0;
+		if (!isRootSession(process.env)) return 0;
+		if (!broker || brokerSessionId !== cachedSessionId) return 0;
+		try {
+			return broker.abortDelegatesForRun(runId, reason);
+		} catch (error) {
+			logInternalError("broker.abort-delegates", error instanceof Error ? error : new Error(String(error)), `runId=${runId}`, "warn");
+			return 0;
+		}
+	};
+	setActiveDelegateAborter(abortDelegatesForRun);
+
 	// Publish this issuer as the process-local active issuer so runChildPi can
 	// default `brokerIssuer` without the registration context being threaded
 	// through every runner call site. The issuer self-gates (root + flag), so
@@ -858,6 +918,7 @@ export function installCrewBrokerLifecycleController(_pi: ExtensionAPI, _ctx: Re
 		stop: async () => {
 			setActiveBrokerIssuer(undefined);
 			setActiveBrokerRevoker(undefined);
+			setActiveDelegateAborter(undefined);
 			if (broker) {
 				try {
 					await broker.stop();

@@ -26,7 +26,13 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
 
-const root = path.resolve(import.meta.dirname, "..");
+// R18-2: `--root <dir>` fixture seam (mirrors scripts/check-lazy-imports.mjs) so
+// the gate's own behavior can be pinned by a throwaway tree.
+const rootArgIndex = process.argv.indexOf("--root");
+const root =
+	rootArgIndex !== -1 && process.argv[rootArgIndex + 1]
+		? path.resolve(process.argv[rootArgIndex + 1])
+		: path.resolve(import.meta.dirname, "..");
 const enforce = process.argv.includes("--enforce");
 
 // 1. Parse TEAM_EVENT_TYPES from src/state/contracts.ts (single source of truth).
@@ -67,12 +73,46 @@ const TYPE_ANCHOR_RE = /\btype:\s*/g;
 const DOTTED_LITERAL_RE = /"([a-z][a-z0-9_.]+)"/g;
 const WINDOW_LINES = 15;
 const TYPE_EXPR_MAX_CHARS = 300;
+/** R18-2: static head of a template-literal type, e.g. ``type: `run.${status}` ``
+ *  → `run.` — the ONLY part a registry check can reason about. */
+const TEMPLATE_HEAD_RE = /^`((?:[^`$\\]|\\.)*)\$\{/;
+/** Any backtick in the value expression means the emitted type is assembled at
+ *  runtime (template literal). */
+const TEMPLATE_ANY_RE = /`/;
+
+/**
+ * R18-2 (deep-review round 18): the scanner used to see ONLY string literals in
+ * the `type:` value expression — template-literal and variable emits were
+ * invisible, so `--enforce` reported "clean" while LIVE dynamic emitters
+ * existed (`state-store.ts` `type: \`run.${status}\``,
+ * `child-executor.ts` `type: \`worker.${event.type}\``). A dynamic emit cannot
+ * be enumerated, but it CAN be classified:
+ *   - template with a static prefix → every possible type shares that prefix, so
+ *     the registry must contain the namespace (checked in enforce mode);
+ *   - template with no static head, or a bare identifier/expression → fully
+ *     unverifiable, reported (and failed on) rather than silently dropped.
+ * The regex/window scanning itself is unchanged (structural AST scoping stays
+ * the Phase-2 durable fix — see the header note).
+ */
+function classifyDynamicExpr(expr) {
+	const trimmed = expr.trim();
+	if (!trimmed) return undefined;
+	if (TEMPLATE_ANY_RE.test(trimmed)) {
+		const head = trimmed.match(TEMPLATE_HEAD_RE);
+		const prefix = head ? head[1] : "";
+		return { kind: "template", prefix };
+	}
+	// No string literal anywhere in the value expression → the type comes from a
+	// variable/constant (`type: teammateEvent`) — unverifiable statically.
+	if (!/["']/.test(trimmed)) return { kind: "variable", prefix: "" };
+	return undefined;
+}
 
 /** Extract every dotted string literal in the value expression that follows a
  *  `type:` key. Stops at the first top-level `,` (next property), an unbalanced
  *  closer (end of the enclosing object), or a char cap — newlines are allowed
  *  so a multi-line ternary still parses. */
-function extractTypeLiterals(text) {
+function typeValueExpr(text) {
 	let depth = 0;
 	let end = text.length;
 	for (let i = 0; i < Math.min(text.length, TYPE_EXPR_MAX_CHARS); i++) {
@@ -89,7 +129,11 @@ function extractTypeLiterals(text) {
 			break;
 		}
 	}
-	const expr = text.slice(0, end);
+	return text.slice(0, end);
+}
+
+function extractTypeLiterals(text) {
+	const expr = typeValueExpr(text);
 	const out = [];
 	for (const m of expr.matchAll(DOTTED_LITERAL_RE)) out.push(m[1]);
 	return out;
@@ -106,6 +150,7 @@ function listTsFiles(dir, out = []) {
 }
 
 const emitted = new Map(); // type → [{ file, line }]
+const dynamicSites = new Map(); // `${kind}|${prefix}|${file}:${line}` → site
 const tsFiles = listTsFiles(path.join(root, "src"));
 for (const file of tsFiles) {
 	const src = readFileSync(file, "utf-8");
@@ -125,6 +170,13 @@ for (const file of tsFiles) {
 				if (!emitted.has(t)) emitted.set(t, []);
 				emitted.get(t).push(`${rel}:${i + 1}`);
 			}
+			// R18-2: template-literal / variable emits are NOT enumerable, but they
+			// must not vanish from the report (they made --enforce a false green).
+			const dynamic = classifyDynamicExpr(typeValueExpr(after));
+			if (dynamic) {
+				const key = `${dynamic.kind}|${dynamic.prefix}|${rel}:${i + 1}`;
+				if (!dynamicSites.has(key)) dynamicSites.set(key, { ...dynamic, file: rel, line: i + 1 });
+			}
 		}
 	}
 }
@@ -133,8 +185,26 @@ for (const file of tsFiles) {
 const unregistered = [...emitted.keys()].filter((t) => !registered.has(t)).sort();
 const unused = [...registered].filter((t) => !emitted.has(t)).sort();
 
+// R18-2: an unregistered NAMESPACE on a template emit is drift too — every type
+// the site can emit is provably outside the registry (e.g. `type: \`bogus.${x}\``).
+const dynamicList = [...dynamicSites.values()];
+const unregisteredNamespaces = dynamicList
+	.filter((d) => d.kind === "template" && d.prefix.length > 0 && ![...registered].some((t) => t.startsWith(d.prefix)))
+	.sort((a, b) => a.prefix.localeCompare(b.prefix));
+const unverifiable = dynamicList.filter((d) => d.kind === "variable" || d.prefix.length === 0);
+
 // 4. Report.
 console.log(`event-types-registry: ${registered.size} registered, ${emitted.size} emitted (literal types only).`);
+if (dynamicList.length > 0) {
+	console.log(
+		`\nDYNAMIC — ${dynamicList.length} emit site(s) whose type is assembled at runtime (not enumerable; a template prefix is checked against the registry namespace):`,
+	);
+	for (const d of dynamicList.slice(0, 20))
+		console.log(
+			`  ${d.file}:${d.line}  ${d.kind === "template" ? `template, static prefix '${d.prefix || "(none)"}'` : "variable expression"}`,
+		);
+	if (dynamicList.length > 20) console.log(`  ... and ${dynamicList.length - 20} more.`);
+}
 if (unregistered.length > 0) {
 	console.log(`\nDRIFT — ${unregistered.length} emitted types NOT in TEAM_EVENT_TYPES (silent to consumers):`);
 	for (const t of unregistered.slice(0, 50)) {
@@ -153,6 +223,29 @@ if (enforce && unregistered.length > 0) {
 	console.error(`\ncheck-event-types-registry: --enforce failed (${unregistered.length} unregistered types).`);
 	console.error("  Add them to TEAM_EVENT_TYPES in src/state/contracts.ts, or fix the typo.");
 	process.exit(1);
+}
+
+if (enforce && unregisteredNamespaces.length > 0) {
+	console.error(
+		`\ncheck-event-types-registry: --enforce failed (${unregisteredNamespaces.length} dynamic emit site(s) whose static prefix matches NO registered type).`,
+	);
+	for (const d of unregisteredNamespaces) console.error(`  ${d.file}:${d.line}  prefix '${d.prefix}'`);
+	console.error("  Register the namespace in TEAM_EVENT_TYPES, or emit a literal type.");
+	process.exit(1);
+}
+
+if (enforce && unverifiable.length > 0) {
+	// R18-2: NOT fatal. These sites are typed indirections (a `TeamEvent` value
+	// from a typed map, a channel item's `type`) — enforcing them here would
+	// demand an inline allowlist, which is exactly the escape hatch this gate
+	// exists to prevent. The durable fix is Phase-2 type tightening
+	// (`TeamEvent.type` → `TeamEventType`), which catches them at the call site.
+	// What must NOT happen (the round-18 finding) is silence: they are listed.
+	console.error(
+		`\ncheck-event-types-registry: WARNING — ${unverifiable.length} emit site(s) whose type cannot be verified statically (Phase-2 type tightening is the durable fix):`,
+	);
+	for (const d of unverifiable)
+		console.error(`  ${d.file}:${d.line}  ${d.kind === "variable" ? "variable expression" : "template with no static prefix"}`);
 }
 
 console.log(`\ncheck-event-types-registry: ${enforce ? "ENFORCE mode — clean." : "REPORT mode (run with --enforce to fail CI)."} Exit 0.`);

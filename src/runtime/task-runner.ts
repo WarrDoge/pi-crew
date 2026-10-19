@@ -176,6 +176,12 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 			try {
 				const preGate = await runVerifierGatePreGate({
 					cwd: ctx.task.cwd,
+					// M1-7 (R47-1): host-owned ground truth pinned on the manifest at
+					// dispatch — the gate verifies manifest integrity against it and
+					// never re-derives checks from the worker-mutable task-cwd
+					// package.json. Absent (old manifests / goal-loop runs) ⇒ the gate
+					// resolves no checks ⇒ INCONCLUSIVE ⇒ verifier spawns (fail-closed).
+					...(manifest.verifyGateSpec ? { hostSpec: manifest.verifyGateSpec } : {}),
 					signal: input.signal,
 					classifier: {
 						enabled: resolveClassifierEnabled(input.runtimeConfig?.classifierEnabled),
@@ -187,9 +193,10 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 					},
 					metricRegistry: input.metricRegistry,
 				});
-				// Diagnostic event (task.verifier_pre_gate — U6B's event type; the
-				// TEAM_EVENT_TYPES registry entry stays report-only pending a
-				// src/state/** lane, same as classifier-pre-gate's own appends).
+				// Diagnostic event (task.verifier_pre_gate — U6B's event type; now REGISTERED
+				// in TEAM_EVENT_TYPES at src/state/contracts.ts:306, so the earlier
+				// "report-only pending a src/state/** lane" note is stale — checked clean
+				// by `check:event-types --enforce` in CI).
 				appendEventFireAndForget(manifest.eventsPath, {
 					type: "task.verifier_pre_gate",
 					runId: manifest.runId,
@@ -240,6 +247,12 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 								reason: preGate.decision.reason,
 								evidenceLines: preGate.outcome.evidenceLines,
 							},
+							// R47-V7 (2026-10-19): the skip path FABRICATES the terminal result
+							// below (exitCode:0, green summary, no model attempts). Tag the
+							// provenance so consumers — the effectiveness guard — never mistake
+							// this synthesized result for real worker output.
+							// taskIsSyntheticGateSkip() (effectiveness.ts) reads this flag.
+							synthetic: true,
 						},
 					};
 					// FIX (review round): prepare the finalizer args here but DO NOT

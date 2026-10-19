@@ -83,7 +83,7 @@ test("ST-10: pruneExpiredArtifacts deletes files past expiresAt", () => {
 			makeDescriptor(validFile, { expiresAt: iso(60_000) }),
 		];
 
-		const deleted = pruneExpiredArtifacts(descriptors);
+		const deleted = pruneExpiredArtifacts(descriptors, { artifactsRoot: dir });
 		assert.equal(deleted, 1);
 		assert.equal(fs.existsSync(expiredFile), false);
 		assert.equal(fs.existsSync(validFile), true);
@@ -112,7 +112,7 @@ test("ST-10: pruneExpiredArtifacts deletes 'temporary' retention artifacts past 
 			}),
 		];
 
-		const deleted = pruneExpiredArtifacts(descriptors, { now });
+		const deleted = pruneExpiredArtifacts(descriptors, { now, artifactsRoot: dir });
 		assert.equal(deleted, 1);
 		assert.equal(fs.existsSync(staleFile), false);
 		assert.equal(fs.existsSync(freshFile), true);
@@ -136,7 +136,7 @@ test("ST-10: pruneExpiredArtifacts does NOT delete 'run' or 'project' retention 
 			makeDescriptor(projectFile, { retention: "project", createdAt: oldIso }),
 		];
 
-		const deleted = pruneExpiredArtifacts(descriptors);
+		const deleted = pruneExpiredArtifacts(descriptors, { artifactsRoot: dir });
 		assert.equal(deleted, 0);
 		assert.equal(fs.existsSync(runFile), true);
 		assert.equal(fs.existsSync(projectFile), true);
@@ -151,7 +151,7 @@ test("ST-10: pruneExpiredArtifacts handles missing files gracefully", () => {
 		const descriptors: ArtifactDescriptor[] = [makeDescriptor(path.join(dir, "does-not-exist.log"), { expiresAt: iso(-60_000) })];
 
 		// Should not throw — best-effort.
-		const deleted = pruneExpiredArtifacts(descriptors);
+		const deleted = pruneExpiredArtifacts(descriptors, { artifactsRoot: dir });
 		assert.equal(deleted, 0);
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
@@ -159,7 +159,7 @@ test("ST-10: pruneExpiredArtifacts handles missing files gracefully", () => {
 });
 
 test("ST-10: pruneExpiredArtifacts with empty descriptor list is a no-op", () => {
-	const deleted = pruneExpiredArtifacts([]);
+	const deleted = pruneExpiredArtifacts([], { artifactsRoot: path.join(realTmp, "anchor-unused") });
 	assert.equal(deleted, 0);
 });
 
@@ -174,13 +174,161 @@ test("ST-10: pruneExpiredArtifacts respects custom temporaryTtlMs", () => {
 		const descriptors: ArtifactDescriptor[] = [makeDescriptor(file, { retention: "temporary", createdAt: created5sAgo })];
 
 		// With a 10s TTL, 5s old is NOT expired.
-		assert.equal(pruneExpiredArtifacts(descriptors, { now, temporaryTtlMs: 10_000 }), 0);
+		assert.equal(pruneExpiredArtifacts(descriptors, { now, temporaryTtlMs: 10_000, artifactsRoot: dir }), 0);
 		assert.equal(fs.existsSync(file), true);
 
 		// With a 3s TTL, 5s old IS expired.
-		assert.equal(pruneExpiredArtifacts(descriptors, { now, temporaryTtlMs: 3_000 }), 1);
+		assert.equal(pruneExpiredArtifacts(descriptors, { now, temporaryTtlMs: 3_000, artifactsRoot: dir }), 1);
 		assert.equal(fs.existsSync(file), false);
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// ---------------------------------------------------------------------------
+// R44-N1 (fix-wave 6): prune containment — every manifest-declared artifact
+// path must realpath UNDER the run's host-derived artifacts root before
+// unlink. Pins the live-proven probe (P1: absolute + `../` victims unlinked,
+// control survived) as real tests: the victims must now SURVIVE.
+// ---------------------------------------------------------------------------
+
+test("R44-N1: absolute path outside the artifacts root survives (never unlinked)", () => {
+	const anchor = makeTmpDir();
+	const outside = makeTmpDir();
+	try {
+		const victim = path.join(outside, "victim-abs.txt");
+		fs.writeFileSync(victim, "user file");
+		const descriptors: ArtifactDescriptor[] = [makeDescriptor(victim, { expiresAt: iso(-60_000) })];
+		const deleted = pruneExpiredArtifacts(descriptors, { artifactsRoot: anchor });
+		assert.equal(deleted, 0);
+		assert.equal(fs.existsSync(victim), true, "absolute-outside victim must survive");
+	} finally {
+		fs.rmSync(anchor, { recursive: true, force: true });
+		fs.rmSync(outside, { recursive: true, force: true });
+	}
+});
+
+test("R44-N1: `..` traversal path escaping the artifacts root survives", () => {
+	const anchor = makeTmpDir();
+	const outside = makeTmpDir();
+	try {
+		const victim = path.join(outside, "victim-rel.txt");
+		fs.writeFileSync(victim, "user file");
+		// Relative escape from the anchor to the victim with a LITERAL `..`
+		// segment (mirrors the live P1 probe's
+		// state/runs/../../../../../victim-rel.txt descriptor).
+		const escaping = `${anchor}/../${path.relative(path.dirname(anchor), victim)}`;
+		const descriptors: ArtifactDescriptor[] = [makeDescriptor(escaping, { expiresAt: iso(-60_000) })];
+		const deleted = pruneExpiredArtifacts(descriptors, { artifactsRoot: anchor });
+		assert.equal(deleted, 0);
+		assert.equal(fs.existsSync(victim), true, "`..`-escape victim must survive");
+	} finally {
+		fs.rmSync(anchor, { recursive: true, force: true });
+		fs.rmSync(outside, { recursive: true, force: true });
+	}
+});
+
+test("R44-N1: symlink inside the root pointing at an outside victim survives (symlink escape)", () => {
+	const anchor = makeTmpDir();
+	const outside = makeTmpDir();
+	try {
+		const victim = path.join(outside, "victim-symlink.txt");
+		fs.writeFileSync(victim, "user file");
+		const link = path.join(anchor, "escape-link.log");
+		fs.symlinkSync(victim, link);
+		const descriptors: ArtifactDescriptor[] = [makeDescriptor(link, { expiresAt: iso(-60_000) })];
+		const deleted = pruneExpiredArtifacts(descriptors, { artifactsRoot: anchor });
+		assert.equal(deleted, 0);
+		assert.equal(fs.existsSync(victim), true, "symlink-escape victim must survive");
+	} finally {
+		fs.rmSync(anchor, { recursive: true, force: true });
+		fs.rmSync(outside, { recursive: true, force: true });
+	}
+});
+
+test("R44-N1: expired artifact genuinely inside the root is still pruned (control)", () => {
+	const anchor = makeTmpDir();
+	try {
+		const nested = path.join(anchor, "tasks", "01_x");
+		fs.mkdirSync(nested, { recursive: true });
+		const expired = path.join(nested, "expired.log");
+		const valid = path.join(anchor, "valid.log");
+		fs.writeFileSync(expired, "x");
+		fs.writeFileSync(valid, "y");
+		const descriptors: ArtifactDescriptor[] = [
+			makeDescriptor(expired, { expiresAt: iso(-60_000) }),
+			makeDescriptor(valid, { expiresAt: iso(60_000) }),
+		];
+		const deleted = pruneExpiredArtifacts(descriptors, { artifactsRoot: anchor });
+		assert.equal(deleted, 1);
+		assert.equal(fs.existsSync(expired), false, "in-root expired artifact must be pruned");
+		assert.equal(fs.existsSync(valid), true);
+	} finally {
+		fs.rmSync(anchor, { recursive: true, force: true });
+	}
+});
+
+test("R44-N1: missing artifacts root (anchor) fails closed — nothing deleted", () => {
+	const outside = makeTmpDir();
+	try {
+		const victim = path.join(outside, "victim-noanchor.txt");
+		fs.writeFileSync(victim, "user file");
+		const missingAnchor = path.join(outside, "no-such-artifacts-root");
+		const descriptors: ArtifactDescriptor[] = [makeDescriptor(victim, { expiresAt: iso(-60_000) })];
+		const deleted = pruneExpiredArtifacts(descriptors, { artifactsRoot: missingAnchor });
+		assert.equal(deleted, 0);
+		assert.equal(fs.existsSync(victim), true);
+	} finally {
+		fs.rmSync(outside, { recursive: true, force: true });
+	}
+});
+
+test("R44-N1: symlinked artifacts root fails closed — nothing deleted", () => {
+	const anchor = makeTmpDir();
+	const outside = makeTmpDir();
+	try {
+		const victim = path.join(outside, "victim-symlinkroot.txt");
+		fs.writeFileSync(victim, "user file");
+		const inside = path.join(anchor, "inside.log");
+		fs.writeFileSync(inside, "artifact");
+		const linkedAnchor = path.join(outside, "linked-root");
+		fs.symlinkSync(anchor, linkedAnchor);
+		const descriptors: ArtifactDescriptor[] = [makeDescriptor(inside, { expiresAt: iso(-60_000) })];
+		const deleted = pruneExpiredArtifacts(descriptors, { artifactsRoot: linkedAnchor });
+		assert.equal(deleted, 0, "a symlinked anchor proves nothing — fail closed");
+		assert.equal(fs.existsSync(inside), true);
+		assert.equal(fs.existsSync(victim), true);
+	} finally {
+		fs.rmSync(anchor, { recursive: true, force: true });
+		fs.rmSync(outside, { recursive: true, force: true });
+	}
+});
+
+test("R44-N1: realpath failure on the target (non-ENOENT) fails closed", () => {
+	const anchor = makeTmpDir();
+	try {
+		// A dangling path whose PARENT is a plain file: realpathSync fails with
+		// ENOTDIR (not ENOENT) — must skip, never throw, never delete.
+		const blockingFile = path.join(anchor, "blocker");
+		fs.writeFileSync(blockingFile, "not a dir");
+		const badPath = path.join(blockingFile, "child.log");
+		const descriptors: ArtifactDescriptor[] = [makeDescriptor(badPath, { expiresAt: iso(-60_000) })];
+		const deleted = pruneExpiredArtifacts(descriptors, { artifactsRoot: anchor });
+		assert.equal(deleted, 0);
+		assert.equal(fs.existsSync(blockingFile), true, "the blocking file itself must never be touched");
+	} finally {
+		fs.rmSync(anchor, { recursive: true, force: true });
+	}
+});
+
+test("R44-N1: descriptor path exactly equal to the anchor directory is blocked", () => {
+	const anchor = makeTmpDir();
+	try {
+		const descriptors: ArtifactDescriptor[] = [makeDescriptor(anchor, { expiresAt: iso(-60_000) })];
+		const deleted = pruneExpiredArtifacts(descriptors, { artifactsRoot: fs.realpathSync(anchor) });
+		assert.equal(deleted, 0);
+		assert.equal(fs.existsSync(anchor), true, "the artifacts root itself must never be unlinked");
+	} finally {
+		fs.rmSync(anchor, { recursive: true, force: true });
 	}
 });

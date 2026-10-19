@@ -72,6 +72,15 @@ const DOT_RE = /process\.env\??\.(PI_CREW_[A-Z0-9_]+|PI_TEAMS_[A-Z0-9_]+)/g;
 const LITERAL_RE = /process\.env\s*\[\s*(["'`])(PI_CREW_[A-Z0-9_]+|PI_TEAMS_[A-Z0-9_]+)\1\s*\]/g;
 const CONST_BRACKET_RE = /process\.env\s*\[\s*([A-Za-z_$][\w$]*)\s*\]/g;
 const CONST_DECL_RE = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(["'])(PI_CREW_[A-Z0-9_]+|PI_TEAMS_[A-Z0-9_]+)\2/g;
+/**
+ * R26-F1: identifiers the file itself binds to `process.env` — a default
+ * parameter (`function f(env: NodeJS.ProcessEnv = process.env)`) or an
+ * assignment (`const env = process.env`). Reads through such an alias are the
+ * SAME raw read as `process.env.PI_CREW_X` but were invisible to this gate,
+ * so a security-relevant read (`isRootSession(env)` → `env.PI_CREW_KIND`)
+ * could be edited with no gate signal.
+ */
+const ENV_ALIAS_RE = /\b([A-Za-z_$][\w$]*)\s*(?::\s*[A-Za-z_.<>[\]|\s]+)?=\s*process\.env\b(?!\s*[.[])/g;
 
 /** Locate the end (0-based) of the `process.env…` access starting at `start`. */
 function accessEnd(line, start) {
@@ -113,6 +122,32 @@ function collectEnvConsts(source) {
 	const map = new Map();
 	for (const m of source.matchAll(CONST_DECL_RE)) map.set(m[1], m[3]);
 	return map;
+}
+
+/** Collect identifiers bound to `process.env` in this file (R26-F1 aliases). */
+function collectEnvAliases(source) {
+	const aliases = new Set();
+	for (const m of source.matchAll(ENV_ALIAS_RE)) aliases.add(m[1]);
+	aliases.delete("process");
+	return aliases;
+}
+
+/** `<alias>.PI_CREW_X` / `<alias>[CONST]` readers for one file, with the match
+ *  end offset (so the write-tail exemption works exactly like process.env). */
+function aliasFindings(line, aliases, envConsts) {
+	const out = [];
+	if (aliases.size === 0) return out;
+	const alternation = [...aliases].map((a) => a.replace(/[$]/g, "\\$")).join("|");
+	// `(?<![\w$.])` keeps `built.env.PI_CREW_X` (a plain object property, not an
+	// alias read) out of the results.
+	const dotRe = new RegExp(`(?<![\\w$.])(${alternation})\\.(PI_CREW_[A-Z0-9_]+|PI_TEAMS_[A-Z0-9_]+)`, "g");
+	const bracketRe = new RegExp(`(?<![\\w$.])(${alternation})\\s*\\[\\s*([A-Za-z_$][\\w$]*)\\s*\\]`, "g");
+	for (const m of line.matchAll(dotRe)) out.push({ col: m.index + 1, name: m[2], end: m.index + m[0].length });
+	for (const m of line.matchAll(bracketRe)) {
+		const resolved = envConsts.get(m[2]);
+		if (resolved && FAMILY_RE.test(resolved)) out.push({ col: m.index + 1, name: resolved, end: m.index + m[0].length });
+	}
+	return out;
 }
 
 /** Recursively list *.ts-ish files under a directory. */
@@ -157,21 +192,26 @@ for (const root of roots) {
 		scannedFiles.push(file);
 		const source = readFileSync(file, "utf8");
 		const envConsts = collectEnvConsts(source);
+		const envAliases = collectEnvAliases(source);
 		const lines = source.split(/\r?\n/);
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
 			if (isWholeLineComment(line)) continue;
-			const findings = []; // { col (1-based), name }
-			for (const m of line.matchAll(DOT_RE)) findings.push({ col: m.index + 1, name: m[1] });
-			for (const m of line.matchAll(LITERAL_RE)) findings.push({ col: m.index + 1, name: m[2] });
+			const findings = []; // { col (1-based), name, end }
+			for (const m of line.matchAll(DOT_RE))
+				findings.push({ col: m.index + 1, name: m[1], end: m.index + m[0].length });
+			for (const m of line.matchAll(LITERAL_RE))
+				findings.push({ col: m.index + 1, name: m[2], end: m.index + m[0].length });
 			for (const m of line.matchAll(CONST_BRACKET_RE)) {
 				const resolved = envConsts.get(m[1]);
-				if (resolved && FAMILY_RE.test(resolved)) findings.push({ col: m.index + 1, name: resolved });
+				if (resolved && FAMILY_RE.test(resolved))
+					findings.push({ col: m.index + 1, name: resolved, end: m.index + m[0].length });
 			}
+			findings.push(...aliasFindings(line, envAliases, envConsts));
 			for (const f of findings) {
 				const start = f.col - 1;
 				if (isInsideDelete(line, start)) continue;
-				if (isWriteTail(line.slice(accessEnd(line, start)))) continue;
+				if (isWriteTail(line.slice(f.end))) continue;
 				const rel = file.startsWith(ROOT) ? file.slice(ROOT.length) : file;
 				violations.push(
 					`${rel}:${i + 1}:${f.col}: raw read of '${f.name}' via process.env — use getCrewEnv("${f.name}") from src/config/env-vars.ts`,

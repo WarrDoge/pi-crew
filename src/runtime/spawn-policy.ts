@@ -14,6 +14,13 @@
  *                           delegate-tool's allowed roles (the parent role is
  *                           NO LONGER gated — D8: every role may delegate;
  *                           the spawn-side checkCrewDepth cap is the boundary)
+ *   2b. parent-role-escalation — R43-S1 transitive role-tier containment:
+ *                           the REQUESTED grandchild tier must not exceed the
+ *                           PARENT task record's tier (permissionForRole).
+ *                           D8 keeps every role free to DELEGATE — but a
+ *                           read-only parent is never granted a write-capable
+ *                           (executor-class) grandchild. Unknown/absent parent
+ *                           roles default-deny to read-only (FIND-12).
  *   3. depth-exceeded     — child depth (parent.depth + 1) exceeds the
  *                           resolved maxDepth (default 4). Depth comes from
  *                           the parent task RECORD, never worker env
@@ -30,7 +37,10 @@
  *   8. workspace-conflict — write-capable grandchild narrowing cwd overlap
  */
 
+import type { ResolvedToolPolicy } from "../agents/agent-config.ts";
+import { getToolConfig } from "../config/role-tools.ts";
 import { modelRefToString } from "./model/model-fallback.ts";
+import { permissionForRole } from "./role-permission.ts";
 import type { NestedSlotSnapshot } from "./scheduling/nested-slots.ts";
 
 /** Delegate tool's allowed grandchild roles (design §7 surface). */
@@ -49,13 +59,40 @@ export const MAX_DELEGATE_TIMEOUT_SEC = 86_400;
 
 export type SpawnPolicyDenyReason =
 	| "role-denied"
+	| "parent-role-escalation"
 	| "trust-denied"
 	| "depth-exceeded"
 	| "slots-exhausted"
 	| "budget-insufficient"
+	| "budget-not-granted"
+	| "budget-unmetered"
 	| "model-invalid"
 	| "timeout-invalid"
 	| "workspace-conflict";
+
+/** M3-3 / R43-N1: what a delegate request that carries NO `budgetTokens` is
+ *  worth. `"deny"` is the fail-closed default of this pure policy API — an
+ *  unmetered delegation is a budget bypass. The broker explicitly passes
+ *  `"allow"` (the documented pre-M3-3 behavior for nesting runs without a
+ *  `budgetTotal`, e.g. the nested-slot-only deployments) and then records
+ *  `unmetered: true` on the `delegate.admitted` event so the allow is never
+ *  silent — the workitem's "refuse or explicit allow" shape. */
+export type UnmeteredDelegatePolicy = "deny" | "allow";
+
+/** M3-3 / R43-N1: the budget accounting a caller must apply for the admitted
+ *  grandchild. `metered: false` means the request carried no budgetTokens (and
+ *  the caller opted into {@link UnmeteredDelegatePolicy} `"allow"`).
+ *  `grantedTokens` is the EFFECTIVE grant the gate evaluated — the parent's own
+ *  allocation when present, else the seeded run-level grant — so the caller
+ *  writes exactly the number the gate admitted against (never a second,
+ *  diverging derivation). */
+export interface DelegateBudgetDecision {
+	metered: boolean;
+	grantedTokens: number;
+	spentTokens: number;
+	/** Requested reservation (undefined when `metered === false`). */
+	requestedTokens?: number;
+}
 
 export interface DelegateAdmissionInput {
 	/** Resolved max depth (nesting.maxDepth default 4; env clamp mirrors PI_CREW_MAX_DEPTH 1..10). */
@@ -63,8 +100,9 @@ export interface DelegateAdmissionInput {
 	/** Parent task record fields the policy is allowed to trust. */
 	parentTask: {
 		taskId: string;
-		/** Role for workspace-capability evaluation (policy no longer gates the
-		 *  parent role — D8 opens delegation to every role). */
+		/** Role for workspace-capability + tier-transitivity evaluation (D8
+		 *  opens delegation to every role; R43-S1 keeps the TIER transitive —
+		 *  a read-only parent is never granted a write-capable grandchild). */
 		role?: string;
 		/** Absent on pre-v2 records — treated as depth 1 (a worker). */
 		depth?: number;
@@ -74,6 +112,18 @@ export interface DelegateAdmissionInput {
 	untrusted?: boolean;
 	/** Nested-slot budget snapshot (used/max). */
 	slots: NestedSlotSnapshot;
+	/** M3-3 / R43-N1 SEED: the token budget available to this parent task from
+	 *  the RUN-level grant (manifest `budgetTotal`, `budgetUnlimited !== true`).
+	 *  Used only when the parent task record carries no `allocation` of its own —
+	 *  the pre-fix state of EVERY task, because nothing ever produced
+	 *  `tokensGranted` (ADR line 140 follow-up that never landed). Omitting it
+	 *  keeps the fail-closed "no grant" reading.
+	 *  `budgetUnlimited === true` callers must NOT pass it (an unmetered run has
+	 *  nothing to seed from). */
+	parentBudgetGrantTokens?: number;
+	/** M3-3 / R43-N1: policy for a request WITHOUT `budgetTokens` (see
+	 *  {@link UnmeteredDelegatePolicy}). Default `"deny"`. */
+	unmeteredDelegates?: UnmeteredDelegatePolicy;
 	/** Requested grandchild parameters (all optional in the tool surface). */
 	requested?: {
 		role?: string;
@@ -110,10 +160,88 @@ export interface SpawnPolicyDecision {
 	timeoutSec?: number;
 	/** Effective model (normalized) on success. */
 	model?: string;
+	/** R43-S1 defense-in-depth: the effective (min-intersected) tool policy
+	 *  the spawner must apply to the grandchild — intersection of the parent
+	 *  task role's policy and the requested grandchild role's policy
+	 *  ({@link effectiveGrandchildToolPolicy}). Present on ALLOW decisions so
+	 *  the spawn side never has to re-derive tier logic. */
+	effectiveToolPolicy?: ResolvedToolPolicy;
+	/** M3-3 / R43-N1: the budget accounting the caller must apply — always
+	 *  present on ALLOW decisions. */
+	budget?: DelegateBudgetDecision;
 }
 
 export function isExecutorClassRole(role: string): boolean {
 	return (EXECUTOR_CLASS_ROLES as readonly string[]).includes(role);
+}
+
+/**
+ * R43-S1 transitive containment: the parent task's permission tier, with
+ * FIND-12 default-deny for unknown/absent roles (an absent parent role can
+ * never upgrade to write-capable).
+ */
+export function parentTaskTier(parentRole: string | undefined): "read_only" | "workspace_write" {
+	return permissionForRole(parentRole ?? "") === "workspace_write" ? "workspace_write" : "read_only";
+}
+
+/**
+ * R43-S1: the mutation-capable pi tool set that defines the read-only tier
+ * floor. A read_only-tier parent's grandchild is denied these regardless of
+ * either role's own config quirks (e.g. analyst's config excludes only
+ * edit/write while its TIER is read-only — the tier, not the config list, is
+ * the transitive boundary).
+ */
+const READ_ONLY_TIER_EXCLUDED_TOOLS: readonly string[] = ["edit", "write", "bash"];
+
+/**
+ * R43-S1: effective grandchild tool policy = intersection (min) of the
+ * PARENT task role's tool policy and the REQUESTED grandchild role's policy.
+ *
+ * Semantics (least privilege on both axes):
+ *   - TIER FLOOR first: a read_only-tier parent (permissionForRole, FIND-12
+ *     default-deny for unknown/absent) denies edit/write/bash to the
+ *     grandchild no matter what either role config says — the tier is the
+ *     transitive boundary.
+ *   - allowlist (`tools`): the NARROWER of the two wins — intersection when
+ *     both define one, the single defined one otherwise, none only when
+ *     NEITHER restricts (undefined = all built-ins allowed). Empty
+ *     intersections (disjoint configs — unreachable with today's
+ *     ROLE_TOOL_CONFIGS) fall back to the PARENT list: the parent's
+ *     restrictions are the transitive boundary, and an empty `tools: []`
+ *     would be silently skipped by the pi argv builder (fail-open).
+ *   - denylist (`excludeTools`): ADDITIVE union — it is always safe to
+ *     forbid more, and a security exclude from either side can never be
+ *     weakened by the other's omission (mirrors resolveToolPolicy's
+ *     denylist-merge rule).
+ *
+ * The spawn side applies this to the delegate grandchild's in-memory agent
+ * config (delegate-spawn.ts grandchildAgentForRole) so the pi argv
+ * `--tools`/`--exclude-tools` cut reflects the transitive floor even if a
+ * future code path reaches the spawner without the admission gate.
+ */
+export function effectiveGrandchildToolPolicy(parentRole: string | undefined, requestedRole: string): ResolvedToolPolicy {
+	const parentConfig = parentRole !== undefined ? getToolConfig(parentRole) : {};
+	const requestedConfig = getToolConfig(requestedRole);
+	let tools: string[] | undefined;
+	if (parentConfig.tools !== undefined && requestedConfig.tools !== undefined) {
+		const requestedSet = new Set(requestedConfig.tools);
+		const intersection = parentConfig.tools.filter((tool) => !READ_ONLY_TIER_EXCLUDED_TOOLS.includes(tool) && requestedSet.has(tool));
+		tools = intersection.length > 0 ? intersection : parentConfig.tools;
+	} else {
+		tools = parentConfig.tools ?? requestedConfig.tools;
+	}
+	const excludeTools = [...(parentConfig.excludeTools ?? []), ...(requestedConfig.excludeTools ?? [])];
+	// TIER FLOOR — applied AFTER the config intersection so the boundary is
+	// the parent's permissionForRole tier, never a config-list accident.
+	if (parentTaskTier(parentRole) === "read_only") {
+		tools = tools?.filter((tool) => !READ_ONLY_TIER_EXCLUDED_TOOLS.includes(tool));
+		excludeTools.push(...READ_ONLY_TIER_EXCLUDED_TOOLS);
+	}
+	const uniqueExcludeTools = [...new Set(excludeTools)];
+	return {
+		...(tools !== undefined ? { tools } : {}),
+		...(uniqueExcludeTools.length > 0 ? { excludeTools: uniqueExcludeTools } : {}),
+	};
 }
 
 function deny(reason: SpawnPolicyDenyReason, message: string): SpawnPolicyDecision {
@@ -133,6 +261,21 @@ export function evaluateDelegateAdmission(input: DelegateAdmissionInput): SpawnP
 		return deny(
 			"role-denied",
 			`delegate rejected: requested grandchild role '${requestedRole}' is not one of ${DELEGATE_ALLOWED_ROLES.join("/")}`,
+		);
+	}
+
+	// 1b. R43-S1 transitive role-tier containment — a read-only parent task can
+	// never be granted a write-capable (executor-class) grandchild. D8 opens
+	// delegation to every role; this gate keeps the TIER transitive: the
+	// effective grandchild policy is min(parent, requested), and a
+	// min(read_only, workspace_write) request is refused outright instead of
+	// silently degraded. Unknown/absent parent roles default-deny to
+	// read-only (permissionForRole FIND-12) — never upgrade on missing data.
+	const requestedIsExecutorClass = requestedRole !== undefined && (EXECUTOR_CLASS_ROLES as readonly string[]).includes(requestedRole);
+	if (requestedIsExecutorClass && parentTaskTier(parentTask.role) === "read_only") {
+		return deny(
+			"parent-role-escalation",
+			`delegate rejected: parent task '${parentTask.taskId}' role '${parentTask.role ?? "<absent>"}' is read-only tier — write-capable grandchild role '${requestedRole}' would escalate beyond the parent's tier (transitive containment, R43-S1); use a read-only grandchild role (explorer/analyst)`,
 		);
 	}
 
@@ -158,16 +301,47 @@ export function evaluateDelegateAdmission(input: DelegateAdmissionInput): SpawnP
 	}
 
 	// 5. Parent allocation sufficiency — reserve up-front or reject.
+	//
+	// M3-3 / R43-N1 (2026-10-19 fix-wave 6): the grant is SEEDED here. Before
+	// this fix `tokensGranted` had no producer anywhere in the tree (census:
+	// four conditional writers, all requiring an allocation to already exist),
+	// so `granted` was always 0 for every real task: budgeted delegates
+	// (budgetTokens >= 1) were ALWAYS denied "budget-insufficient" — i.e. the
+	// whole ADR-5 §5 budget machinery was dead code — while delegates without
+	// budgetTokens skipped the gate entirely and ran unmetered with no trace.
+	// Effective grant = the task's own allocation when present, else the
+	// run-level grant the caller supplies (parentBudgetGrantTokens).
+	const granted = parentTask.allocation?.tokensGranted ?? input.parentBudgetGrantTokens ?? 0;
+	const spent = parentTask.allocation?.tokensSpent ?? 0;
+	const remaining = granted - spent;
+	const budget: DelegateBudgetDecision = {
+		metered: requested?.budgetTokens !== undefined,
+		grantedTokens: granted,
+		spentTokens: spent,
+		...(requested?.budgetTokens !== undefined ? { requestedTokens: requested.budgetTokens } : {}),
+	};
 	if (requested?.budgetTokens !== undefined) {
-		const granted = parentTask.allocation?.tokensGranted ?? 0;
-		const spent = parentTask.allocation?.tokensSpent ?? 0;
-		const remaining = granted - spent;
+		if (granted <= 0) {
+			// Explicit refusal instead of the pre-fix accidental "0 remaining".
+			return deny(
+				"budget-not-granted",
+				`delegate rejected: parent task '${parentTask.taskId}' has no token budget granted (requested ${requested.budgetTokens}); the run has no budgetTotal to seed one from — drop budgetTokens or set a run budget`,
+			);
+		}
 		if (requested.budgetTokens > remaining) {
 			return deny(
 				"budget-insufficient",
 				`delegate rejected: requested budget ${requested.budgetTokens} tokens exceeds parent task '${parentTask.taskId}' remaining allocation ${remaining} (${granted} granted - ${spent} spent)`,
 			);
 		}
+	} else if ((input.unmeteredDelegates ?? "deny") !== "allow") {
+		// M3-3 / R43-N1: an unmetered delegate is a budget bypass — the pure
+		// policy denies unless the caller explicitly opted in (the broker does,
+		// and records `unmetered: true`).
+		return deny(
+			"budget-unmetered",
+			`delegate rejected: budgetTokens is required (an unmetered grandchild escapes run budget enforcement; grant a budget or opt into unmetered delegation explicitly)`,
+		);
 	}
 
 	// 6. Model validation against the resolved catalog.
@@ -191,13 +365,21 @@ export function evaluateDelegateAdmission(input: DelegateAdmissionInput): SpawnP
 	// the parent's cwd with ANOTHER in-flight executor is only admitted when
 	// serialization is established (limits.serializeOnPathOverlap) — otherwise
 	// reject; read-only grandchild roles (explorer/analyst) never conflict.
-	const requestedIsWriteCapable = requestedRole !== undefined && (EXECUTOR_CLASS_ROLES as readonly string[]).includes(requestedRole);
-	if (requestedIsWriteCapable && !input.workspace?.serializeEnabled && (input.workspace?.overlappingInFlightExecutors ?? 0) > 0) {
+	if (requestedIsExecutorClass && !input.workspace?.serializeEnabled && (input.workspace?.overlappingInFlightExecutors ?? 0) > 0) {
 		return deny(
 			"workspace-conflict",
 			`delegate rejected: parent task '${parentTask.taskId}' cwd overlaps ${input.workspace?.overlappingInFlightExecutors} in-flight executor(s) and limits.serializeOnPathOverlap is off — use a read-only grandchild role (explorer/analyst) or enable serialization`,
 		);
 	}
 
-	return { allowed: true, childDepth, timeoutSec, ...(normalizedModel !== undefined ? { model: normalizedModel } : {}) };
+	// R43-S1: thread the effective (min) tool policy so the spawner applies
+	// the transitive floor without re-deriving tier logic.
+	return {
+		allowed: true,
+		childDepth,
+		timeoutSec,
+		...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
+		effectiveToolPolicy: effectiveGrandchildToolPolicy(parentTask.role, requestedRole ?? "explorer"),
+		budget,
+	};
 }

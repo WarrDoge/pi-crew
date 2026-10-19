@@ -6,7 +6,7 @@ import { withFileLockSync } from "../state/coordination/locks.ts";
 import { logInternalError } from "../utils/internal-error.ts";
 import { isJunkPathLiteral, projectCrewRoot, projectPiRoot } from "../utils/paths.ts";
 import { mergeConfig } from "./config-merge.ts";
-import { parseConfig, parseConfigWithWarnings } from "./config-validation.ts";
+import { isDangerousKey, isDangerousPath, parseConfig, parseConfigWithWarnings } from "./config-validation.ts";
 import { DEFAULT_BROKER, DEFAULT_NESTING, DEFAULT_PERSISTENCE, resolveBrokerEnvOverride } from "./defaults.ts";
 import { getCrewEnv, getCrewEnvBool } from "./env-vars.ts";
 import { sanitizeProjectConfig } from "./sanitize-project-config.ts";
@@ -258,6 +258,13 @@ function resolvePersistenceEnvOverrideAndDefaults(parsed: PersistenceConfig | un
 }
 
 function unsetPath(record: Record<string, unknown>, dottedPath: string): void {
+	// R24-H2 (M1-1): walking a raw dotted key through `target["__proto__"]`
+	// resolves to Object.prototype via the [[Prototype]] getter, so a key like
+	// `__proto__.toString` DELETES Object.prototype members. Refuse dangerous
+	// segments at the walker itself (shared proto-safe helpers in
+	// config-validation.ts) — this covers
+	// every unsetPaths consumer (team-settings unset, team `config` action).
+	if (isDangerousPath(dottedPath)) return;
 	const parts = dottedPath.split(".").filter(Boolean);
 	if (parts.length === 0) return;
 	let target: Record<string, unknown> = record;
@@ -303,6 +310,66 @@ function measureJsonDepth(root: unknown): number {
 		}
 	}
 	return maxDepth;
+}
+
+/**
+ * M3-13 (R45-F1): `parseConfig` is a strict WHITELIST builder (see
+ * config-validation.ts) — it returns an object literal of known keys only, so
+ * merging a patch into `parseConfig(current)` and writing the result back
+ * silently DELETES every unknown on-disk key (typos, forward-compat keys
+ * written by a newer version, keys owned by another tool). updateConfig used
+ * to do exactly that on every write.
+ *
+ * This helper re-attaches the raw on-disk shape underneath the normalized
+ * merge result: `parsed` wins for every key/value it defines (so mergeConfig's
+ * per-key semantics and its sanitizers keep applying to known keys), while raw
+ * keys that the whitelist dropped are carried through untouched.
+ *
+ * Dangerous prototype keys are NEVER carried through (M1-1/R24-H1: the parse
+ * boundary drops `__proto__`/`constructor`/`prototype` at every depth).
+ *
+ * @param parsed  normalized merge result (what the whitelist understands)
+ * @param raw     raw on-disk record, already with `unsetPaths` applied
+ * @returns a new record shaped like the on-disk file, preserving key order
+ */
+function preserveUnknownKeys(parsed: Record<string, unknown>, raw: Record<string, unknown>): Record<string, unknown> {
+	const target = cloneRawRecord(raw, 0);
+	return overlayKnownKeys(target, parsed, 0);
+}
+
+const MAX_PRESERVED_DEPTH = 100;
+
+function isPlainRecordObject(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Depth-bounded clone that keeps raw key order and skips dangerous keys. */
+function cloneRawRecord(source: Record<string, unknown>, depth: number): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	if (depth > MAX_PRESERVED_DEPTH) return out;
+	for (const [key, value] of Object.entries(source)) {
+		if (isDangerousKey(key)) continue;
+		out[key] = isPlainRecordObject(value) ? cloneRawRecord(value, depth + 1) : value;
+	}
+	return out;
+}
+
+/** Overlay `source` (normalized) onto `target` (raw clone), recursing into shared objects. */
+function overlayKnownKeys(target: Record<string, unknown>, source: Record<string, unknown>, depth: number): Record<string, unknown> {
+	if (depth > MAX_PRESERVED_DEPTH) return target;
+	for (const [key, value] of Object.entries(source)) {
+		// `undefined` means "not set in this layer" (mergeConfig's withoutUndefined
+		// contract) — never write it over a preserved raw value.
+		if (value === undefined) continue;
+		if (isDangerousKey(key)) continue;
+		const existing = target[key];
+		if (isPlainRecordObject(value) && isPlainRecordObject(existing)) {
+			overlayKnownKeys(existing, value, depth + 1);
+			continue;
+		}
+		target[key] = value;
+	}
+	return target;
 }
 
 function readConfigRecord(filePath: string): Record<string, unknown> {
@@ -462,7 +529,11 @@ export function updateConfig(patch: PiTeamsConfig, options: UpdateConfigOptions 
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(`Could not update pi-crew config: ${message}`);
 		}
-		let merged = mergeConfig(parseConfig(current), patch);
+		const normalizedCurrent = parseConfig(current);
+		// Known-key semantics (per-key merge + otlp header sanitization) stay in
+		// mergeConfig — see M3-13 below for why the WRITE target is rebuilt from
+		// the raw record instead of from this whitelist-normalized result.
+		let merged = mergeConfig(normalizedCurrent, patch);
 		if (options.unsetPaths?.length) {
 			const raw = JSON.parse(JSON.stringify(merged)) as Record<string, unknown>;
 			for (const unset of options.unsetPaths) unsetPath(raw, unset);
@@ -472,12 +543,26 @@ export function updateConfig(patch: PiTeamsConfig, options: UpdateConfigOptions 
 		// (e.g. `team action='config'` with an empty patch — read-only path).
 		// Both sides are parseConfig-normalized, so JSON.stringify key order is
 		// deterministic (same construction path); no key sorting needed.
-		const normalizedCurrent = parseConfig(current);
-		if (JSON.stringify(merged) === JSON.stringify(normalizedCurrent)) {
+		const normalizedUnchanged = JSON.stringify(merged) === JSON.stringify(normalizedCurrent);
+		// M3-13 (R45-F1): parseConfig is a whitelist, so writing `merged` erased
+		// every unknown on-disk key (typos, forward-compat keys). Rebuild the
+		// written shape from the RAW record: known keys take the merged value,
+		// unknown keys survive untouched. `unsetPaths` are applied to the raw
+		// base too, so an explicit unset of an unknown key still removes it.
+		const rawBase = cloneRawRecord(current, 0);
+		for (const unset of options.unsetPaths ?? []) unsetPath(rawBase, unset);
+		const toWrite = preserveUnknownKeys(merged as unknown as Record<string, unknown>, rawBase);
+		// An unsetPaths entry may name a key the whitelist cannot see (an unknown
+		// key), in which case the normalized comparison above reports "unchanged"
+		// even though the raw record must change. Only that case overrides the
+		// skip: if applying the unsets left the raw base byte-identical, nothing
+		// outside the whitelist moved and the legacy skip stands.
+		const unsetsChangedRaw = JSON.stringify(rawBase) !== JSON.stringify(current);
+		if (normalizedUnchanged && !unsetsChangedRaw) {
 			return { path: filePath, config: merged, written: false }; // unchanged — skip write
 		}
 		fs.mkdirSync(path.dirname(filePath), { recursive: true });
-		atomicWriteFile(filePath, `${JSON.stringify(merged, null, 2)}\n`);
+		atomicWriteFile(filePath, `${JSON.stringify(toWrite, null, 2)}\n`);
 		// (F16) Invalidate the loadConfig cache after a write — the next
 		// caller must see the new value, not a 0-2s stale snapshot.
 		invalidateConfigCache();

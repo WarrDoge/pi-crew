@@ -1,4 +1,5 @@
 import type { PiTeamsConfig } from "../../config/config.ts";
+import { getCrewEnv } from "../../config/env-vars.ts";
 import type { RuntimeResolutionState } from "../../state/types.ts";
 import type { CrewRuntimeKind } from "../crew-agent-runtime.ts";
 import { mockLiveSessionEnabled } from "./runtime-policy.ts";
@@ -90,7 +91,10 @@ export async function isLiveSessionRuntimeAvailable(
 
 export async function resolveCrewRuntime(config: PiTeamsConfig, env: NodeJS.ProcessEnv = process.env): Promise<CrewRuntimeCapabilities> {
 	const requestedMode = config.runtime?.mode ?? "auto";
-	const workersDisabled = config.executeWorkers === false || env.PI_CREW_EXECUTE_WORKERS === "0" || env.PI_TEAMS_EXECUTE_WORKERS === "0";
+	const workersDisabled =
+		config.executeWorkers === false ||
+		getCrewEnv("PI_CREW_EXECUTE_WORKERS", env) === "0" ||
+		getCrewEnv("PI_TEAMS_EXECUTE_WORKERS", env) === "0";
 	if (requestedMode === "scaffold") return scaffoldCaps(requestedMode, undefined, "explicit_dry_run");
 	if (workersDisabled)
 		return scaffoldCaps(
@@ -100,7 +104,7 @@ export async function resolveCrewRuntime(config: PiTeamsConfig, env: NodeJS.Proc
 		);
 	if (requestedMode === "child-process") return childCaps(requestedMode);
 	// When a child-process mock is active (tests), force auto-mode to child-process where the mock is active.
-	if (requestedMode === "auto" && env.PI_TEAMS_MOCK_CHILD_PI)
+	if (requestedMode === "auto" && getCrewEnv("PI_TEAMS_MOCK_CHILD_PI", env))
 		return childCaps(requestedMode, "PI_TEAMS_MOCK_CHILD_PI mock forces child-process runtime in auto mode.");
 	if (requestedMode === "live-session") {
 		const live = await isLiveSessionRuntimeAvailable(1500, env);

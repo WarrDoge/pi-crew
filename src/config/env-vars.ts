@@ -277,7 +277,7 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 	},
 	PI_CREW_DEBUG: {
 		name: "PI_CREW_DEBUG",
-		doc: "truthiness enables background debug logging (background-runner.ts:63)",
+		doc: "truthiness enables background debug logging (background-runner.ts:63); RAW truthiness — '0'/'false' still ENABLE, unset to disable (R45-F4)",
 	},
 	PI_CREW_DEBUG_BUDGET: {
 		name: "PI_CREW_DEBUG_BUDGET",
@@ -371,7 +371,7 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 	},
 	PI_CREW_TRUST_PROJECT_DWF: {
 		name: "PI_CREW_TRUST_PROJECT_DWF",
-		doc: "'1' allows project-sourced .dwf.ts workflows (dynamic-workflow-runner.ts:154)",
+		doc: "'1' allows project-sourced .dwf.ts workflows (dynamic-workflow-runner.ts:189)",
 	},
 	PI_TEAMS_CHILD_RESPONSE_TIMEOUT_MS: {
 		name: "PI_TEAMS_CHILD_RESPONSE_TIMEOUT_MS",
@@ -380,7 +380,7 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 	},
 	PI_TEAMS_DEBUG: {
 		name: "PI_TEAMS_DEBUG",
-		doc: "truthiness gates debug-severity internal-error logging (internal-error.ts:4)",
+		doc: "truthiness gates debug-severity internal-error logging (internal-error.ts:10); RAW truthiness — '0'/'false' still ENABLE, unset to disable (R45-F4)",
 	},
 	PI_TEAMS_MOCK_CHILD_PI: {
 		name: "PI_TEAMS_MOCK_CHILD_PI",
@@ -766,18 +766,25 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
  * Raw crew-env lookup. Returns the raw string (undefined when unset) with
  * mirror-alias fallback applied per the entry's `mirrorPrecedence`. This is
  * the behavior-preserving replacement for `process.env.PI_CREW_X` reads.
+ *
+ * R26-F1 (deep-review round 26): `env` is an OPTIONAL source override. Reads
+ * that receive an env object as a parameter (`isRootSession(env)`,
+ * `currentCrewDepth(env)`, …) must still route through the registry — passing
+ * the object here keeps the registry invariant intact for those sites instead
+ * of leaving them as gate-blind `env.PI_CREW_X` dot reads. Defaults to
+ * `process.env`, so existing call sites are unchanged.
  */
-export function getCrewEnv(name: string): string | undefined {
+export function getCrewEnv(name: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
 	const spec = CREW_ENV_VARS[name];
 	if (!spec?.mirror || spec.mirrorPrecedence === "or") {
-		return process.env[name];
+		return env[name];
 	}
 	const crewName = name.startsWith("PI_TEAMS_") ? spec.mirror : name;
 	const teamsName = name.startsWith("PI_TEAMS_") ? name : spec.mirror;
 	if (spec.mirrorPrecedence === "teams") {
-		return process.env[teamsName] ?? process.env[crewName];
+		return env[teamsName] ?? env[crewName];
 	}
-	return process.env[crewName] ?? process.env[teamsName];
+	return env[crewName] ?? env[teamsName];
 }
 
 /**

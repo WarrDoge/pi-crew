@@ -490,7 +490,7 @@ function runLabel(
 	// scripts) get the untruncated full label.
 	const head = `${marker} ${icon} ${run.runId.slice(-8)} ${status}${goalFlagSuffix(run)}`;
 	const meta = `${teamWorkflowLabel(run.team, run.workflow)} · ${step}`;
-	const goal = sanitizeLine(run.goal ?? "");
+	const goal = sanitizeUntrustedLine(run.goal ?? "");
 	if (maxW === undefined) return sanitizeLine(`${head} · ${meta} · ${goal}`);
 	const sepW = 3; // " · "
 	if (visibleWidth(head) + sepW + visibleWidth(meta) + sepW + visibleWidth(goal) <= maxW) {
@@ -999,11 +999,11 @@ export class RunDashboard implements DashboardComponent {
 						const statusStr: RunStatus = isLikelyOrphanedActiveRun(r, agents) ? "stale" : (r.status as RunStatus);
 						const selectedTasks = snap?.tasks ?? readRunTasks(r, this.options.snapshotCache, snapshotOnce);
 						lines.push(section("run"));
-						lines.push(row(`${fg("accent", "▸")} ${truncate(sanitizeLine(r.goal), budget - 4)}`));
+						lines.push(row(`${fg("accent", "▸")} ${truncate(sanitizeUntrustedLine(r.goal), budget - 4)}`));
 						// L-2: surface the failure/cancellation reason inline for terminal runs.
 						const isTerminal = statusStr === "failed" || statusStr === "cancelled" || statusStr === "stopped";
 						const reason = isTerminal ? summarizeTerminalReason(r, selectedTasks, snap?.cancellationReason) : undefined;
-						const reasonSuffix = reason ? ` · ${truncate(sanitizeLine(reason), 40)}` : "";
+						const reasonSuffix = reason ? ` · ${truncate(sanitizeUntrustedLine(reason), 40)}` : "";
 						lines.push(
 							row(
 								fg(

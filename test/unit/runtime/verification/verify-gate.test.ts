@@ -16,6 +16,7 @@ import {
 	evaluateVerifyGateResults,
 	renderVerifyGateContext,
 	renderVerifyGateSummary,
+	resolveHostVerifyGateSpec,
 	resolveVerifierSpawnDecision,
 	resolveVerifyGateEnabled,
 	resolveVerifyGateTimeoutMs,
@@ -23,6 +24,7 @@ import {
 	runVerifyGate,
 	type VerifyGateCheck,
 	type VerifyGateExecutor,
+	type VerifyGateHostSpec,
 } from "../../../../src/runtime/verification/verify-gate.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
 
@@ -313,14 +315,81 @@ test("runVerifierGatePreGate: INCONCLUSIVE + classifier soft-fail escalates to t
 	assert.ok(["classifier_escalate_fallback", "inconclusive_no_classifier"].includes(result.decision.reason));
 });
 
-test("runVerifierGatePreGate: default checks resolve from the repo's package.json", async () => {
+test("runVerifierGatePreGate: M1-7 fail-closed — no hostSpec + no explicit checks ⇒ INCONCLUSIVE (package.json never read)", async () => {
 	const dir = createTrackedTempDir("pi-crew-verify-gate-preset-");
 	fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { typecheck: "node -e 0" } }), "utf8");
 	const result = await runVerifierGatePreGate({ cwd: dir });
-	// preset ran the package's typecheck script through the subprocess executor
-	assert.equal(result.outcome.checks.length, 1);
-	assert.equal(result.outcome.checks[0]?.name, "typecheck");
+	// R47-1: the worker-mutable task-cwd package.json is NEVER consulted at
+	// gate time — absence of a host spec can never produce a PASS/skip. The
+	// gate escalates to the LLM verifier (fail-closed on absence).
+	assert.equal(result.outcome.verdict, "INCONCLUSIVE");
+	assert.equal(result.outcome.checks.length, 0);
+	assert.equal(result.decision.skipVerifier, false);
+});
+
+test("runVerifierGatePreGate: hostSpec intact ⇒ the spec's checks run (host-owned ground truth)", async () => {
+	const dir = createTrackedTempDir("pi-crew-verify-gate-hostspec-");
+	fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "g", scripts: { typecheck: "node -e 0" } }), "utf8");
+	const spec = await resolveHostVerifyGateSpec(dir);
+	assert.ok(spec, "spec exists for a manifest-bearing repo");
+	assert.equal(spec.snapshot["package.json"]?.length, 64, "P1a snapshot pins package.json");
+	const result = await runVerifierGatePreGate({ cwd: dir, hostSpec: spec });
+	// The spec preset (captured at dispatch) is what runs — no gate-time read.
 	assert.equal(result.outcome.verdict, "PASS");
+	assert.deepEqual(
+		result.outcome.checks.map((c) => c.name),
+		["typecheck"],
+	);
+	assert.equal(result.decision.skipVerifier, true);
+});
+
+test("runVerifierGatePreGate: M1-7 P2 replay — tampered package.json vs hostSpec ⇒ FAILED, never a skip", async () => {
+	const dir = createTrackedTempDir("pi-crew-verify-gate-tamper-");
+	fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "g", scripts: { typecheck: "node -e 0" } }), "utf8");
+	const spec = await resolveHostVerifyGateSpec(dir);
+	assert.ok(spec);
+	// Worker tampering AFTER dispatch: the green script is swapped for an
+	// always-green no-op — the exact R47-1 self-grading exploit.
+	fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "g", scripts: { typecheck: "exit 0" } }), "utf8");
+	const registry = createMetricRegistry();
+	const result = await runVerifierGatePreGate({ cwd: dir, hostSpec: spec, metricRegistry: registry });
+	// Drift is caught BEFORE any command runs: FAILED + tamper evidence.
+	assert.equal(result.outcome.verdict, "FAILED");
+	assert.match(result.outcome.evidenceLines.join("\n"), /manifest-integrity: package\.json changed since dispatch/);
+	assert.equal(result.outcome.checks.length, 0, "no command ran on compromised ground truth");
+	assert.equal(result.decision.skipVerifier, false);
+	assert.equal(result.decision.reason, "deterministic_failed");
+	assert.match(result.promptContext, /Manifest integrity check FAILED/);
+	assert.ok(registry.snapshot().some((m) => m.name === "crew.verification.verifier_spawns_total"));
+});
+
+test("runVerifierGatePreGate: M1-7 bookend — manifest drift DURING the gate downgrades PASS ⇒ INCONCLUSIVE", async () => {
+	const dir = createTrackedTempDir("pi-crew-verify-gate-midgate-");
+	// The npm script itself rewrites package.json (the gate command stays inside
+	// the verification allowlist — the script body is project-controlled, which
+	// is exactly what the after-bookend exists to catch).
+	fs.writeFileSync(
+		path.join(dir, "package.json"),
+		JSON.stringify({ name: "g", scripts: { mutate: "node -e \"require('node:fs').writeFileSync('package.json','{}')\"" } }),
+		"utf8",
+	);
+	const base = await resolveHostVerifyGateSpec(dir);
+	assert.ok(base);
+	const spec: VerifyGateHostSpec = {
+		...base,
+		checks: [{ name: "mutate-green", command: "npm run --silent mutate", critical: true }],
+	};
+	const result = await runVerifierGatePreGate({ cwd: dir, hostSpec: spec });
+	// The command exits 0 (green) BUT package.json changed mid-gate — the P1a
+	// bookend catches the after-drift and downgrades the verdict (never a skip).
+	assert.equal(result.outcome.verdict, "INCONCLUSIVE");
+	assert.match(result.outcome.evidenceLines.join("\n"), /manifest-integrity: package\.json changed during the gate run/);
+	assert.equal(result.decision.skipVerifier, false);
+});
+
+test("resolveHostVerifyGateSpec: no manifests + no preset ⇒ undefined (gate resolves nothing — fail-closed)", async () => {
+	const dir = createTrackedTempDir("pi-crew-verify-gate-nospec-");
+	assert.equal(await resolveHostVerifyGateSpec(dir), undefined);
 });
 
 test("VerifyGateCheck type accepts grep evidence lines (spec's third check)", async () => {

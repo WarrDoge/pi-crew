@@ -96,12 +96,14 @@ export interface MailboxMessage {
 export interface MailboxDeliveryState {
 	messages: Record<string, MailboxMessageStatus>;
 	updatedAt: string;
-	/** U5 (2026-10-10): durable (direction, requestId) delivered index —
-	 *  key `${direction}:${requestId}` → id of the first message row that was
-	 *  consumed under it. Written by the worker inbox pickup
-	 *  (recordMailboxRequestIdDelivery) and read back after a restart so a
-	 *  redelivered/resent row is dropped (exactly-once pickup). Optional so
-	 *  pre-U5 delivery.json files parse unchanged. */
+	/** U5 (2026-10-10): durable delivered-requestId index —
+	 *  key `${direction}:${recipientTaskId}:${requestId}` → id of the message row
+	 *  that recipient consumed under it (M3-9/R33-1 recipient scoping: one group
+	 *  fan-out reuses a single requestId for every recipient, so a run-scoped key
+	 *  let the first acker starve all siblings — probe 1/0/0). Written by the
+	 *  worker inbox pickup (recordMailboxRequestIdDelivery) and read back after a
+	 *  restart so a redelivered/resent row is dropped (exactly-once pickup).
+	 *  Optional so pre-U5 delivery.json files parse unchanged. */
 	requestIds?: Record<string, string>;
 }
 
@@ -738,8 +740,8 @@ function pruneDeliveryMessages(manifest: TeamRunManifest, state: MailboxDelivery
 	state.messages = Object.fromEntries(remaining.filter(([id]) => keptIds.has(id)));
 }
 
-/** U5: bound the durable (direction, requestId) delivered index. Keys insert
- *  chronologically (first delivery under that requestId), so eviction keeps
+/** U5: bound the durable (direction, recipient, requestId) delivered index.
+ *  Keys insert chronologically (first delivery under that key), so eviction keeps
  *  the most recent MAX_DELIVERY_MESSAGES keys — dropping a key can only
  *  re-enable delivery of an extremely old duplicate row, the same bounded
  *  risk the messages map already accepts. */
@@ -1107,14 +1109,40 @@ export async function appendMailboxMessageIdempotentAsync(
 /** U5: durable receiver-side dedup record — the worker inbox pickup marks the
  *  messages it surfaced as consumed: `messages[id] = "acknowledged"` (the F09
  *  durable record; the inbox line itself never flips status) plus the
- *  `${direction}:${requestId}` index. Both survive restart, so a later poll
- *  (fresh process, empty seen-set) still drops them. */
+ *  recipient-scoped `${direction}:${taskId}:${requestId}` index. Both survive
+ *  restart, so a later poll (fresh process, empty seen-set) still drops them. */
 export interface MailboxRequestIdDeliveryRecord {
 	direction: MailboxDirection;
 	messageId: string;
+	/** The RECIPIENT mailbox this pickup consumed (the polling task).
+	 *  M3-9 / R33-1: part of the index key — see {@link requestIdDeliveryKey}.
+	 *  Undefined = the run-level mailbox. */
+	taskId?: string;
 	/** Optional: rows without a requestId (pre-U5 legacy) only get the
 	 *  by-id acknowledged record. */
 	requestId?: string;
+}
+
+/**
+ * M3-9 / R33-1 — THE delivery-index key: `${direction}:${recipient}:${requestId}`.
+ *
+ * Round 33 probe (fan-out delivered 1/0/0): a group send mints ONE requestId
+ * (crew-broker handleMsgSend) and reuses it for every recipient. The pickup
+ * index was run-scoped (`${direction}:${requestId}`), so the FIRST recipient to
+ * ack wrote the key and every SIBLING recipient was then starved at its own
+ * pickup — one delivered, the rest silently dropped (and the
+ * `mailbox.pickup_deduped` audit logged it as an expected duplicate).
+ * Recipient scoping restores per-recipient exactly-once: each recipient's
+ * mailbox gets its own entry for the same requestId, so all N copies deliver
+ * (once each).
+ *
+ * Migration: keys written before this change use the legacy two-part shape and
+ * are no longer matched. Safe — the same-row case stays covered by the
+ * per-message `messages[id]="acknowledged"` record, and the send-side
+ * idempotent append prevents a resend from adding a second row at all.
+ */
+export function requestIdDeliveryKey(direction: MailboxDirection, recipientTaskId: string | undefined, requestId: string): string {
+	return `${direction}:${recipientTaskId ?? "-"}:${requestId}`;
 }
 
 export function recordMailboxRequestIdDelivery(manifest: TeamRunManifest, records: MailboxRequestIdDeliveryRecord[]): MailboxDeliveryState {
@@ -1122,7 +1150,8 @@ export function recordMailboxRequestIdDelivery(manifest: TeamRunManifest, record
 		const delivery = readDeliveryState(manifest);
 		for (const record of records) {
 			delivery.messages[record.messageId] = "acknowledged";
-			if (record.requestId) (delivery.requestIds ??= {})[`${record.direction}:${record.requestId}`] = record.messageId;
+			if (record.requestId)
+				(delivery.requestIds ??= {})[requestIdDeliveryKey(record.direction, record.taskId, record.requestId)] = record.messageId;
 		}
 		delivery.updatedAt = new Date().toISOString();
 		// Pickup is terminal for that message on the worker side — full durability

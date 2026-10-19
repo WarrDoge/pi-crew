@@ -102,6 +102,44 @@ test("no-broker fast-fail: missing socket/token → structured notice, never a h
 	}
 });
 
+// delegate-auth (team_20261019055230): the no-broker notice must name the
+// ACTUALLY-missing vars. Nested-host workers (team run hosted by a depth>0
+// session) get PI_CREW_DELEGATE_ENABLED + run/task/state identity but NO
+// socket/token — children never install a broker — and the old catch-all
+// wrongly claimed all four vars were absent and labeled it "depth-2 worker".
+test("no-broker diagnostic: identity set + socket/token absent → nested-host wording, run-id/state-root not blamed", async () => {
+	const s = makeTempState();
+	try {
+		const env = { ...s.env };
+		delete env.PI_CREW_BROKER_SOCKET;
+		delete env.PI_CREW_BROKER_TOKEN;
+		const tool = createDelegateTool({ env });
+		const res = await runDelegate(tool, { prompt: "x" });
+		assert.equal(res.details.status, "unavailable");
+		assert.equal(res.details.errorCode, "no-broker");
+		const text = resultText(res as { content: Array<{ type: string; text?: string }> });
+		assert.match(text, /PI_CREW_BROKER_SOCKET \/ PI_CREW_BROKER_TOKEN absent while task-id\/run-id\/state-root are set/);
+		assert.match(text, /nested-host run/);
+		assert.match(text, /never installs a broker/);
+		assert.ok(!text.includes("RUN_ID absent"), `text=${text}`);
+		assert.ok(!text.includes("STATE_ROOT absent"), `text=${text}`);
+	} finally {
+		s.cleanup();
+	}
+});
+
+test("no-broker diagnostic: identity vars absent → generic per-var listing (scaffold/mock)", async () => {
+	const tool = createDelegateTool({ env: { PI_CREW_DELEGATE_ENABLED: "1" } });
+	const res = await runDelegate(tool, { prompt: "x" });
+	assert.equal(res.details.status, "unavailable");
+	assert.equal(res.details.errorCode, "no-broker");
+	const text = resultText(res as { content: Array<{ type: string; text?: string }> });
+	assert.match(text, /PI_CREW_TASK_ID\/PI_CREW_BROKER_TASK_ID/);
+	assert.match(text, /PI_CREW_STATE_ROOT/);
+	assert.match(text, /PI_CREW_BROKER_SOCKET \/ PI_CREW_BROKER_TOKEN/);
+	assert.match(text, /scaffold, mock, or partially-wired spawn/);
+});
+
 test("policy-disabled: fast-fail with the nesting.enabled hint", async () => {
 	const s = makeTempState();
 	try {

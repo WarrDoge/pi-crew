@@ -35,6 +35,29 @@ When handing off to implementers:
 - Visual excellence first, code perfection second — but never ship broken interactions.
 - Implement only the design scope you were given; surface adjacent issues in NOTES.
 
+## Enforcement note (R28-M2 — capability/gate contradiction, documented not resolved)
+
+This persona is **not** in `WRITE_ROLES` (`src/runtime/role-permission.ts:18`), so
+`permissionForRole("designer")` resolves to **`read_only`** by default-deny. The
+consequences at HEAD are mechanical:
+
+- the runner injects the **read-only contract** block into your system prompt
+  (`src/runtime/task-runner/prompt-builder.ts:29`),
+- the **plan-approval gate is bypassed** for this role
+  (`src/runtime/plan-approval.ts:65`),
+- **MCP tools are cut** (`src/runtime/mcp-proxy.ts:136`),
+- a design-tier task's grandchild spawn tier is floored to `read_only`
+  (`src/runtime/spawn-policy.ts:184`).
+
+Meanwhile this file's frontmatter advertises `edit`/`write`/`bash` and `useWhen`
+claims implementation. That mismatch is a **known open contradiction** — do not
+assume the read-only contract is the enforced one for *tool availability*, and do
+not assume edit/write are sanctioned. Until the leader signs off either
+(a) adding `designer` to `WRITE_ROLES` (a CODE change) or (b) dropping
+`edit`/`write`/`bash` from the frontmatter (a resource-metadata change), treat
+designer as **design + review + handoff**, and route implementation to `executor`
+or `test-engineer`.
+
 ## Output format
 
 End with exactly this block:

@@ -24,8 +24,8 @@ Before publishing to npm:
 npm run check
 ```
 
-For a fast pre-publish smoke (97 broker/UI/config tests in ~20s, instead
-of the full ~6,500-test `npm run check` which takes minutes):
+For a fast pre-publish smoke (124 broker/UI/config tests in ~15s, instead
+of the full `npm run check` unit+integration suite, which takes minutes):
 
 ```bash
 npm run test:critical && npm run typecheck && npm run build:bundle
@@ -94,7 +94,7 @@ lockfile drift):
 - **push to `refs/heads/main`** — `check:conflict-markers` + `typecheck`,
   then the **FULL unit suite** (`npm run test:unit`, the same gate CI
   runs). Any failure blocks the push. This closes the 2026-10 gap where
-  local pushes ran only `test:critical` (~120 tests) while CI ran the full
+  local pushes ran only `test:critical` (124 tests) while CI ran the full
   suite — three waves shipped red that way.
 - **push to any other ref** — fast gates only (`check:conflict-markers` +
   `typecheck`).
@@ -128,8 +128,37 @@ The package exports:
 ./schema.json
 ```
 
-Use this for editor validation of:
+Use this for editor validation of the **current** config path
+(`src/config/config.ts:208`; the `~/.pi/agent/extensions/pi-crew/config.json`
+path is legacy/read-only-for-migration — see `docs/usage.md`):
 
 ```text
-~/.pi/agent/extensions/pi-crew/config.json
+~/.pi/agent/pi-crew.json
 ```
+
+## Known tarball / consumer-side notes (R26/R29 census, 2026-10-19)
+
+Verified with `npm pack --dry-run`. These are **declared defects**, not hidden:
+
+- **`skills/research/scripts/__pycache__/safe_io.cpython-312.pyc` ships** in the
+  tarball (11.5 kB): the `files` entry `"skills/**"` plus the missing
+  `.npmignore` rule means compiled Python bytecode is published and it embeds
+  build-machine paths. Fix = add `__pycache__` to a `.npmignore` / tighten
+  `files`.
+- **Dev tooling ships to consumers:** `scripts/analyze-run.mjs` (64.5 kB),
+  `scripts/resource-sampler.mjs`, `scripts/watch-agent-transcript.mjs`. Harmless
+  bulk; consider moving them behind a dev-only entry.
+- **Consumer-side git hooks reference scripts that are NOT published:**
+  `scripts/install-hooks.mjs` (published) sets `core.hooksPath=.githooks`, and
+  `.githooks/pre-commit` runs `node scripts/check-lockfile-sync.mjs` — but
+  `files[]` ships neither `scripts/check-lockfile-sync.mjs` nor
+  `scripts/test-runner.mjs`, so an installed-from-npm consumer's hook fails.
+- **Peer range on `pi-coding-agent` is unbounded** (`>=1.0.4`, no ceiling) while
+  the `pi-tui` peer IS bounded (`<2.0.0`); pi-crew consumes pi-tui symbols
+  re-exported through `pi-coding-agent`, so a future 2.x installs clean and fails
+  at load (R49-F2 — bounding it is prospective work).
+- **Committed `dist/` must match the tag:** the `--committed-hash` gate reads the
+  committed blob (`dist/index.mjs` — the ONLY tracked dist artifact) from the git
+  object DB, so every commit that touches `src/` needs
+  `npm run build:bundle && git add -f dist/index.mjs` rerun and committed
+  (`dist/` is `.gitignore`d, hence `-f`).

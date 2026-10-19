@@ -34,6 +34,17 @@ export function delegateCompletedTaskIdsFromEvents(events: ReadonlyArray<{ type?
 	return ids;
 }
 
+/** R47-V7 (2026-10-19): a task completed by the deterministic gate-skip path
+ * (task-runner.ts pre-gate `skipVerifier` branch) carries a SYNTHESIZED
+ * terminal result — a fabricated `exitCode: 0`, a green gate summary as the
+ * result artifact/stdout, and no model attempt. task-runner tags that
+ * provenance as `diagnostics.synthetic = true`. Unlike the genuine gate
+ * verdict (also in diagnostics), this synthesized "completed with exit 0"
+ * shape must never be mistaken for real worker output. */
+export function taskIsSyntheticGateSkip(task: TeamTaskState): boolean {
+	return task.diagnostics?.synthetic === true;
+}
+
 export function taskHasObservableWorkerActivity(task: TeamTaskState): boolean {
 	return Boolean(
 		(task.agentProgress?.toolCount ?? 0) > 0 ||
@@ -49,7 +60,13 @@ export function taskHasObservableWorkerActivity(task: TeamTaskState): boolean {
 			// team_20261010162310): green-gated verifier tasks were false-blocked
 			// here ("no observable worker activity") → run stuck non-terminal
 			// "blocked" → sync team calls hung forever.
-			task.diagnostics?.verifyGate !== undefined,
+			//
+			// R47-V7 (2026-10-19): the skip-path result is SYNTHETIC provenance —
+			// its exit code is fabricated, not a real worker outcome — so a
+			// provenance-tagged synthetic task does NOT count as observable work.
+			// (The gate verdict stays on diagnostics as genuine evidence; only the
+			// synthesized result is excluded.) See {@link taskIsSyntheticGateSkip}.
+			(task.diagnostics?.verifyGate !== undefined && !taskIsSyntheticGateSkip(task)),
 	);
 }
 
@@ -106,8 +123,19 @@ export function evaluateRunEffectiveness(input: {
 	let severity: RunEffectivenessSeverity = "ok";
 	if (input.executeWorkers && guardMode !== "off" && noObservedWorkTasks.length > 0) {
 		severity = guardMode === "fail" ? "failed" : guardMode === "block" ? "blocked" : "warning";
-		// P0.1: default warn escalates to blocked for mutating-role tasks without observed work
-		if (severity === "warning" && noObservedWorkTasks.some((task) => permissionForRole(task.role) !== "read_only")) {
+		// P0.1: default warn escalates to blocked for mutating-role tasks without observed work.
+		// R47-V7 / U13 reconciliation (2026-10-19): a synthetic gate-skip task has
+		// no observable worker activity (so it is excluded from the score above, per
+		// R47-V7) but it is NOT evidence of an idle/broken run — the host gate really
+		// verified the change. Escalating it to "blocked" would re-open the U13
+		// false-block → non-terminal run → sync team call hang (live-caught
+		// 2026-10-10). Exclude synthetic tasks from the auto-escalation so a
+		// gate-skipped verifier (a WRITE role) can never block the run by itself.
+		// (An explicit guardMode block/fail still honors the user's setting.)
+		if (
+			severity === "warning" &&
+			noObservedWorkTasks.some((task) => !taskIsSyntheticGateSkip(task) && permissionForRole(task.role) !== "read_only")
+		) {
 			severity = "blocked";
 		}
 	}

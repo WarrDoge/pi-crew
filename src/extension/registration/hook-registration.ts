@@ -80,6 +80,9 @@ function installResourcesDiscoverHook(pi: ExtensionAPI, ctx: RegistrationContext
 			return paths.length > 0 ? { skillPaths: paths } : {};
 		});
 	} catch {
+		// R49-F4: `pi.on()` does NOT throw for an unknown event name in pi 0.77/1.0.4
+		// (verified against the resolved api literal + dist) — this catch is defensive
+		// only. The real degradation on an older host is that the hook NEVER FIRES.
 		/* older Pi without resources_discover */
 	}
 }

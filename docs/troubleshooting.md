@@ -18,8 +18,11 @@ run/process status. Start here.
 **Symptom:** `team action='run'` returns a `blocked` status with a message like
 "Child worker execution is disabled".
 
-**Cause:** Worker execution is off. pi-crew refuses to create no-op scaffold
-subagents by default until you opt in.
+**Cause:** Worker execution is off. When `executeWorkers` is **explicitly**
+`false` (or `PI_CREW_EXECUTE_WORKERS=0`), pi-crew refuses to create no-op
+scaffold subagents and returns `blocked`. Note the default is the **opposite**:
+child-worker execution is enabled by default
+(`src/extension/team-tool/run.ts:205`).
 
 **Fix — pick one:**
 - Set in your config (`~/.pi/agent/pi-crew.json`): `"executeWorkers": true`
@@ -148,6 +151,51 @@ code + a help hint inline. Common ones:
 | E011 | DepthLimitExceeded | crew nesting too deep | raise `crew.maxDepth` or flatten the call |
 | E012 | RunStale | run reconciled as stale | see "Stale async process" above |
 | E013 | ModelOutOfScope | requested model not in pi's `enabledModels` allowlist | pick a model listed in `enabledModels` (settings.json) or disable `reliability.scopeModels` |
+
+## Doctor says OK but the run is dead (doctor blind spots, R48)
+
+`team action='doctor'` is a **liveness sanity check, not a watchdog**. The
+deep-review health/status/doctor census (round 48) found these classes are
+**NOT** detected — status/health can print `running` for a dead host:
+
+| Class | Why it is missed | What to do |
+|---|---|---|
+| Host process dead, manifest frozen `running` | orphan detection keys on updatedAt/magic-string heuristics (`src/runtime/process-status.ts`) | check the host pid yourself; `team action='cancel'` then re-run |
+| Disk full (`ENOSPC`) | no free-space probe in doctor | `df -h` the state root / TMPDIR |
+| Bad state-file permissions (`EACCES`) | reads may classify as unreadable, not as a doctor failure | `ls -l <crewRoot>/state/runs/*` |
+| Orphaned worker processes (reparented to PID 1) | only reaped when a run is reconciled | `ps -ef \| grep ' pi '`, then `team action='cleanup'` |
+| Broken `node_modules` / missing `pi` resolve | spawn succeeds, worker dies instantly | run `pi --version` in the run cwd |
+
+Only two classes are reliably caught: stale broker socket and orphan mux pane.
+Treat a green `doctor` as "no *known* problem", not as "the run is alive".
+
+## Debug logging: `PI_CREW_DEBUG` / `PI_TEAMS_DEBUG` are TRUTHY, not "=1" (R45-F4)
+
+Internal debug logging (`logInternalError(..., "debug")`, `src/utils/internal-error.ts:10`)
+is gated on a raw truthiness check, so **any non-empty value enables it** —
+including `PI_CREW_DEBUG=0`, `PI_TEAMS_DEBUG=false`, and `PI_TEAMS_DEBUG=off`.
+To actually silence debug output, **unset** the variable (do not set it to `0`).
+
+## Mux surfaces (tmux / herdr) — known sharp edges (R42)
+
+`runtime.surface.mode: 'tmux' | 'herdr'` (default `auto`) runs tier-1 workers in
+real mux panes. Live-probed known limits:
+
+- **Panic characters in commands:** tmux `send-keys -l` swallows a trailing `\n`,
+while herdr `pane.send_text` treats `\n` as Enter — a boot line containing a
+newline would be split/executed early. pi-crew's own callers pass
+shell-escaped single-line paths, so this is latent, not live.
+- **Pane/tab ids are not regex-validated before `-t`:** a malformed id in a
+manifest (`kill-pane -t "-x"`) can act on the *wrong* pane (today every path is
+liveness-gated, so it is defence-in-depth, not an open hole).
+- **`capture-pane -p` trims trailing spaces** (cosmetic; only feeds doctor
+liveness).
+- **No tmux minimum-version gate:** old tmux silently falls back to a two-strike
+headless degrade.
+- **herdr is an external socket daemon** — pi-crew never spawns it, and the
+server-wide subscription (no pane filter) amplifies traffic.
+- Pane ids are unique only within one mux server lifetime; a stale manifest can
+name an id now owned by an unrelated pane.
 
 ## Still stuck
 

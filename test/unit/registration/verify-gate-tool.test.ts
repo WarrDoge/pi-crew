@@ -132,12 +132,25 @@ test("verify_gate: missing ctx.executeTool → INCONCLUSIVE, not an error", asyn
 	assert.match(result.content[0]?.text ?? "", /executeTool unavailable/);
 });
 
-test("verify_gate: default preset resolves from package.json scripts in cwd", async () => {
+test("verify_gate: never derives checks from package.json in cwd — explicit checks only (M1-7)", async () => {
 	const dir = createTrackedTempDir("pi-crew-verify-gate-tool-preset-");
 	fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ scripts: { typecheck: "tsc" } }), "utf8");
 	const { tool, ctx, nestedCalls } = harness({ exit_code: 0 });
+	// (1) cwd-only call: worker-mutable package.json scripts must NOT be used as
+	// a default preset (R47-1 self-grading exploit) — verdict is INCONCLUSIVE
+	// and NO command is executed at all.
 	const result = await tool.execute("call-5", { cwd: dir }, undefined, undefined, ctx);
-	assert.equal((result.structuredContent as { verdict: string }).verdict, "PASS");
+	assert.equal((result.structuredContent as { verdict: string }).verdict, "INCONCLUSIVE");
+	assert.equal(nestedCalls.length, 0, "no command may be derived from worker-mutable package.json");
+	// (2) explicit checks still run (cd-wrapped into cwd) and yield PASS.
+	const result2 = await tool.execute(
+		"call-5b",
+		{ cwd: dir, checks: [{ name: "typecheck", command: "npm run --silent typecheck" }] },
+		undefined,
+		undefined,
+		ctx,
+	);
+	assert.equal((result2.structuredContent as { verdict: string }).verdict, "PASS");
 	assert.equal(nestedCalls.length, 1);
 	const nestedArgs = nestedCalls[0]?.args as { command: string } | undefined;
 	assert.ok(nestedArgs, "nested call captured");
@@ -150,10 +163,10 @@ test("verify_gate: default preset resolves from package.json scripts in cwd", as
 	// new RegExp(path) does NOT match a backslash path.
 	const fakeWin = "C:\\Users\\runner\\temp\\pi-crew-x";
 	assert.ok(!new RegExp(fakeWin).test(fakeWin), "raw-backslash RegExp must not match a Windows path");
-	// No scripts → INCONCLUSIVE (escalates to the LLM verifier)
+	// (3) no scripts and no checks → INCONCLUSIVE (escalates to the LLM verifier)
 	const empty = createTrackedTempDir("pi-crew-verify-gate-tool-empty-");
-	const result2 = await tool.execute("call-6", { cwd: empty }, undefined, undefined, ctx);
-	assert.equal((result2.structuredContent as { verdict: string }).verdict, "INCONCLUSIVE");
+	const result3 = await tool.execute("call-6", { cwd: empty }, undefined, undefined, ctx);
+	assert.equal((result3.structuredContent as { verdict: string }).verdict, "INCONCLUSIVE");
 });
 
 test("verify_gate: nested-limit guards reject oversized inputs as tool errors", async () => {

@@ -50,3 +50,32 @@ cập nhật trạng thái THẬT (không copy số cũ)"). Re-verified:
 
 These are declared, not hidden.
 
+## Anomaly-detection matrix — what status/health/doctor actually catch (R48, 2026-10-19)
+
+Deep-review round 48 injected fake run-state and measured the observability
+layer's own accuracy. **Declared blind spots** (a green `doctor`/`health` is not
+proof of a live run):
+
+| Failure class | status | health | doctor |
+|---|---|---|---|
+| Host process dead, manifest frozen `running` | ❌ missed | ❌ missed | ❌ missed |
+| Disk full (`ENOSPC`) | ❌ | ❌ | ❌ |
+| Bad state-file permissions (`EACCES`) | ❌ read-fault treated as unreadable | ❌ | ❌ |
+| Orphaned worker processes | ❌ | ❌ | ❌ |
+| Broken `node_modules` / unresolvable `pi` | ❌ | ❌ | ❌ |
+| Stale broker socket | ✅ | ✅ | ✅ |
+| Orphan mux pane | — | ✅ | ✅ |
+
+Related accepted characteristics (not defects, but operator-relevant):
+
+- `needsAttention` on the status surface is **worker-self-reported** — a dead
+  sync host renders `running / needsAttention=none` indefinitely.
+- The attention/liveness model's monitored entity is its **sole reporter**
+  (self-attestation; the observability twin of R44's evidence self-attestation).
+- Metric labels / OTLP attributes can carry **goal text and filesystem paths
+  off-host** (privacy egress — see `docs/trust-model.md`).
+- The consistency metric is near-constant (its `needsAttention` input
+  distribution is empty in practice).
+
+Operator guidance lives in `docs/troubleshooting.md` → "Doctor says OK but the run is dead".
+

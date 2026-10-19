@@ -990,6 +990,62 @@ interface CoalescedAtomicWrite {
 }
 const MAX_FLUSH_RETRIES = 5;
 const pendingAtomicWrites = new Map<string, CoalescedAtomicWrite>();
+
+/**
+ * R39-M1 (fix-wave 6, EP3): a coalesced write that exhausted MAX_FLUSH_RETRIES.
+ * Previously the flush RE-THREW from a `setTimeout` callback, which surfaced as
+ * an uncaughtException and killed the whole host process (exit 7) on a transient
+ * EACCES/EROFS/ENOSPC/EBUSY write fault — leaving the run stuck "running"
+ * forever. The write is now DROPPED and reported instead.
+ */
+export interface CoalescedFlushFailure {
+	filePath: string;
+	error: string;
+	retries: number;
+	at: number;
+}
+
+const exhaustedFlushFailures: CoalescedFlushFailure[] = [];
+const EXHAUSTED_FLUSH_FAILURES_MAX = 64;
+type CoalescedFlushExhaustedListener = (failure: CoalescedFlushFailure) => void;
+const coalescedFlushExhaustedListeners = new Set<CoalescedFlushExhaustedListener>();
+
+/**
+ * R39-M1: subscribe to coalesced-flush retry exhaustion (the degradation seam
+ * a caller can use to mark the owning run degraded). Returns an unsubscribe fn.
+ */
+export function onCoalescedFlushExhausted(listener: CoalescedFlushExhaustedListener): () => void {
+	coalescedFlushExhaustedListeners.add(listener);
+	return () => coalescedFlushExhaustedListeners.delete(listener);
+}
+
+/** R39-M1: recently exhausted coalesced flushes (best-effort observability). */
+export function listExhaustedFlushFailures(): readonly CoalescedFlushFailure[] {
+	return exhaustedFlushFailures;
+}
+
+/** @internal test hook */
+export function __test__clearExhaustedFlushFailures(): void {
+	exhaustedFlushFailures.length = 0;
+}
+
+function recordExhaustedFlush(filePath: string, error: unknown, retries: number): void {
+	const failure: CoalescedFlushFailure = {
+		filePath,
+		error: error instanceof Error ? error.message : String(error),
+		retries,
+		at: Date.now(),
+	};
+	exhaustedFlushFailures.push(failure);
+	if (exhaustedFlushFailures.length > EXHAUSTED_FLUSH_FAILURES_MAX) exhaustedFlushFailures.shift();
+	for (const listener of coalescedFlushExhaustedListeners) {
+		try {
+			listener(failure);
+		} catch (listenerError) {
+			logInternalError("atomic-write.coalesced-flush-listener", listenerError, filePath, "warn");
+		}
+	}
+}
 const DEFAULT_ATOMIC_COALESCE_MS = 50;
 /** Issue 2 fix: generation counter for coalesced writes */
 let writeGeneration = 0;
@@ -1093,10 +1149,22 @@ function flushOnePendingAtomicWrite(filePath: string): void {
 		const entryToRetry = current ?? entry;
 		entryToRetry.retryCount++;
 		if (entryToRetry.retryCount >= MAX_FLUSH_RETRIES) {
-			// Max retries exceeded - remove entry and propagate error to callers
+			// R39-M1 (fix-wave 6, EP3): MAX retries exhausted — DEGRADE, never
+			// re-throw. This code runs inside a setTimeout callback (coalesce +
+			// backoff timers) as well as inside flushPendingAtomicWrites(); a
+			// throw from the timer context surfaces as an uncaughtException and
+			// killed the WHOLE host process (exit 7) on a transient write fault,
+			// leaving the run "running" forever. Drop the buffered entry, record +
+			// report the degradation, and keep the host alive.
 			pendingAtomicWrites.delete(filePath);
-			// Re-throw so callers can handle the persistent failure
-			throw error;
+			recordExhaustedFlush(filePath, error, entryToRetry.retryCount);
+			logInternalError(
+				"atomic-write.coalesced-flush",
+				error instanceof Error ? error : new Error(String(error)),
+				`${filePath} — dropped after ${entryToRetry.retryCount} retries (degraded, host stays alive)`,
+				"error",
+			);
+			return;
 		}
 		// Exponential backoff: base delay * 2^(retryCount-1), capped at 30 seconds
 		const backoffMs = Math.min(30000, entryToRetry.coalesceMs * 2 ** (entryToRetry.retryCount - 1));
@@ -1200,7 +1268,8 @@ export function peekPendingCoalescedWrite<T>(filePath: string): T | undefined {
  * flushed file keeps its data fsync but defers the dir fsync, and after the
  * serial loop completes (all renames done → R16-B1 ordering) ONE fsync is
  * issued per distinct pending dir. The trailing fsync lives in the `finally`
- * so a mid-drain throw (a flush that exhausted MAX_FLUSH_RETRIES) still
+ * so a mid-drain throw (e.g. a reporting-hook failure, or any other error the
+ * flush's catch block re-raises) still
  * makes the already-renamed files crash-durable. Scoped flushes and
  * coalesce-timer flushes keep the immediate per-file dir fsync.
  */

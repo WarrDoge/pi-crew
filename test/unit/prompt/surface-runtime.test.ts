@@ -18,6 +18,7 @@ import {
 	AUTO_EXIT_SETTLE_CONFIRM_MS,
 	createAgentEventRecorder,
 	createWorkerActivityTracker,
+	defaultProcStatReader,
 	PARENT_GUARD_INTERVAL_MS,
 	parentAlive,
 	registerSurfaceWorkerLifecycle,
@@ -284,6 +285,35 @@ describe("parentAlive", () => {
 		assert.equal(
 			parentAlive(991, "777", () => tricky),
 			true,
+		);
+	});
+
+	// R19-M1 (deep-review round 19): the R7-P1 tolerance was unreachable in
+	// production — the DEFAULT reader swallowed its own error and returned
+	// undefined, which parentAlive reads as "parent is dead". macOS workers
+	// therefore self-terminated at the first 5 s guard tick.
+	it("R19-M1: macOS-shaped DEFAULT reader is unreadable, not dead → parent stays ALIVE", () => {
+		// The platform shim throws (unreadable) instead of returning undefined.
+		assert.throws(() => defaultProcStatReader(991, "darwin"), /procfs unavailable on darwin/);
+		assert.equal(
+			parentAlive(991, undefined, (p) => defaultProcStatReader(p, "darwin")),
+			true,
+			"no expected ticks + unreadable stat ⇒ alive-with-caveat (host watchdog is the backstop)",
+		);
+		// The spawn writes "" when it cannot read a start time — same verdict.
+		assert.equal(
+			parentAlive(991, "", (p) => defaultProcStatReader(p, "darwin")),
+			true,
+		);
+	});
+
+	it("R19-M1: Linux parity is preserved — ENOENT stays the DEAD signal", () => {
+		if (process.platform !== "linux") return; // procfs assertions are Linux-only
+		assert.match(defaultProcStatReader(process.pid) ?? "", /\(.*\)/s, "self stat is readable");
+		assert.equal(
+			parentAlive(2_147_483_646, undefined),
+			false,
+			"a pid with no /proc entry (ENOENT) is dead — the macOS shim must not weaken Linux detection",
 		);
 	});
 

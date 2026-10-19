@@ -371,3 +371,27 @@ test("RELIABILITY 2026-10-10: a waiter-less rejectRunPromise must NOT surface as
 		clearRunPromisesForTest();
 	}
 });
+
+// ── R37-F1: wait-deadline clamp (second overflow surface) ─────────────────
+
+test("R37-F1: an oversized timeoutMs is clamped — the waiter does NOT reject at ~1 ms", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "tracker-clamp-"));
+	fs.mkdirSync(path.join(cwd, ".crew"));
+	try {
+		const created = createRunManifest({ cwd, team, workflow, goal: "test" });
+		saveRunManifest({ ...created.manifest, status: "running" as const }, { allowTerminalExit: true });
+		const entry = registerRunPromise(created.manifest.runId);
+		// 2.5e9 > 2^31-1 → pre-fix `setTimeout(reject, remaining)` overflowed to
+		// 1 ms and the waiter rejected instantly with "timed out after 2.5e9ms".
+		const waiting = waitForRun(created.manifest.runId, cwd, { timeoutMs: 2_500_000_000 });
+		setTimeout(() => {
+			resolveRunPromise(created.manifest.runId, { manifest: { ...created.manifest, status: "completed" } as never, tasks: [] });
+		}, 60);
+		const result = await waiting;
+		assert.equal(result.manifest.status, "completed", "a clamped deadline must still wait for the run (no 1 ms overflow)");
+		entry.resolve({ manifest: created.manifest, tasks: [] });
+	} finally {
+		clearRunPromisesForTest();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});

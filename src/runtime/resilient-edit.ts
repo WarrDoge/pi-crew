@@ -1,21 +1,33 @@
 /**
  * Resilient edit wrapper — uses the cascading replace() engine as a fallback
- * when the native edit tool fails with "old_string not found".
+ * when the native edit tool fails to find `oldText`.
  *
  * Multi-agent runs (crew workers) often provide slightly-wrong oldText:
  *   - indentation drift (tabs vs spaces)
  *   - trailing whitespace differences
  *   - line-ending normalization (\r\n vs \n)
  *
- * The native edit tool is exact-match only and fails hard on these. This
- * wrapper catches that failure and retries with the cascading engine, which
+ * The native edit tool matches (near-)exactly and fails hard on these. This
+ * module hooks the tool result and retries with the cascading engine, which
  * tries (in order): exact → escape-normalized → line-trimmed → block-anchor →
  * whitespace-normalized → trimmed-boundary.
  *
+ * R49-F1 (wave-6 M3-15) — REAL API ONLY. The previous implementation read
+ * `pi.tools.edit` / `pi.extensions` / `pi._extensions`, none of which exist on
+ * the 1.0.4 extension API (the loader-created api object has no such keys), so
+ * `wrapEditWithResilientReplace()` always returned false in production and the
+ * whole feature was dead code (the call site in register.ts ignores the
+ * return value). `pi.getAllTools()` cannot replace it either: it returns
+ * metadata-only `ToolInfo` (Pick<ToolDefinition, name|description|parameters|
+ * promptGuidelines>) with NO `execute`, so there is nothing to monkey-patch.
+ * The supported seam is the `tool_result` hook: a handler may return
+ * `{ content, isError }` to replace the failed result — the resilient retry
+ * performs the file write itself, so a success result can be substituted.
+ *
  * CONFLICT AWARENESS: pi-diff (`@heyhuynhgiabuu/pi-diff`) also overrides the
- * edit tool with its own replace() integration. To avoid double-wrapping,
- * this module is OPT-IN via the `CREW_RESILIENT_EDIT=1` env var, and
- * auto-disables if pi-diff is detected in the loaded extensions.
+ * edit tool with its own replace() integration. To avoid double-wrapping, this
+ * module is OPT-IN via the `CREW_RESILIENT_EDIT=1` env var, and auto-disables
+ * when pi-diff is detected in the session's tool listing (getAllTools).
  *
  * Usage (in register.ts, guarded):
  *   if (process.env.CREW_RESILIENT_EDIT === "1") {
@@ -25,16 +37,19 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type ReplaceResult, replace } from "../runtime/replace.ts";
 
-interface EditToolLike {
-	name: string;
-	description: string;
-	parameters: unknown;
-	execute: (toolCallId: string, params: unknown, signal: unknown, onUpdate: unknown) => Promise<unknown>;
+/** One replacement as the 1.0.4 edit tool models it (`{ path, edits: [...] }`). */
+interface EditEntry {
+	oldText: string;
+	newText: string;
+	replaceAll?: boolean;
 }
 
-interface EditParams {
+/** Flat edit arguments (1.0.4 single-edit form and pre-1.0 legacy names). */
+interface LegacyEditParams {
 	path?: string;
 	filePath?: string;
+	oldText?: string;
+	newText?: string;
 	oldString?: string;
 	old_string?: string;
 	newString?: string;
@@ -43,111 +58,173 @@ interface EditParams {
 	replace_all?: boolean;
 }
 
-interface EditResult {
-	content?: unknown[];
-	[key: string]: unknown;
+interface ToolResultEventLike {
+	toolName?: unknown;
+	input?: unknown;
+	content?: unknown;
+	isError?: unknown;
+}
+
+interface ToolResultEventResultLike {
+	content: Array<{ type: "text"; text: string }>;
+	isError: boolean;
+}
+
+interface ToolInfoLike {
+	name?: unknown;
+	namespace?: { name?: unknown } | unknown;
+	sourceInfo?: { path?: unknown; source?: unknown } | unknown;
 }
 
 const NOT_FOUND_PATTERNS = [/old_string not found/i, /oldstring not found/i, /no match/i, /could not find/i, /string not found/i];
 
-function isNotFoundResult(result: unknown): boolean {
-	if (!result || typeof result !== "object") return false;
-	const r = result as EditResult;
-	const text = JSON.stringify(r.content ?? r);
+function isNotFoundResult(content: unknown): boolean {
+	const text = JSON.stringify(content ?? "");
 	return NOT_FOUND_PATTERNS.some((re) => re.test(text));
 }
 
-/** Detect whether pi-diff is loaded (to avoid double-wrapping edit). */
+function stringField(value: unknown, key: string): string | undefined {
+	if (!value || typeof value !== "object") return undefined;
+	const field = (value as Record<string, unknown>)[key];
+	return typeof field === "string" ? field : undefined;
+}
+
+/**
+ * Detect whether pi-diff is loaded (to avoid double-wrapping edit).
+ *
+ * R49-F1: reads the REAL `getAllTools()` listing (the phantom
+ * `pi.extensions` / `pi._extensions` are simply not on the api). A tool's
+ * owning extension shows up in `namespace.name` (e.g. `mcp__docs`) and
+ * `sourceInfo.path`/`sourceInfo.source`.
+ */
 function isPiDiffLoaded(pi: ExtensionAPI): boolean {
 	try {
-		const piExt = pi as unknown as { extensions?: unknown[] | Record<string, unknown>; _extensions?: unknown[] };
-		const extensions = piExt?.extensions ?? piExt?._extensions ?? [];
-		const names = Array.isArray(extensions)
-			? extensions.map((e: unknown) => (typeof e === "string" ? e : ((e as { name?: string })?.name ?? "")))
-			: Object.keys(extensions as Record<string, unknown>);
-		return names.some((n: string) => typeof n === "string" && n.includes("pi-diff"));
+		const getAllTools = (pi as unknown as { getAllTools?: () => unknown }).getAllTools;
+		if (typeof getAllTools !== "function") return false;
+		const tools = getAllTools.call(pi);
+		if (!Array.isArray(tools)) return false;
+		return (tools as ToolInfoLike[]).some((tool) => {
+			if (!tool || typeof tool !== "object") return false;
+			const namespaceName = tool.namespace && typeof tool.namespace === "object" ? stringField(tool.namespace, "name") : undefined;
+			const sourcePath = tool.sourceInfo && typeof tool.sourceInfo === "object" ? stringField(tool.sourceInfo, "path") : undefined;
+			const sourceName = tool.sourceInfo && typeof tool.sourceInfo === "object" ? stringField(tool.sourceInfo, "source") : undefined;
+			return [namespaceName, sourcePath, sourceName].some((value) => typeof value === "string" && value.includes("pi-diff"));
+		});
 	} catch {
 		return false;
 	}
 }
 
 /**
- * Wrap the native `edit` tool so that on "old_string not found" failures, it
- * retries using the cascading replace() engine (lenient matching).
+ * Normalize the edit tool input into one or more replacements.
  *
- * @param pi      the Pi extension API
- * @param tools   optional injected tool registry (for testing)
- * @returns true if the wrapper was applied, false if skipped
+ * 1.0.4 shape is `{ path, edits: [{ oldText, newText }] }`; older hosts (and
+ * the module's own history) used `{ path|filePath, oldString|old_string,
+ * newString|new_string, replaceAll }`. Both are accepted so the hook keeps
+ * working across hosts.
  */
-export function wrapEditWithResilientReplace(pi: ExtensionAPI, tools?: { edit: EditToolLike }): boolean {
-	// Auto-disable if pi-diff is present (it has its own replace integration).
-	if (isPiDiffLoaded(pi)) {
-		return false;
+function toEditEntries(input: unknown): { filePath: string; entries: EditEntry[] } | undefined {
+	if (!input || typeof input !== "object") return undefined;
+	const params = input as Record<string, unknown>;
+	const filePath = stringField(params, "path") ?? stringField(params, "filePath");
+	if (!filePath) return undefined;
+
+	const rawEdits = params.edits;
+	if (Array.isArray(rawEdits)) {
+		const entries: EditEntry[] = [];
+		for (const raw of rawEdits) {
+			const oldText = stringField(raw, "oldText") ?? stringField(raw, "old_string") ?? stringField(raw, "oldString");
+			const newText = stringField(raw, "newText") ?? stringField(raw, "new_string") ?? stringField(raw, "newString");
+			if (oldText === undefined || newText === undefined) return undefined;
+			const flag = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+			entries.push({ oldText, newText, replaceAll: flag.replaceAll === true || flag.replace_all === true });
+		}
+		return entries.length > 0 ? { filePath, entries } : undefined;
 	}
 
-	const t = tools ?? (pi as unknown as { tools?: { edit?: EditToolLike } }).tools;
-	if (!t?.edit?.execute) return false;
+	const legacy = params as LegacyEditParams;
+	const oldText = legacy.oldText ?? legacy.oldString ?? legacy.old_string;
+	const newText = legacy.newText ?? legacy.newString ?? legacy.new_string;
+	if (oldText === undefined || newText === undefined) return undefined;
+	return { filePath, entries: [{ oldText, newText, replaceAll: legacy.replaceAll ?? legacy.replace_all ?? false }] };
+}
 
-	const nativeExecute = t.edit.execute.bind(t.edit);
+/**
+ * Apply the resilient cascade to the edit retry. All-or-nothing: the file is
+ * written ONLY when every requested replacement matched, so a partially
+ * fuzz-matched multi-edit can never leave the file half-edited (the native
+ * tool has the same guarantee, and a hook that wrote partially would be worse
+ * than the failure it replaces).
+ *
+ * @returns the replacement result, or undefined when nothing could be applied
+ */
+async function retryWithReplace(input: unknown): Promise<ToolResultEventResultLike | undefined> {
+	const target = toEditEntries(input);
+	if (!target) return undefined;
+	const { filePath, entries } = target;
 
-	t.edit.execute = async function resilientExecute(
-		toolCallId: string,
-		params: unknown,
-		signal: unknown,
-		onUpdate: unknown,
-	): Promise<unknown> {
-		try {
-			const result = await nativeExecute(toolCallId, params, signal, onUpdate);
-			if (!isNotFoundResult(result)) return result;
-			// Fall through to resilient retry.
-			return await retryWithReplace(params as EditParams, toolCallId, signal, onUpdate);
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			if (NOT_FOUND_PATTERNS.some((re) => re.test(msg))) {
-				return await retryWithReplace(params as EditParams, toolCallId, signal, onUpdate);
-			}
-			throw err;
-		}
+	// LAZY: defer dynamic import of node:fs/promises to its call site.
+	const fs = await import("node:fs/promises");
+	let original: string;
+	try {
+		original = await fs.readFile(filePath, "utf8");
+	} catch {
+		return undefined; // unreadable file — leave the original tool failure in place
+	}
+
+	const strategies: string[] = [];
+	let content = original;
+	for (const entry of entries) {
+		const result: ReplaceResult = replace(content, entry.oldText, entry.newText, {
+			replaceAll: entry.replaceAll ?? false,
+		});
+		if (!result.changed) return undefined; // any unmatched edit → no write at all
+		content = result.content;
+		strategies.push(result.strategy);
+	}
+	if (content === original) return undefined;
+
+	await fs.writeFile(filePath, content, "utf8");
+	return {
+		content: [
+			{
+				type: "text",
+				text: `Edited ${filePath} via resilient cascade (strategy: ${strategies.join(", ")}).`,
+			},
+		],
+		isError: false,
 	};
+}
+
+/**
+ * Hook the native `edit` tool result so that "old text not found" failures are
+ * retried with the cascading replace() engine (lenient matching).
+ *
+ * @param pi the Pi extension API
+ * @returns true if the hook was registered, false if skipped
+ */
+export function wrapEditWithResilientReplace(pi: ExtensionAPI): boolean {
+	// Auto-disable if pi-diff is present (it has its own replace integration).
+	if (isPiDiffLoaded(pi)) return false;
+
+	const on = (pi as unknown as { on?: (event: string, handler: unknown) => unknown }).on;
+	if (typeof on !== "function") return false;
+
+	on.call(pi, "tool_result", async (event: ToolResultEventLike) => {
+		if (event?.toolName !== "edit") return undefined;
+		// Only the not-found family is retryable: a duplicate / overlap /
+		// invalid-input failure keeps its original error (the cascade cannot fix
+		// those and a fuzzy retry would be unsafe). The check covers both a
+		// thrown tool error surfaced as isError:true and a not-found result.
+		if (!isNotFoundResult(event.content)) return undefined;
+		try {
+			return await retryWithReplace(event.input);
+		} catch {
+			// A retry failure must never turn a clean tool error into a thrown
+			// extension error — fall back to the native result.
+			return undefined;
+		}
+	});
 
 	return true;
-
-	async function retryWithReplace(params: EditParams, toolCallId: string, signal: unknown, onUpdate: unknown): Promise<unknown> {
-		const filePath = params.path ?? params.filePath;
-		const oldStr = params.oldString ?? params.old_string;
-		const newStr = params.newString ?? params.new_string;
-		const replaceAll = params.replaceAll ?? params.replace_all ?? false;
-
-		if (!filePath || typeof oldStr !== "string" || typeof newStr !== "string") {
-			// Can't retry — rethrow a not-found style error.
-			throw new Error("old_string not found (and resilient retry skipped: missing path/old/new)");
-		}
-
-		// LAZY: defer dynamic import of node:fs/promises to its call site.
-		const fs = await import("node:fs/promises");
-		let content: string;
-		try {
-			content = await fs.readFile(filePath, "utf8");
-		} catch (readErr) {
-			throw new Error(`resilient edit: could not read ${filePath}: ${readErr instanceof Error ? readErr.message : String(readErr)}`);
-		}
-
-		const result: ReplaceResult = replace(content, oldStr, newStr, {
-			replaceAll,
-		});
-		if (!result.changed) {
-			throw new Error(`old_string not found (resilient cascade exhausted, strategy=${result.strategy})`);
-		}
-
-		await fs.writeFile(filePath, result.content, "utf8");
-		return {
-			content: [
-				{
-					type: "text",
-					text: `Edited ${filePath} via resilient cascade (strategy: ${result.strategy}).`,
-				},
-			],
-			_replaceStrategy: result.strategy,
-		};
-	}
 }

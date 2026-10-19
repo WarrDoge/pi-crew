@@ -105,7 +105,7 @@ describe("isLikelyOrphanedActiveRun", () => {
 		assert.equal(isLikelyOrphanedActiveRun(run, []), false);
 	});
 
-	it("returns true when run is stale with specific summary and no agents", () => {
+	it("returns true when a stale run has no agents (R48-N2 structural)", () => {
 		const now = Date.now();
 		const stale = new Date(now - 3 * 60 * 1000).toISOString(); // 3 min ago
 		const run = makeManifest({
@@ -116,7 +116,7 @@ describe("isLikelyOrphanedActiveRun", () => {
 		assert.equal(isLikelyOrphanedActiveRun(run, [], now, 2 * 60 * 1000), true);
 	});
 
-	it("returns false when stale but summary does not match", () => {
+	it("returns true when stale and the summary does not match (magic gate gone, R48-N2)", () => {
 		const now = Date.now();
 		const stale = new Date(now - 3 * 60 * 1000).toISOString();
 		const run = makeManifest({
@@ -124,7 +124,7 @@ describe("isLikelyOrphanedActiveRun", () => {
 			updatedAt: stale,
 			summary: "Some other summary",
 		});
-		assert.equal(isLikelyOrphanedActiveRun(run, [], now, 2 * 60 * 1000), false);
+		assert.equal(isLikelyOrphanedActiveRun(run, [], now, 2 * 60 * 1000), true);
 	});
 
 	it("returns false when run is fresh", () => {

@@ -17,11 +17,21 @@ triggers:
 
 Use this skill for explorer, analyst, reviewer, and source-audit roles. These roles must inspect code without modifying it.
 
+> **Tool availability (enforced — R27-D6).** `explorer` (and `librarian`) ship
+> **without a `bash` tool**: `src/config/role-tools.ts:25-29` sets
+> `tools: ["read", "grep", "find", "ls", "glob", "ask"]` +
+> `excludeTools: ["edit", "write", "bash", "web"]`. The shell syntax below
+> (`rg …`, `find …`, `git status`) is therefore **reference syntax for the
+> intent**, not runnable in an explorer session. Map each example to the tool you
+> actually have: `rg` → `grep`, `find`/shell globbing → `find`/`glob`,
+> `ls` → `ls`, `cat`/`sed -n` → `read` (with offset/limit). `analyst`/`reviewer`
+> roles keep `bash` (`role-tools.ts:33-35`, `:64-68`) — the restriction is per-role.
+
 ## Core Contract
 
 1. **Do not edit files** — no write, no edit, no delete
 2. **Do not write generated artifacts** outside the run artifact directory
-3. **Prefer read-only commands**: `read`, `rg`, `find`, `ls`, `git status`
+3. **Prefer read-only tools**: `read`, `grep`, `find`, `ls`, `glob` (explorer has no shell — see the note above)
 4. **Record exact files inspected** — include path and relevant line numbers
 5. **Distinguish direct evidence from inference** — don't guess
 6. **If implementation is needed, recommend** — don't modify code
@@ -242,10 +252,10 @@ If ANY answer is NO → Stop. Adhere to read-only contract.
 
 ## Source patterns
 
-- `src/runtime/task-runner.ts` — task execution pipeline
-- `src/runtime/child-pi.ts` — worker spawning
-- `src/runtime/live-agent-manager.ts` — live agent lifecycle
-- `src/state/event-log.ts` — event logging system
+- `src/runtime/task-runner.ts` + `src/runtime/task-runner/` — task execution pipeline
+- `src/runtime/child-pi/` — worker spawning
+- `src/runtime/live-session/live-agent-manager.ts` — live agent lifecycle
+- `src/state/event-log/` — event logging system
 - `src/extension/team-tool/` — API and tool handling
 - `src/ui/` — widget and TUI rendering
 

@@ -89,6 +89,26 @@ export function getScheduledJobs(
 	}
 }
 
+/**
+ * F12-M3: hard cap on scheduled jobs. `add` had no count limit — every job also
+ * creates a 1:1 scheduler timer and is persisted, so a project-scope caller could
+ * grow the store (and the in-memory timer map) without bound. 100 is well above
+ * any hand-authored schedule list and cheap to hold.
+ */
+export const MAX_SCHEDULED_JOBS = 100;
+
+/** @internal — count of persisted scheduled jobs for this cwd (R4-M-B4-adjacent: the
+ * cap bounds the on-disk store + the 1:1 scheduler timer map, so it counts BOTH
+ * tiers rather than the B2-gated registration view). */
+function scheduledJobCount(cwd: string): number {
+	try {
+		const tiers = loadCrewSettingsTiers(cwd, undefined);
+		return [...(tiers.user.scheduledJobs ?? []), ...(tiers.project.scheduledJobs ?? [])].filter(isScheduledJobLike).length;
+	} catch {
+		return 0;
+	}
+}
+
 /** Shape guard for the settings fallback — mirrors settings-store's private
  * `validateScheduledJob` (id + scheduleType + enabled) so invalid persisted
  * entries are skipped instead of reaching renderers. */
@@ -219,6 +239,17 @@ export function handleSchedule(params: TeamToolParamsValue, ctx: TeamContext): P
 		return result(msg, { action: "schedule", status: "error" }, true);
 	}
 
+	// F12-M3: enforce the cap BEFORE building/persisting the job so the caller gets
+	// a clear refusal instead of a silently-dropped write (every add also creates a
+	// 1:1 scheduler timer — an unbounded job list is an unbounded timer set).
+	if (scheduledJobCount(ctx.cwd) >= MAX_SCHEDULED_JOBS) {
+		return result(
+			`Scheduled job limit reached (${MAX_SCHEDULED_JOBS}). Remove finished schedules first: { action: 'schedule', subAction: 'list' } then subAction: 'remove', id: '<jobId>'.`,
+			{ action: "schedule", status: "error" },
+			true,
+		);
+	}
+
 	const { spec, schedule, scheduleType, intervalMs } = specResult;
 	const next = nextRunTime(spec);
 	if ("error" in next) return result(next.error, { action: "schedule", status: "error" }, true);
@@ -301,10 +332,13 @@ function scheduledJobsOf(settings: CrewSettings): import("../../runtime/scheduli
 
 function persistScheduledJob(cwd: string, job: import("../../runtime/scheduling/scheduler.ts").ScheduledJob): void {
 	try {
-		updateCrewSettings(cwd, (settings) => ({
-			...settings,
-			scheduledJobs: [...scheduledJobsOf(settings), job],
-		}));
+		updateCrewSettings(cwd, (settings) => {
+			const existing = scheduledJobsOf(settings);
+			// F12-M3: enforced here as well as at the tool boundary so no other writer
+			// can push past the cap into the persisted store.
+			if (existing.length >= MAX_SCHEDULED_JOBS) return settings;
+			return { ...settings, scheduledJobs: [...existing, job] };
+		});
 	} catch {
 		/* best-effort persistence */
 	}

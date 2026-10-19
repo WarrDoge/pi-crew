@@ -6,6 +6,14 @@ topology: dynamic
 
 # Chain Workflow - Sequential execution with context passing
 
+> **This file is DOCUMENTATION, not a runnable workflow (R28-M1 / wave-6 M3-24).**
+> It lives in `docs/` because the framework discovers every
+> `workflows/*.workflow.md` as a workflow resource; as a doc it parsed to 10
+> phantom steps (its prose headings) and the advertised `chain` workflow could
+> never run. Chain execution is implemented by the chain runner
+> (`src/runtime/chain-runner.ts` + `src/extension/team-tool/chain-dispatch.ts`);
+> there is no `chain` workflow resource.
+
 **Source:** pi-boomerang integration plan  
 **Syntax:** `step1 -> step2 -> step3`  
 **Version:** 1.0.0

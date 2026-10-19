@@ -27,9 +27,11 @@ export const ROLE_TOOL_CONFIGS: Record<string, RoleToolConfig> = {
 		excludeTools: ["edit", "write", "bash", "web"],
 	},
 
-	// Analyst - Read and analyze, limited execution
+	// Analyst - Read and analyze, limited execution. (ask_question removed
+	// 2026-10-18: the host tool is `ask` — excluding a nonexistent name was a
+	// dead entry; the live `ask` tool stays allowed for analyst.)
 	analyst: {
-		excludeTools: ["edit", "write", "ask_question"],
+		excludeTools: ["edit", "write"],
 	},
 
 	// Planner - Read-only planning; emits plans as TEXT (runner persists result).
@@ -41,7 +43,7 @@ export const ROLE_TOOL_CONFIGS: Record<string, RoleToolConfig> = {
 	// default/implementation workflows.
 	planner: {
 		tools: ["read", "grep", "find", "ls", "glob", "ask"],
-		excludeTools: ["edit", "write", "bash", "web", "ask_question"],
+		excludeTools: ["edit", "write", "bash", "web"],
 	},
 
 	// Critic - Read-only plan/design critique (F2: was missing from the map,
@@ -67,7 +69,7 @@ export const ROLE_TOOL_CONFIGS: Record<string, RoleToolConfig> = {
 	// Writer - Documentation focused
 	writer: {
 		tools: ["read", "edit", "write", "ls", "ask"],
-		excludeTools: ["bash", "web", "ask_question"],
+		excludeTools: ["bash", "web"],
 	},
 
 	// Security Reviewer - Strict restrictions
@@ -76,7 +78,7 @@ export const ROLE_TOOL_CONFIGS: Record<string, RoleToolConfig> = {
 	// resolved at runtime (returned {}), silently dropping enforcement.
 	"security-reviewer": {
 		tools: ["read", "grep", "find", "ask"],
-		excludeTools: ["edit", "write", "bash", "web", "ask_question"],
+		excludeTools: ["edit", "write", "bash", "web"],
 	},
 
 	// Verifier - Runs tests (needs bash) but must NOT edit source (F4: moved

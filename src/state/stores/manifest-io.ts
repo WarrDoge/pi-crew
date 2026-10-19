@@ -29,6 +29,128 @@ export function quarantineCorruptFile(filePath: string): void {
 }
 
 /**
+ * R39-M2 (fix-wave 6, EP3): per-run report of a tasks.json corruption recovery.
+ * Corruption previously DROPPED tasks silently (events.jsonl only holds tasks
+ * that already emitted events) and the run then reported "completed 100%" with
+ * no trace of the loss. This record makes the loss observable.
+ */
+export interface TasksCorruptionReport {
+	runId: string;
+	/** Path the corrupt file was moved to (best-effort — may be empty on rename failure). */
+	quarantinedPath: string;
+	/** Number of tasks recovered from events.jsonl. */
+	reconstructedCount: number;
+	/** Number of task ids salvageable from the corrupt payload (best-effort). */
+	salvagedCount: number;
+	/** Task ids present in the corrupt payload that could NOT be recovered. */
+	droppedIds: string[];
+	at: number;
+}
+
+const tasksCorruptionReports = new Map<string, TasksCorruptionReport>();
+
+/** R39-M2: the last tasks.json corruption report for a run, if any (this process). */
+export function getTasksCorruptionReport(runId: string): TasksCorruptionReport | undefined {
+	return tasksCorruptionReports.get(runId);
+}
+
+/** R39-M2: all tasks.json corruption reports recorded in this process. */
+export function listTasksCorruptionReports(): TasksCorruptionReport[] {
+	return [...tasksCorruptionReports.values()];
+}
+
+/** @internal test hook */
+export function __test__clearTasksCorruptionReports(): void {
+	tasksCorruptionReports.clear();
+}
+
+/**
+ * R39-M2: best-effort salvage of task ids from a corrupt tasks.json payload.
+ *
+ * Scans for top-level (brace-depth 0) `{...}` objects — i.e. elements of the
+ * bare-array write format — and keeps the `id` of every candidate that parses
+ * as JSON. Nested objects (depth >= 1) are ignored, so an unrelated nested
+ * `id` (routing/usage/etc.) cannot inflate the count. Returns [] for a payload
+ * with no salvageable task objects (the total-loss case).
+ */
+export function salvageTaskIds(raw: string): string[] {
+	const ids: string[] = [];
+	let depth = 0;
+	let start = -1;
+	let inString = false;
+	let escaped = false;
+	for (let i = 0; i < raw.length; i++) {
+		const ch = raw[i];
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (ch === "\\") escaped = true;
+			else if (ch === '"') inString = false;
+			continue;
+		}
+		if (ch === '"') {
+			inString = true;
+			continue;
+		}
+		if (ch === "{") {
+			if (depth === 0) start = i;
+			depth++;
+		} else if (ch === "}" && depth > 0) {
+			depth--;
+			if (depth === 0 && start >= 0) {
+				const candidate = raw.slice(start, i + 1);
+				start = -1;
+				try {
+					const obj = JSON.parse(candidate) as { id?: unknown };
+					if (obj && typeof obj.id === "string") ids.push(obj.id);
+				} catch {
+					/* partial/truncated object — not salvageable */
+				}
+			}
+		}
+	}
+	return ids;
+}
+
+/**
+ * R39-M2: shared corruption-recovery step for both sync and async load paths.
+ * Quarantines, reconstructs from events, DETECTS + RECORDS the dropped task
+ * count, and logs loudly so a silent task-drop can no longer masquerade as a
+ * clean "completed 100%" run. Returns the reconstructed tasks (persisted by
+ * the caller).
+ */
+function recoverCorruptTasks(tasksPath: string, eventsPath: string, runId: string, raw: string): TeamTaskState[] {
+	const quarantinedPath = `${tasksPath}.corrupt-${Date.now()}`;
+	quarantineCorruptFile(tasksPath);
+	const reconstructed = reconstructTasksFromEventLog(eventsPath, runId);
+	const reconstructedIds = new Set(reconstructed.map((task) => task.id));
+	const salvagedIds = salvageTaskIds(raw);
+	const droppedIds = salvagedIds.filter((id) => !reconstructedIds.has(id));
+
+	tasksCorruptionReports.set(runId, {
+		runId,
+		quarantinedPath,
+		reconstructedCount: reconstructed.length,
+		salvagedCount: salvagedIds.length,
+		droppedIds,
+		at: Date.now(),
+	});
+
+	const dropDetail =
+		droppedIds.length > 0
+			? `; ${droppedIds.length} task(s) present in the corrupt file were NOT recoverable (dropped: ${droppedIds.join(",")}) — run state is DEGRADED`
+			: " (no dropped task ids detected)";
+	logInternalError(
+		"state-store",
+		new Error(
+			`R39-M2: tasks.json for run ${runId} is corrupt — quarantined; reconstructed ${reconstructed.length} task(s) from events.jsonl${dropDetail}. Preserve the .corrupt-* file for diagnosis.`,
+		),
+		undefined,
+		droppedIds.length > 0 ? "error" : "warn",
+	);
+	return reconstructed;
+}
+
+/**
  * ST-4: Convert event-reconstructor output into TeamTaskState[].
  * Reconstructed tasks carry lifecycle data (id, status, timing) from the
  * event log; auxiliary fields (role, agent, title) are filled with defaults
@@ -157,15 +279,13 @@ export function loadTasksWithRecovery(tasksPath: string, eventsPath: string, run
 		parsed = JSON.parse(content);
 	} catch {
 		// SyntaxError — corrupt file.
-		quarantineCorruptFile(tasksPath);
-		const reconstructed = reconstructTasksFromEventLog(eventsPath, runId);
+		const reconstructed = recoverCorruptTasks(tasksPath, eventsPath, runId, content);
 		if (reconstructed.length > 0) atomicWriteJson(tasksPath, reconstructed, { compact: true });
 		return reconstructed;
 	}
 	if (!isRecognizableTasksPayload(parsed)) {
 		// Neither v0 bare array nor v1+ envelope (e.g. `{}`) — corrupt.
-		quarantineCorruptFile(tasksPath);
-		const reconstructed = reconstructTasksFromEventLog(eventsPath, runId);
+		const reconstructed = recoverCorruptTasks(tasksPath, eventsPath, runId, content);
 		if (reconstructed.length > 0) atomicWriteJson(tasksPath, reconstructed, { compact: true });
 		return reconstructed;
 	}
@@ -222,14 +342,12 @@ export async function loadTasksWithRecoveryAsync(tasksPath: string, eventsPath: 
 	try {
 		parsed = JSON.parse(content);
 	} catch {
-		quarantineCorruptFile(tasksPath);
-		const reconstructed = reconstructTasksFromEventLog(eventsPath, runId);
+		const reconstructed = recoverCorruptTasks(tasksPath, eventsPath, runId, content);
 		if (reconstructed.length > 0) await atomicWriteJsonAsync(tasksPath, reconstructed, { compact: true });
 		return reconstructed;
 	}
 	if (!isRecognizableTasksPayload(parsed)) {
-		quarantineCorruptFile(tasksPath);
-		const reconstructed = reconstructTasksFromEventLog(eventsPath, runId);
+		const reconstructed = recoverCorruptTasks(tasksPath, eventsPath, runId, content);
 		if (reconstructed.length > 0) await atomicWriteJsonAsync(tasksPath, reconstructed, { compact: true });
 		return reconstructed;
 	}

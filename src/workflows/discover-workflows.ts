@@ -146,7 +146,15 @@ function parseWorkflowFile(filePath: string, source: ResourceSource): WorkflowCo
 			(match, index) =>
 				explicitStepIndexes.has(index) || (hasSectionBoundary(body, match) && /^[a-z][a-z0-9-]*$/.test(match[1]?.trim() ?? "")),
 		);
-		const parseMatches = explicitStepIndexes.size ? effectiveMatches : matches;
+		// R28-M1: a `.workflow.md` with NO step-config line under any `##` heading is
+		// a DOC, not a workflow. The old fallback (`explicitStepIndexes.size ?
+		// effectiveMatches : matches`) parsed EVERY heading in that case, so the
+		// shipped `chain.workflow.md` doc produced 10 phantom steps whose ids were
+		// prose ("Chain Syntax", "Error Handling", …) — the advertised workflow could
+		// never run. Only slug-shaped headings reach `effectiveMatches`, so a doc file
+		// now parses to 0 steps instead of phantom ones. (The file itself moved to
+		// docs/chain-workflow.md; this keeps user/project dirs from repeating the bug.)
+		const parseMatches = effectiveMatches;
 		const steps: WorkflowStep[] = [];
 		for (let i = 0; i < parseMatches.length; i++) {
 			const match = parseMatches[i]!;

@@ -23,6 +23,15 @@
  *  5. wait.resolve round-trip: parked → resolved flips waiting→running, clears
  *     waitState, appends ask.answered + task.resumed; a questionId mismatch is
  *     rejected WITHOUT clearing anything.
+ * 11. M3-6 (R21-M1): resolving one of TWO concurrent parks must NOT un-shield
+ *     the other — the single run-level waitState slot is re-pointed at the
+ *     still-parked task (isWaitAnswerPending stays true) instead of cleared.
+ * 12. M4-R1(a) (fix-wave 6 residual): the PARK write must not shorten the
+ *     shield either — the slot follows the park with the LATEST deadline, so a
+ *     newer-but-shorter park never replaces a longer-lived one.
+ * 13. M4-R1(b): the sibling slot writers (respond requeue / ask-timeout
+ *     requeue) re-point through the same helper instead of clearing the slot
+ *     while another task is still parked.
  *
  * Task 10 (mux-surface A1 §5.2) — revokeTaskToken + stale-token hello:
  *  6. valid hello ok → revokeTaskToken(taskId) → re-hello with the old token
@@ -49,6 +58,8 @@ import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { CrewBroker } from "../../../../src/runtime/broker/crew-broker.ts";
 import { BrokerTokenRegistry } from "../../../../src/runtime/broker/crew-broker-tokens.ts";
+import { __test__repointedWaitState, repointWaitState } from "../../../../src/runtime/broker/protocol/wait-resolve.ts";
+import { isWaitAnswerPending } from "../../../../src/runtime/stale-reconciler.ts";
 import type { TeamEvent } from "../../../../src/state/event-log/event-log.ts";
 import { loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import { encodeBrokerFrame, NdjsonDecoder } from "../../../../src/utils/ndjson.ts";
@@ -975,5 +986,270 @@ test("F1: wait.request pushes the question to a registered sync foreground waite
 		await client.close();
 	} finally {
 		await broker.stop();
+	}
+});
+
+// ----------------------------------------------------------------------------
+// M3-6 (R21-M1, fix-wave 6): scoped waitState clear — one resolve must never
+// un-shield a DIFFERENT task that is still parked.
+// ----------------------------------------------------------------------------
+
+const WAITING = (deadline: number, questionId: string) => ({
+	questionId,
+	askedAt: new Date(Date.now() - 1000).toISOString(),
+	deadline,
+});
+
+test("M4-R1(b) unit: repointWaitState(predicate) re-points at a surviving park, clears only when alone", () => {
+	const now = Date.now();
+	const parkedA = { id: "task-a", status: "waiting" as const, waiting: WAITING(now + 3_600_000, "qA") };
+	const parkedB = { id: "task-b", status: "waiting" as const, waiting: WAITING(now + 60_000, "qB") };
+	const running = { id: "task-c", status: "running" as const };
+	const ended = new Set(["task-b"]);
+	const isEnded = (taskId: string) => ended.has(taskId);
+	const slotB = { taskId: "task-b", questionId: "qB", askedAt: "x", deadline: now + 60_000 };
+
+	// Slot owned by an ended park + a sibling still parked → re-point at the
+	// sibling (latest deadline wins) — the respond / ask-timeout writers' fix.
+	const repointed = repointWaitState([parkedA, parkedB, running] as never, slotB, isEnded);
+	assert.equal(repointed?.taskId, "task-a");
+	assert.equal(repointed?.questionId, "qA");
+	assert.equal(repointed?.deadline, now + 3_600_000);
+
+	// The ended park is excluded even while the input view still flags it
+	// "waiting" (wait.resolve and the requeue writers pass different views).
+	const stillWaitingEnded = { id: "task-b", status: "waiting" as const, waiting: WAITING(now + 10_000_000, "qB") };
+	assert.equal(repointWaitState([stillWaitingEnded, parkedA] as never, slotB, isEnded)?.taskId, "task-a");
+
+	// Slot owned by an ended park + nothing else parked → cleared.
+	assert.equal(repointWaitState([running] as never, slotB, isEnded), undefined);
+
+	// Slot owned by a park that is NOT ended → untouched.
+	const untouched = { taskId: "task-a", questionId: "qA", askedAt: "x", deadline: now };
+	assert.deepEqual(repointWaitState([parkedA] as never, untouched, isEnded), untouched);
+	// No slot at all → unchanged.
+	assert.equal(repointWaitState([parkedA] as never, undefined, isEnded), undefined);
+});
+
+test("M3-6 unit: repointedWaitState keeps a surviving park, never clobbers a newer one", () => {
+	const now = Date.now();
+	const parkedA = { id: "task-a", status: "waiting" as const, waiting: WAITING(now + 3_600_000, "qA") };
+	const parkedB = { id: "task-b", status: "waiting" as const, waiting: WAITING(now + 60_000, "qB") };
+	const running = { id: "task-c", status: "running" as const };
+
+	// Slot owned by the park being ended + a sibling still parked → re-point at
+	// the sibling (latest deadline wins so the run shield never expires early).
+	const repointed = __test__repointedWaitState(
+		[parkedA, parkedB, running] as never,
+		{ taskId: "task-b", questionId: "qB", askedAt: "x", deadline: now + 60_000 },
+		"task-b",
+		"qB",
+	);
+	assert.equal(repointed?.taskId, "task-a");
+	assert.equal(repointed?.questionId, "qA");
+	assert.equal(repointed?.deadline, now + 3_600_000);
+
+	// Slot owned by the park being ended + nothing else parked → cleared.
+	assert.equal(
+		__test__repointedWaitState([running] as never, { taskId: "task-b", questionId: "qB", askedAt: "x", deadline: now }, "task-b", "qB"),
+		undefined,
+	);
+	// No slot at all → unchanged.
+	assert.equal(__test__repointedWaitState([parkedA] as never, undefined, "task-b", "qB"), undefined);
+	// Slot owned by a DIFFERENT (newer) park → untouched (pre-existing contract).
+	const other = { taskId: "task-b", questionId: "qB", askedAt: "x", deadline: now };
+	assert.deepEqual(__test__repointedWaitState([parkedA] as never, other, "task-z", "qz"), other);
+});
+
+test("M3-6 (R21-M1): resolving one of two concurrent parks re-points waitState at the still-parked task", async () => {
+	const scaff = await scaffoldRunningTask("m3-6");
+	const { broker, socketPath } = await startBroker({ cwd: scaff.cwd, waitMethodsEnabled: true });
+	const tokenA = broker.issueRunToken(scaff.runId, scaff.taskId);
+	const tokenB = broker.issueRunToken(scaff.runId, scaff.otherTaskId);
+	const clientA = await rawConnect(socketPath);
+	const clientB = await rawConnect(socketPath);
+	try {
+		// Both tasks must be "running" for the broker's park precondition.
+		const seeded = loadRunManifestById(scaff.cwd, scaff.runId)!;
+		const startedAt = new Date().toISOString();
+		saveRunTasks(
+			seeded.manifest,
+			seeded.tasks.map((t) =>
+				t.id === scaff.taskId || t.id === scaff.otherTaskId ? { ...t, status: "running" as const, startedAt } : t,
+			),
+		);
+
+		// Park 1: task A, long deadline.
+		await hello(clientA, scaff.runId, scaff.taskId, tokenA);
+		clientA.socket.write(
+			encodeBrokerFrame({ id: "m6-a1", method: "wait.request", params: { to: scaff.taskId, question: "A?", timeoutSec: 3600 } }),
+		);
+		const parkA = (await clientA.waitForFrame((f) => (f as { id?: string })?.id === "m6-a1")) as {
+			result?: { questionId?: string };
+			error?: { code: string };
+		};
+		assert.ok(parkA.result?.questionId, `park A must succeed: ${JSON.stringify(parkA)}`);
+		const questionA = parkA.result.questionId;
+
+		// Park 2: the sibling task, short deadline — the single slot must KEEP A
+		// (M4-R1a: a newer park never shortens a live shield).
+		await hello(clientB, scaff.runId, scaff.otherTaskId, tokenB);
+		clientB.socket.write(
+			encodeBrokerFrame({ id: "m6-b1", method: "wait.request", params: { to: scaff.otherTaskId, question: "B?", timeoutSec: 60 } }),
+		);
+		const parkB = (await clientB.waitForFrame((f) => (f as { id?: string })?.id === "m6-b1")) as {
+			result?: { questionId?: string };
+			error?: { code: string };
+		};
+		assert.ok(parkB.result?.questionId, `park B must succeed: ${JSON.stringify(parkB)}`);
+		const questionB = parkB.result.questionId;
+
+		let loaded = loadRunManifestById(scaff.cwd, scaff.runId)!;
+		// M4-R1(a): the slot follows the park with the LATEST deadline, so the
+		// newer-but-SHORTER park (B, 60s) must NOT replace A's 3600s shield
+		// (pre-fix: "the single slot follows the newer park" → shield shortened).
+		assert.equal(loaded.manifest.waitState?.taskId, scaff.taskId, "a newer shorter park never shortens the run shield");
+		assert.equal(loaded.manifest.waitState?.questionId, questionA, "the kept slot still carries the older park's questionId");
+		assert.equal(isWaitAnswerPending(loaded.manifest), true, "the shield is still live after the second park");
+
+		// Resolve the NEWER park (B) — the older park's stale-repair shield must
+		// survive: the slot belongs to A, so a non-owner resolve leaves it alone.
+		clientB.socket.write(
+			encodeBrokerFrame({ id: "m6-b2", method: "wait.resolve", params: { to: scaff.otherTaskId, questionId: questionB } }),
+		);
+		const resolvedB = (await clientB.waitForFrame((f) => (f as { id?: string })?.id === "m6-b2")) as {
+			result?: { ok?: boolean };
+			error?: { code: string };
+		};
+		assert.ok(!resolvedB.error, `wait.resolve B must succeed: ${JSON.stringify(resolvedB)}`);
+
+		loaded = loadRunManifestById(scaff.cwd, scaff.runId)!;
+		assert.equal(loaded.tasks.find((t) => t.id === scaff.otherTaskId)?.status, "running", "resolved park flips back to running");
+		assert.equal(loaded.tasks.find((t) => t.id === scaff.taskId)?.status, "waiting", "the older park stays parked");
+		assert.equal(loaded.manifest.waitState?.taskId, scaff.taskId, "waitState is RE-POINTED at the still-parked task");
+		assert.equal(loaded.manifest.waitState?.questionId, questionA, "the re-pointed slot carries the survivor's questionId");
+		assert.equal(isWaitAnswerPending(loaded.manifest), true, "the surviving park keeps its stale-repair shield (R21-M1)");
+
+		// Resolving the LAST park clears the slot for real.
+		clientA.socket.write(
+			encodeBrokerFrame({ id: "m6-a2", method: "wait.resolve", params: { to: scaff.taskId, questionId: questionA } }),
+		);
+		const resolvedA = (await clientA.waitForFrame((f) => (f as { id?: string })?.id === "m6-a2")) as {
+			result?: { ok?: boolean };
+			error?: { code: string };
+		};
+		assert.ok(!resolvedA.error, `wait.resolve A must succeed: ${JSON.stringify(resolvedA)}`);
+		loaded = loadRunManifestById(scaff.cwd, scaff.runId)!;
+		assert.equal(loaded.manifest.waitState, undefined, "last park resolved → slot cleared");
+		assert.equal(isWaitAnswerPending(loaded.manifest), false, "no park left → no shield");
+	} finally {
+		clientA.close();
+		clientB.close();
+		await broker.stop();
+		teardownCwd(scaff.cwd);
+	}
+});
+
+// ----------------------------------------------------------------------------
+// M4-R1(a) (fix-wave 6 residual, M3-C): the PARK write must never shorten the
+// run-level shield. `isWaitAnswerPending` reads ONLY manifest.waitState, so
+// overwriting the slot with a newer-but-shorter park used to drop the
+// protection of an older, longer park that was still awaiting an answer.
+// ----------------------------------------------------------------------------
+
+test("M4-R1(a): the park slot follows the LATEST deadline — a newer shorter park never shortens the shield", async () => {
+	const scaff = await scaffoldRunningTask("m4r1a");
+	const { broker, socketPath } = await startBroker({ cwd: scaff.cwd, waitMethodsEnabled: true });
+	const tokenA = broker.issueRunToken(scaff.runId, scaff.taskId);
+	const tokenB = broker.issueRunToken(scaff.runId, scaff.otherTaskId);
+	const clientA = await rawConnect(socketPath);
+	const clientB = await rawConnect(socketPath);
+	try {
+		const seeded = loadRunManifestById(scaff.cwd, scaff.runId)!;
+		const startedAt = new Date().toISOString();
+		saveRunTasks(
+			seeded.manifest,
+			seeded.tasks.map((t) =>
+				t.id === scaff.taskId || t.id === scaff.otherTaskId ? { ...t, status: "running" as const, startedAt } : t,
+			),
+		);
+
+		// Park B first with the LONG deadline (3600s) — it owns the slot.
+		await hello(clientB, scaff.runId, scaff.otherTaskId, tokenB);
+		clientB.socket.write(
+			encodeBrokerFrame({
+				id: "a-b1",
+				method: "wait.request",
+				params: { to: scaff.otherTaskId, question: "B long?", timeoutSec: 3600 },
+			}),
+		);
+		const parkB = (await clientB.waitForFrame((f) => (f as { id?: string })?.id === "a-b1")) as {
+			result?: { questionId?: string };
+			error?: { code: string };
+		};
+		assert.ok(parkB.result?.questionId, `park B must succeed: ${JSON.stringify(parkB)}`);
+		let loaded = loadRunManifestById(scaff.cwd, scaff.runId)!;
+		assert.equal(loaded.manifest.waitState?.taskId, scaff.otherTaskId, "first park owns the slot");
+
+		// Park A with a SHORT deadline (60s): the newer park must NOT shorten the
+		// live shield (pre-fix: the slot followed the newer park → 60s shield).
+		await hello(clientA, scaff.runId, scaff.taskId, tokenA);
+		clientA.socket.write(
+			encodeBrokerFrame({ id: "a-a1", method: "wait.request", params: { to: scaff.taskId, question: "A short?", timeoutSec: 60 } }),
+		);
+		const parkA = (await clientA.waitForFrame((f) => (f as { id?: string })?.id === "a-a1")) as {
+			result?: { questionId?: string };
+			error?: { code: string };
+		};
+		assert.ok(parkA.result?.questionId, `park A must succeed: ${JSON.stringify(parkA)}`);
+		const questionA = parkA.result.questionId;
+
+		loaded = loadRunManifestById(scaff.cwd, scaff.runId)!;
+		assert.equal(loaded.tasks.find((t) => t.id === scaff.taskId)?.status, "waiting", "the newer park still parks its task");
+		assert.equal(loaded.manifest.waitState?.taskId, scaff.otherTaskId, "the longer park keeps the shield (M4-R1a)");
+		assert.ok(
+			(loaded.manifest.waitState?.deadline ?? 0) > Date.now() + 3_000_000,
+			"the shield still expires at B's 3600s deadline, not A's 60s one",
+		);
+		assert.equal(isWaitAnswerPending(loaded.manifest), true);
+
+		// Resolve B → the slot re-points at the surviving park (A), never to nothing.
+		clientB.socket.write(
+			encodeBrokerFrame({
+				id: "a-b2",
+				method: "wait.resolve",
+				params: { to: scaff.otherTaskId, questionId: parkB.result.questionId },
+			}),
+		);
+		assert.ok(
+			!((await clientB.waitForFrame((f) => (f as { id?: string })?.id === "a-b2")) as { error?: unknown }).error,
+			"resolve B must succeed",
+		);
+		loaded = loadRunManifestById(scaff.cwd, scaff.runId)!;
+		assert.equal(loaded.manifest.waitState?.taskId, scaff.taskId, "re-pointed at the surviving park");
+		assert.equal(loaded.manifest.waitState?.questionId, questionA);
+
+		// B is running again → a new park with a LATER deadline legitimately takes
+		// the slot (the rule only refuses a SHORTENING overwrite).
+		clientB.socket.write(
+			encodeBrokerFrame({
+				id: "a-b3",
+				method: "wait.request",
+				params: { to: scaff.otherTaskId, question: "B again?", timeoutSec: 3600 },
+			}),
+		);
+		const parkB2 = (await clientB.waitForFrame((f) => (f as { id?: string })?.id === "a-b3")) as {
+			result?: { questionId?: string };
+			error?: { code: string };
+		};
+		assert.ok(parkB2.result?.questionId, `re-park B must succeed: ${JSON.stringify(parkB2)}`);
+		loaded = loadRunManifestById(scaff.cwd, scaff.runId)!;
+		assert.equal(loaded.manifest.waitState?.taskId, scaff.otherTaskId, "a park with a later deadline takes the slot");
+		assert.equal(loaded.manifest.waitState?.questionId, parkB2.result.questionId);
+	} finally {
+		clientA.close();
+		clientB.close();
+		await broker.stop();
+		teardownCwd(scaff.cwd);
 	}
 });
