@@ -176,6 +176,12 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 			try {
 				const preGate = await runVerifierGatePreGate({
 					cwd: ctx.task.cwd,
+					// M1-7 (R47-1): host-owned ground truth pinned on the manifest at
+					// dispatch — the gate verifies manifest integrity against it and
+					// never re-derives checks from the worker-mutable task-cwd
+					// package.json. Absent (old manifests / goal-loop runs) ⇒ the gate
+					// resolves no checks ⇒ INCONCLUSIVE ⇒ verifier spawns (fail-closed).
+					...(manifest.verifyGateSpec ? { hostSpec: manifest.verifyGateSpec } : {}),
 					signal: input.signal,
 					classifier: {
 						enabled: resolveClassifierEnabled(input.runtimeConfig?.classifierEnabled),

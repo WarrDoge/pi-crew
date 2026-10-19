@@ -10,6 +10,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { mock, test } from "node:test";
 import { runTeamTask } from "../../../../src/runtime/task-runner.ts";
+import { resolveHostVerifyGateSpec } from "../../../../src/runtime/verification/verify-gate.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
 
@@ -50,6 +51,9 @@ function makeRepoDir(label: string, scripts: Record<string, string>): string {
 test("U13 acceptance: green gate → verifier task completes WITHOUT spawning the LLM verifier", async () => {
 	const cwd = makeRepoDir("pi-crew-u13-green-", { typecheck: "node -e 0", "test:critical": "node -e 0" });
 	const created = createRunManifest({ cwd, team: team as never, workflow: workflow as never, goal: "u13-green" });
+	// M1-7 (R47-1): dispatch pins the host-owned verify spec on the manifest —
+	// the gate runs the spec's checks and never reads the task-cwd package.json.
+	created.manifest.verifyGateSpec = await resolveHostVerifyGateSpec(cwd);
 	const task = created.tasks[0]!;
 	assert.equal(task.role, "verifier");
 	const result = await runTeamTask({
@@ -91,6 +95,8 @@ test("U13 acceptance: green gate → verifier task completes WITHOUT spawning th
 test("U13: red gate → verifier still spawns, WITH the gate results in its prompt", async () => {
 	const cwd = makeRepoDir("pi-crew-u13-red-", { typecheck: 'node -e "process.exit(5)"' }); // DOUBLE quotes: cmd.exe keeps single-quoted -e args as inert string literals → exit 0 → gate turns GREEN on Windows (live-caught CI 2026-10-12)
 	const created = createRunManifest({ cwd, team: team as never, workflow: workflow as never, goal: "u13-red" });
+	// M1-7 (R47-1): host-owned spec pinned at dispatch (spec checks = the red script).
+	created.manifest.verifyGateSpec = await resolveHostVerifyGateSpec(cwd);
 	const task = created.tasks[0]!;
 	const prevMock = process.env.PI_TEAMS_MOCK_CHILD_PI;
 	const prevAllowMock = process.env.PI_CREW_ALLOW_MOCK;
@@ -175,6 +181,8 @@ test("U13-ADJ gap 1: skip-path writeArtifact failure degrades — task completes
 	// gate's result write targets results/.
 	fs.mkdirSync(created.manifest.artifactsRoot, { recursive: true });
 	fs.writeFileSync(path.join(created.manifest.artifactsRoot, "results"), "not-a-directory");
+	// M1-7 (R47-1): host-owned spec pinned at dispatch.
+	created.manifest.verifyGateSpec = await resolveHostVerifyGateSpec(cwd);
 	const errMock = mock.method(console, "error", () => undefined);
 	try {
 		const result = await runTeamTask({
@@ -226,6 +234,9 @@ test("review fix: skip-path finalizer error propagates out of runTeamTask — no
 			`fs.mkdirSync(${JSON.stringify(created.manifest.eventsPath)});\n`,
 		"utf8",
 	);
+	// M1-7 (R47-1): host-owned spec pinned at dispatch (before sabotage.js exists —
+	// it is not a manifest file, so the P1a snapshot is unaffected).
+	created.manifest.verifyGateSpec = await resolveHostVerifyGateSpec(cwd);
 	const prevMock = process.env.PI_TEAMS_MOCK_CHILD_PI;
 	const prevAllowMock = process.env.PI_CREW_ALLOW_MOCK;
 	// Safety net only: a PRE-fix fall-through would spawn the MOCK child pi
@@ -261,4 +272,82 @@ test("review fix: skip-path finalizer error propagates out of runTeamTask — no
 		if (prevAllowMock === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = prevAllowMock;
 	}
+});
+
+// ─── M1-7 (R47-1): host-owned ground truth — tamper + absence pins ──────────
+
+function withMockChildPi(fn: () => Promise<void>): Promise<void> {
+	const prevMock = process.env.PI_TEAMS_MOCK_CHILD_PI;
+	const prevAllowMock = process.env.PI_CREW_ALLOW_MOCK;
+	process.env.PI_CREW_ALLOW_MOCK = "1";
+	process.env.PI_TEAMS_MOCK_CHILD_PI = "json-success";
+	return fn().finally(() => {
+		if (prevMock === undefined) delete process.env.PI_TEAMS_MOCK_CHILD_PI;
+		else process.env.PI_TEAMS_MOCK_CHILD_PI = prevMock;
+		if (prevAllowMock === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
+		else process.env.PI_CREW_ALLOW_MOCK = prevAllowMock;
+	});
+}
+
+test("M1-7 P2 replay: tampered package.json vs pinned host spec ⇒ gate FAILED, verifier SPAWNS (no skip)", async () => {
+	const cwd = makeRepoDir("pi-crew-u13-tamper-", { typecheck: "node -e 0", "test:critical": "node -e 0" });
+	const created = createRunManifest({ cwd, team: team as never, workflow: workflow as never, goal: "u13-tamper" });
+	created.manifest.verifyGateSpec = await resolveHostVerifyGateSpec(cwd);
+	// Worker tampering AFTER dispatch: green scripts swapped for an always-green
+	// no-op — the exact R47-1 self-grading exploit. The gate must catch the
+	// manifest drift (P1a snapshot pinned at dispatch) and FAIL closed.
+	fs.writeFileSync(path.join(cwd, "package.json"), JSON.stringify({ name: "gate-repo", scripts: { typecheck: "exit 0" } }), "utf8");
+	const task = created.tasks[0]!;
+	await withMockChildPi(async () => {
+		const result = await runTeamTask({
+			manifest: created.manifest,
+			tasks: created.tasks,
+			task,
+			step: workflow.steps[0] as never,
+			agent: agent as never,
+			executeWorkers: true,
+			workspaceId: "test-workspace",
+		});
+		const finished = result.tasks.find((t) => t.id === task.id)!;
+		// The tampered scripts were NEVER run: drift ⇒ FAILED ⇒ the LLM verifier
+		// spawns (mock child-pi ran) instead of a synthetic gate-skip completion.
+		assert.ok(finished.modelAttempts && finished.modelAttempts.length > 0, "verifier spawned on manifest drift");
+		assert.equal(finished.status, "completed", `status=${finished.status} error=${finished.error ?? ""}`);
+		// No gate-skip provenance: this completion came from a real spawn.
+		assert.equal((finished.diagnostics as Record<string, unknown> | undefined)?.verifyGate, undefined);
+		const events = fs.readFileSync(created.manifest.eventsPath, "utf8");
+		assert.match(events, /task\.verifier_pre_gate/);
+		assert.match(events, /manifest-integrity/);
+		assert.match(events, /deterministic_failed/);
+		// The verifier's prompt carries the tamper evidence (UNTRUSTED trailer).
+		const promptText = fs.readFileSync(path.join(created.manifest.artifactsRoot, "prompts", `${task.id}.md`), "utf8");
+		assert.match(promptText, /Manifest integrity check FAILED/);
+		assert.match(promptText, /manifest-integrity: package\.json changed since dispatch/);
+	});
+});
+
+test("M1-7 fail-closed: manifest WITHOUT a pinned spec ⇒ no gate skip even with green scripts", async () => {
+	const cwd = makeRepoDir("pi-crew-u13-nospec-", { typecheck: "node -e 0", "test:critical": "node -e 0" });
+	const created = createRunManifest({ cwd, team: team as never, workflow: workflow as never, goal: "u13-nospec" });
+	// NO verifyGateSpec pinned (old manifests / goal-loop turns). The gate must
+	// NOT fall back to reading the worker-mutable package.json: zero resolved
+	// checks ⇒ INCONCLUSIVE ⇒ the LLM verifier spawns.
+	const task = created.tasks[0]!;
+	await withMockChildPi(async () => {
+		const result = await runTeamTask({
+			manifest: created.manifest,
+			tasks: created.tasks,
+			task,
+			step: workflow.steps[0] as never,
+			agent: agent as never,
+			executeWorkers: true,
+			workspaceId: "test-workspace",
+		});
+		const finished = result.tasks.find((t) => t.id === task.id)!;
+		assert.ok(finished.modelAttempts && finished.modelAttempts.length > 0, "verifier spawned — absence never yields a skip");
+		assert.equal((finished.diagnostics as Record<string, unknown> | undefined)?.verifyGate, undefined);
+		const events = fs.readFileSync(created.manifest.eventsPath, "utf8");
+		assert.match(events, /task\.verifier_pre_gate/);
+		assert.match(events, /INCONCLUSIVE/);
+	});
 });

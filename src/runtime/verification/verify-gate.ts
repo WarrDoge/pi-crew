@@ -40,6 +40,20 @@
  *     never changes the FAILED↔spawn logic; flag off keeps the gate
  *     bit-for-bit identical to pre-U13-ADJ.
  *
+ * GROUND TRUTH (M1-7, R47-1 fix 2026-10-19): the gate NEVER derives checks
+ * from the task cwd's package.json at gate time — a worker-mutable file
+ * (shared-cwd mode) whose tampered `scripts.typecheck: "exit 0"` used to
+ * yield PASS + skipVerifier (worker self-grading). Ground truth is
+ * host-owned: `resolveHostVerifyGateSpec(cwd)` snapshots the project
+ * manifests + derives the check preset AT DISPATCH (host process, before
+ * any worker runs) and the spec is pinned on the run manifest; the spawn
+ * site passes it as `hostSpec`. The gate re-hashes the manifests BEFORE any
+ * command runs (drift ⇒ FAILED — tamper evidence, verifier spawns) and
+ * AFTER a PASS (drift ⇒ INCONCLUSIVE — mid-gate tamper), mirroring the P1a
+ * bookend (verification-integrity.ts). Absence of a spec is fail-closed:
+ * no spec + no explicit checks ⇒ zero checks ⇒ INCONCLUSIVE ⇒ the LLM
+ * verifier spawns — absence can never produce a skip.
+ *
  * SAFETY: a gate that cannot run (disabled by env, no checks resolved,
  * executor failure) degrades to "spawn the LLM verifier as today" — the
  * pre-gate can only SAVE a spawn on positive deterministic evidence, never
@@ -58,6 +72,10 @@ import type { MetricRegistry } from "../../observability/metric-registry.ts";
 import type { VerifierPreGateResult } from "./classifier-pre-gate.ts";
 import { classifyVerifierPreGate } from "./classifier-pre-gate.ts";
 import { executeCommand } from "./verification-gates.ts";
+// Static edge is graph-free: verification-integrity.ts is already in the
+// index.bundle value-import graph (goal.ts/goal-wrap.ts/goal-loop-runner.ts
+// import it), so this adds no bundle-graph file (check-lazy-imports budget).
+import { compareSnapshot, snapshotManifests } from "./verification-integrity.ts";
 
 /** One deterministic check to run. Mirrors the phase-gate shape
  *  (verification-gates.ts) but kept local so the tool schema can reuse it. */
@@ -97,6 +115,10 @@ export interface VerifyGateOutcome {
 	 *  detected flakiness or a rerun executor failure — the note is also
 	 *  appended to evidenceLines and shapes the rendered context trailer. */
 	determinismNote?: string;
+	/** M1-7 (R47-1): set when the dispatch-pinned manifest snapshot DRIFTED —
+	 *  the note is also appended to evidenceLines and switches the rendered
+	 *  context trailer to "results UNTRUSTED". */
+	integrityNote?: string;
 }
 
 /** Injected command executor. The TOOL path wraps ctx.executeTool("bash");
@@ -147,8 +169,8 @@ export function resolveVerifyDeterminismEnabled(explicit?: boolean): boolean {
 }
 
 /**
- * Default check preset — the spec's "check cấu hình" set, resolved from the
- * target repo's package.json scripts so the gate adapts instead of failing:
+ * Default check preset — the spec's "check cấu hình" set, resolved from a
+ * package.json's scripts:
  *   - `typecheck` script present → `npm run --silent typecheck` (critical);
  *   - `test:critical` script present → `npm run --silent test:critical`
  *     (critical);
@@ -157,6 +179,11 @@ export function resolveVerifyDeterminismEnabled(explicit?: boolean): boolean {
  *     `grep -c "<marker>" dist/index.mjs`) rather than defaulted.
  * Repos without either script resolve ZERO checks → INCONCLUSIVE → the
  * classifier layer (when enabled) or the LLM verifier spawn runs as today.
+ *
+ * HOST-SIDE ONLY (M1-7, R47-1): this reads a worker-MUTABLE file. It may run
+ * only in the host process at DISPATCH time (via resolveHostVerifyGateSpec,
+ * before any worker exists) — never as a gate-time fallback from a task cwd.
+ * Gate-time consumers must use the dispatch-pinned hostSpec instead.
  */
 export function defaultVerifyGateChecks(dir: string): VerifyGateCheck[] {
 	let scripts: Record<string, unknown> = {};
@@ -175,6 +202,39 @@ export function defaultVerifyGateChecks(dir: string): VerifyGateCheck[] {
 		checks.push({ name: "test-critical", command: "npm run --silent test:critical", critical: true });
 	}
 	return checks;
+}
+
+/** Host-owned verify-gate spec (M1-7, R47-1 fix): captured ONCE at dispatch
+ *  in the HOST process (pre-worker) and pinned on the run manifest.
+ *  `snapshot` is the P1a manifest-hash set (verification-integrity.ts);
+ *  `checks` is the preset derived from the host's own read of package.json.
+ *  At gate time the task cwd is verified against `snapshot` instead of ever
+ *  re-reading the worker-mutable package.json. Structural shape mirrors
+ *  TeamRunManifest's `verifyGateSpec` field (the state layer must not import
+ *  runtime types). */
+export interface VerifyGateHostSpec {
+	snapshot: Record<string, string>;
+	checks: VerifyGateCheck[];
+}
+
+/** HOST-SIDE (dispatch) — build the verify spec for `cwd` (the project root
+ *  as the host sees it BEFORE any worker runs). Returns undefined when the
+ *  directory has neither manifests to hash nor a check preset (nothing to
+ *  protect or verify); the gate then resolves no checks (fail-closed). */
+export function resolveHostVerifyGateSpec(cwd: string): VerifyGateHostSpec | undefined {
+	const snapshot = snapshotManifests(cwd);
+	const checks = defaultVerifyGateChecks(cwd);
+	if (Object.keys(snapshot).length === 0 && checks.length === 0) return undefined;
+	return { snapshot, checks };
+}
+
+/** Gate-time integrity probe (M1-7): re-hash the manifests in `cwd` and diff
+ *  against the dispatch snapshot. Non-empty result = the drifted relative
+ *  paths — the task cwd's ground truth no longer matches what the host
+ *  pinned at dispatch (worker tampering or legitimate churn; both fail
+ *  closed: the gate must not grade on compromised ground truth). */
+export function detectHostSpecDrift(cwd: string, spec: VerifyGateHostSpec): string[] {
+	return compareSnapshot(spec.snapshot, snapshotManifests(cwd));
 }
 
 function tailOutput(output: string): string {
@@ -414,11 +474,13 @@ export function renderVerifyGateContext(outcome: VerifyGateOutcome): string {
 	// the original wording bit-for-bit; a flaky rerun (layer 3) gets its own
 	// trailer because "do NOT re-run / ground truth" would be provably wrong.
 	const executorDeath = outcome.checks.some((c) => !c.skipped && c.exitCode === null);
-	const trailer = executorDeath
-		? "A verification command could not run (executor error — exit=err). Treat the build/test state as UNKNOWN; run the build/tests yourself before concluding."
-		: outcome.determinismNote
-			? "The gate rerun detected NONDETERMINISM (a check passed once and failed on rerun). These gate results are NOT reliable — re-run the affected command yourself and treat the build/test state as UNKNOWN."
-			: "The deterministic gate already ran these commands — do NOT re-run them; verify the WORK (diff, files, acceptance), using these results as ground truth for build/test state.";
+	const trailer = outcome.integrityNote
+		? "Manifest integrity check FAILED: project manifest files changed since the host snapshot taken at dispatch. These gate results and any transcript claims about build/test state are UNTRUSTED — inspect what changed and re-run the verification commands yourself before concluding."
+		: executorDeath
+			? "A verification command could not run (executor error — exit=err). Treat the build/test state as UNKNOWN; run the build/tests yourself before concluding."
+			: outcome.determinismNote
+				? "The gate rerun detected NONDETERMINISM (a check passed once and failed on rerun). These gate results are NOT reliable — re-run the affected command yourself and treat the build/test state as UNKNOWN."
+				: "The deterministic gate already ran these commands — do NOT re-run them; verify the WORK (diff, files, acceptance), using these results as ground truth for build/test state.";
 	lines.push("", trailer);
 	return lines.join("\n");
 }
@@ -430,8 +492,17 @@ export function renderVerifyGateSummary(outcome: VerifyGateOutcome, reason: stri
 
 export interface VerifierGatePreGateInput {
 	cwd: string;
-	/** Explicit checks override the default preset (tool path / tests). */
+	/** Explicit checks take precedence over every other source (tool path /
+	 *  tests). Without them the gate derives NO checks on its own. */
 	checks?: VerifyGateCheck[];
+	/** M1-7 (R47-1): host-owned spec pinned on the run manifest at dispatch.
+	 *  When provided, the gate verifies manifest integrity against the
+	 *  snapshot BEFORE running anything (drift ⇒ FAILED — tamper evidence,
+	 *  verifier spawns) and re-verifies after a PASS (drift ⇒ INCONCLUSIVE).
+	 *  When ABSENT there is NO fallback read of the worker-mutable task-cwd
+	 *  package.json: no explicit checks ⇒ zero checks ⇒ INCONCLUSIVE
+	 *  (fail-closed on absence — the LLM verifier spawns). */
+	hostSpec?: VerifyGateHostSpec;
 	signal?: AbortSignal;
 	timeoutMs?: number;
 	/** U6B classifier layer args — consulted ONLY on INCONCLUSIVE. */
@@ -473,7 +544,42 @@ function incMetric(registry: MetricRegistry | undefined, name: string, help: str
  * to INCONCLUSIVE checks, which escalate to the LLM verifier.
  */
 export async function runVerifierGatePreGate(input: VerifierGatePreGateInput): Promise<VerifierGatePreGateResult> {
-	const checks = input.checks ?? defaultVerifyGateChecks(input.cwd);
+	// ── M1-7 (R47-1): integrity BEFORE any command runs ────────────────────
+	// A drifted manifest means the ground truth the host pinned at dispatch is
+	// compromised — running ANY check now would be the self-grading exploit
+	// (the worker rewrote the scripts the gate was about to run). Fail FAILED
+	// (tamper evidence) → the verifier spawns with the drift in its prompt.
+	// A tampered package.json can never yield PASS + skipVerifier.
+	if (input.hostSpec) {
+		const drift = detectHostSpecDrift(input.cwd, input.hostSpec);
+		if (drift.length > 0) {
+			const note = `manifest-integrity: ${drift.join(", ")} changed since dispatch (host snapshot)`;
+			const outcome: VerifyGateOutcome = {
+				verdict: "FAILED",
+				checks: [],
+				evidenceLines: [note],
+				allPassed: false,
+				totalDurationMs: 0,
+				integrityNote: note,
+			};
+			const decision = resolveVerifierSpawnDecision(outcome);
+			incMetric(input.metricRegistry, "crew.verification.verify_gate_runs_total", "Deterministic verify_gate executions by verdict", {
+				verdict: outcome.verdict,
+			});
+			incMetric(
+				input.metricRegistry,
+				"crew.verification.verifier_spawns_total",
+				"LLM verifier spawns that still ran, labeled by the deciding layer",
+				{ reason: decision.reason },
+			);
+			return { outcome, decision, promptContext: renderVerifyGateContext(outcome) };
+		}
+	}
+	// ── M1-7: NO package.json fallback ─────────────────────────────────────
+	// Checks come from the caller or the dispatch-pinned host spec ONLY —
+	// nothing here reads the worker-mutable task cwd. Zero resolvable checks
+	// ⇒ INCONCLUSIVE ⇒ escalate (fail-closed on absence, pre-R47-1 doctrine).
+	const checks = input.checks ?? input.hostSpec?.checks ?? [];
 	const exec = createSubprocessVerifyGateExecutor();
 	let outcome = await runVerifyGate(checks, exec, {
 		cwd: input.cwd,
@@ -500,6 +606,24 @@ export async function runVerifierGatePreGate(input: VerifierGatePreGateInput): P
 			"Layer-3 determinism reruns (U13-ADJ) by result",
 			{ result: layer.result },
 		);
+	}
+	// ── M1-7 bookend: integrity AFTER a green gate (mirrors P1a) ───────────
+	// A PASS is only trustworthy if the manifests are STILL identical to the
+	// dispatch snapshot after the commands ran — a mid-gate tamper downgrades
+	// the verdict to INCONCLUSIVE so the LLM verifier spawns. This can only
+	// ever DOWNGRADE, never upgrade (the pre-check above already ruled out
+	// pre-existing drift, so any drift now appeared during the run).
+	if (input.hostSpec && outcome.verdict === "PASS") {
+		const drift = detectHostSpecDrift(input.cwd, input.hostSpec);
+		if (drift.length > 0) {
+			const note = `manifest-integrity: ${drift.join(", ")} changed during the gate run (host snapshot)`;
+			outcome = {
+				...outcome,
+				verdict: "INCONCLUSIVE",
+				evidenceLines: [...outcome.evidenceLines, note],
+				integrityNote: note,
+			};
+		}
 	}
 	let preGate: VerifierPreGateResult | undefined;
 	if (outcome.verdict === "INCONCLUSIVE" && input.classifier?.enabled) {
