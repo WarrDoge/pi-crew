@@ -1,11 +1,13 @@
 import type { AgentConfig } from "../../agents/agent-config.ts";
 import type { CrewReliabilityConfig, CrewRuntimeConfig } from "../../config/types.ts";
+import { flushPendingAtomicWrites } from "../../state/atomic-write.ts";
 import { appendEventAsync } from "../../state/event-log/event-log.ts";
 import { writeArtifact } from "../../state/stores/artifact-store.ts";
-import { loadRunManifestById, saveRunTasksAsync, updateRunStatus } from "../../state/stores/state-store.ts";
+import { loadRunManifestById, saveRunTasksCoalesced, updateRunStatus } from "../../state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../state/types.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
 import type { WorkflowStep } from "../../workflows/workflow-config.ts";
+import { MERGE_LOCK_BUSY_RETRY_DELAYS_MS, withRunLockBusyRetry } from "../broker/protocol/lock-busy.ts";
 import type { ChildPiRunResult } from "../child-pi/child-pi.ts";
 import { appendDeadletter } from "../deadletter.ts";
 import { createWorkerHeartbeat, touchWorkerHeartbeat } from "../heartbeat/worker-heartbeat.ts";
@@ -426,6 +428,41 @@ export async function runCoalescedTaskGroup(input: CoalescedTaskGroupInput): Pro
 }
 
 /**
+ * R23-F1 (M3-8, fix-wave 6): run a coalesced group write as ONE run-lock
+ * critical section — fresh read + merge + persist, atomically.
+ *
+ * Why a lock: pre-fix both helpers did a sync `loadRunManifestById` followed by
+ * a LOCKLESS awaited save, so two writers (a concurrent coalesced group, the
+ * 15s heartbeat interval vs a peer group's terminal write, or any external
+ * run-lock writer) could interleave: the later writer then persisted its
+ * pre-terminal snapshot over the committed terminal state — a terminal write
+ * permanently lost with NO crash required (runtime-proven 5/5, R23-F1).
+ *
+ * Why the SYNC tier with a fully SYNCHRONOUS body (not
+ * `withRunLockBusyRetryAsync`): the run-lock's sync acquire
+ * (`acquireLockWithRetry`, treatOwnPidAsStealable=false) THROWS immediately on
+ * a fresh lock file instead of waiting the way the async tier does, and the
+ * async tier additionally unregisters its in-process token (runLockHeldTokens)
+ * BEFORE the awaited socket release — so an async critical section that yields
+ * at an `await` can make a concurrently dispatching SINGLETON task's write
+ * (`persistSingleTaskUpdate` → `withRunLockSync`) fail-fast with "Run 'run.lock'
+ * is locked by another operation.", which fails that task and aborts the run
+ * (reproduced: team-runner-coalesced-group-singleton-fail). A synchronous body
+ * cannot be interleaved by any other JS in this process, so async peers WAIT
+ * (in-process live-holder path) while sync peers simply run before or after us,
+ * and cross-process exclusion is still enforced by the shared file lock. The
+ * bounded busy-retry absorbs cross-process contention without yielding the
+ * critical section.
+ */
+async function withGroupRunLock(manifest: TeamRunManifest, fn: () => void): Promise<void> {
+	const outcome = await withRunLockBusyRetry(manifest, MERGE_LOCK_BUSY_RETRY_DELAYS_MS, fn);
+	// Exhausted budget: rethrow the typed busy error (the async twin throws too)
+	// so callers keep their existing error paths — a silent skip would lose
+	// exactly the write this guard exists to protect.
+	if (!outcome.ok) throw new Error(outcome.message);
+}
+
+/**
  * R15-3: heartbeat save scoped to this coalesced group only.
  *
  * Previously the heartbeat wrote the dispatch-time closure `updatedTasks` —
@@ -439,26 +476,35 @@ export async function runCoalescedTaskGroup(input: CoalescedTaskGroupInput): Pro
  * fresh disk read. Keeps the FIND-06 'never replace terminal state' guard.
  */
 async function persistGroupHeartbeats(manifest: TeamRunManifest, taskIds: string[], workerPid?: number): Promise<void> {
-	const fresh = loadRunManifestById(manifest.cwd, manifest.runId);
-	if (!fresh) return; // run pruned mid-dispatch — best-effort only.
-	const merged = fresh.tasks.map((t) => {
-		if (!taskIds.includes(t.id)) return t; // sibling tasks: preserved untouched.
-		// FIND-06 belt-and-suspenders: never replace terminal state or its
-		// resultArtifact with a heartbeat-only snapshot.
-		if (t.status === "completed" || t.status === "failed" || t.status === "cancelled") return t;
-		return {
-			...t,
-			// NEW-3: stamp the worker's real pid on BOTH the create fallback and
-			// the touch update. Conditional spread is required — a literal
-			// `pid: undefined` would clobber a pid recorded by an earlier tick
-			// (touchWorkerHeartbeat spreads `updates` verbatim).
-			heartbeat: touchWorkerHeartbeat(t.heartbeat ?? createWorkerHeartbeat(t.id, workerPid), {
-				alive: true,
-				...(workerPid ? { pid: workerPid } : {}),
-			}),
-		};
+	// R23-F1 (M3-8): lock-held read+write — see withGroupRunLock for why the
+	// critical section is synchronous.
+	await withGroupRunLock(manifest, () => {
+		// Land any buffered (50ms-coalesced) tasks.json write BEFORE reading —
+		// a pending flush resolving after our write would clobber it with the
+		// very pre-terminal snapshot this guard exists to prevent
+		// (merge-loop.ts mergeUnitResult precedent).
+		flushPendingAtomicWrites(manifest.tasksPath);
+		const fresh = loadRunManifestById(manifest.cwd, manifest.runId);
+		if (!fresh) return; // run pruned mid-dispatch — best-effort only.
+		const merged = fresh.tasks.map((t) => {
+			if (!taskIds.includes(t.id)) return t; // sibling tasks: preserved untouched.
+			// FIND-06 belt-and-suspenders: never replace terminal state or its
+			// resultArtifact with a heartbeat-only snapshot.
+			if (t.status === "completed" || t.status === "failed" || t.status === "cancelled") return t;
+			return {
+				...t,
+				// NEW-3: stamp the worker's real pid on BOTH the create fallback and
+				// the touch update. Conditional spread is required — a literal
+				// `pid: undefined` would clobber a pid recorded by an earlier tick
+				// (touchWorkerHeartbeat spreads `updates` verbatim).
+				heartbeat: touchWorkerHeartbeat(t.heartbeat ?? createWorkerHeartbeat(t.id, workerPid), {
+					alive: true,
+					...(workerPid ? { pid: workerPid } : {}),
+				}),
+			};
+		});
+		saveRunTasksCoalesced(manifest, merged, true);
 	});
-	await saveRunTasksAsync(manifest, merged);
 }
 
 /**
@@ -469,15 +515,23 @@ async function persistGroupHeartbeats(manifest: TeamRunManifest, taskIds: string
  * belt-and-suspenders guard as the heartbeat).
  */
 async function repairGroupTerminalWrite(manifest: TeamRunManifest, taskIds: string[], updatedTasks: TeamTaskState[]): Promise<void> {
-	const fresh = loadRunManifestById(manifest.cwd, manifest.runId);
-	if (!fresh) return; // run pruned mid-dispatch — best-effort only.
-	const groupById = new Map(updatedTasks.map((t) => [t.id, t] as const));
-	const merged = fresh.tasks.map((t) => {
-		if (!taskIds.includes(t.id)) return t; // sibling tasks: preserved untouched.
-		if (t.status === "completed" || t.status === "failed" || t.status === "cancelled") return t;
-		return groupById.get(t.id) ?? t;
+	// R23-F1 (M3-8): same lock-held contract as persistGroupHeartbeats — this is
+	// the TERMINAL (and pre-dispatch) write path, so a racing peer-group / late
+	// heartbeat write landing between our read and our save was the
+	// runtime-proven terminal-state clobber. Every dispatch-time and repair call
+	// site funnels through here, so the guard covers all of them.
+	await withGroupRunLock(manifest, () => {
+		flushPendingAtomicWrites(manifest.tasksPath);
+		const fresh = loadRunManifestById(manifest.cwd, manifest.runId);
+		if (!fresh) return; // run pruned mid-dispatch — best-effort only.
+		const groupById = new Map(updatedTasks.map((t) => [t.id, t] as const));
+		const merged = fresh.tasks.map((t) => {
+			if (!taskIds.includes(t.id)) return t; // sibling tasks: preserved untouched.
+			if (t.status === "completed" || t.status === "failed" || t.status === "cancelled") return t;
+			return groupById.get(t.id) ?? t;
+		});
+		saveRunTasksCoalesced(manifest, merged, true);
 	});
-	await saveRunTasksAsync(manifest, merged);
 }
 
 /** @internal 3.5 R15-3 test export — exercise the heartbeat/repair writes directly. */

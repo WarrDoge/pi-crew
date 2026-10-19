@@ -17,10 +17,57 @@
 import { withRunLockSync } from "../../../state/coordination/locks.ts";
 import { appendEventAsync } from "../../../state/event-log/event-log.ts";
 import { loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../state/stores/state-store.ts";
+import type { TeamRunManifest, TeamTaskState } from "../../../state/types.ts";
 import { logInternalError } from "../../../utils/internal-error.ts";
 import type { ServerConnection } from "./connection-state.ts";
 import { parseWaitResolveParams } from "./request-parsers.ts";
 import { recordWaitPolicyRejection } from "./wait-auth.ts";
+
+/**
+ * M3-6 (R21-M1, fix-wave 6): resolve ONE park without un-shielding the others.
+ *
+ * `manifest.waitState` is a single run-level slot, but more than one task can
+ * be parked at the same time (concurrent `ask` calls / goal-loop + a worker).
+ * `isWaitAnswerPending(manifest)` reads ONLY this slot, and it is what keeps the
+ * stale-reconciler / crash-recovery from repairing (killing) a live worker that
+ * stopped heartbeating while parked. The pre-fix resolve cleared the slot
+ * whenever it pointed at the resolved park — so once the SECOND park resolved,
+ * the FIRST (still parked) task lost its shield entirely and could be
+ * stale-reaped while awaiting a human answer.
+ *
+ * Fix (single-slot contract preserved, no schema change): when the slot points at
+ * the park we just ended, RE-POINT it at the still-parked task whose shield must
+ * survive instead of blindly clearing it. The latest deadline wins so the run
+ * shield never expires while ANY park is still live (expiring early would
+ * re-open the same window; living slightly long only delays repair — the
+ * fail-safe direction the rest of this module already takes). A slot that
+ * belongs to a DIFFERENT (newer) park is left untouched, exactly as before.
+ */
+function repointedWaitState(
+	tasks: TeamTaskState[],
+	current: TeamRunManifest["waitState"],
+	endedTaskId: string,
+	endedQuestionId: string,
+): TeamRunManifest["waitState"] {
+	if (current === undefined) return undefined;
+	if (current.taskId !== endedTaskId || current.questionId !== endedQuestionId) return current;
+	let next: TeamTaskState | undefined;
+	for (const task of tasks) {
+		if (task.id === endedTaskId) continue;
+		if (task.status !== "waiting" || task.waiting === undefined) continue;
+		if (next === undefined || task.waiting.deadline > (next.waiting?.deadline ?? 0)) next = task;
+	}
+	if (next?.waiting === undefined) return undefined;
+	return {
+		taskId: next.id,
+		questionId: next.waiting.questionId,
+		askedAt: next.waiting.askedAt,
+		deadline: next.waiting.deadline,
+	};
+}
+
+/** @internal M3-6 test export — exercise the scoped-clear repoint directly. */
+export const __test__repointedWaitState = repointedWaitState;
 
 export interface WaitResolveHelpers {
 	sendError(conn: ServerConnection, id: string, code: string, message: string): void;
@@ -100,13 +147,14 @@ export async function handleWaitResolve(
 		// the flip, so respond_delivered records the same worker-pid evidence
 		// its respond_missed twin does root-side.
 		const workerPid = task.heartbeat?.pid ?? task.checkpoint?.childPid;
-		// waitState is a single run-level slot: clear it ONLY when it points
-		// at this exact question — never clobber another task's newer park.
-		const waitState = fresh.manifest.waitState;
-		const clearWaitState = waitState !== undefined && waitState.taskId === taskId && waitState.questionId === parsed.questionId;
+		// waitState is a single run-level slot: never clobber another task's newer
+		// park. M3-6 (R21-M1): and never un-shield a task that is STILL parked —
+		// when the slot pointed at the park we are ending, re-point it at the
+		// surviving park (repointedWaitState) instead of clearing it.
+		const waitState = repointedWaitState(fresh.tasks, fresh.manifest.waitState, taskId, parsed.questionId);
 		const updatedManifest = {
 			...fresh.manifest,
-			...(clearWaitState ? { waitState: undefined } : {}),
+			waitState,
 			updatedAt: new Date().toISOString(),
 		};
 		saveRunTasks(updatedManifest, updatedTasks);
