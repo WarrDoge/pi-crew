@@ -12,6 +12,7 @@ import {
 } from "../../../../src/state/coordination/mailbox.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { teardownCwd } from "../../../fixtures/teardown-cwd.ts";
 
 function makeManifest(stateRoot: string): TeamRunManifest {
 	return {
@@ -127,7 +128,7 @@ test("mailbox replay redelivers pending inbox messages and skips acknowledged me
 		assert.equal(delivery.messages[taskMessage.id], "delivered");
 		assert.equal(delivery.messages[acked.id], "acknowledged");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		teardownCwd(cwd);
 	}
 });
 
@@ -166,7 +167,7 @@ test("resume emits mailbox replay event before rerunning queued work", async () 
 		assert.match(firstText(events), /mailbox\.replayed/);
 		assert.match(firstText(events), /replayedMailboxMessages/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		teardownCwd(cwd);
 	}
 });
 
@@ -207,7 +208,7 @@ test("F09: an acknowledged message is not evicted by the delivery cap and never 
 			assert.equal(readDeliveryState(manifest).messages[ackId], "acknowledged", `ack survives resume #${round}`);
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		teardownCwd(cwd);
 	}
 });
 
@@ -225,7 +226,7 @@ test("F09: the freshly appended message still replays while the acked one does n
 		assert.equal(ids.includes(fresh.id), true, "new message must replay");
 		assert.equal(ids.includes(ackId), false, "acked message must not replay");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		teardownCwd(cwd);
 	}
 });
 
@@ -289,7 +290,7 @@ test("F09: with no acknowledgements, the queued→delivered eviction order is un
 		assert.equal(delivery.messages.msg_d_1, undefined, "the delivered tier is drained before queued (legacy order)");
 		assert.equal(delivery.messages.msg_q_0, "queued", "queued entries are never evicted ahead of delivered ones");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		teardownCwd(cwd);
 	}
 });
 
@@ -345,7 +346,7 @@ test("F09: acknowledged entries are still bounded when their message left the re
 			"swept acks have no inbox line left, so nothing of theirs can replay",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		teardownCwd(cwd);
 	}
 });
 
@@ -409,6 +410,6 @@ test("F09: acks for messages that live in an ARCHIVE file are still protected", 
 			"archived acked message must not replay",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		teardownCwd(cwd);
 	}
 });
