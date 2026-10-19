@@ -37,6 +37,19 @@ function writeTasks(tasksPath: string, status: string): void {
 	fs.writeFileSync(tasksPath, JSON.stringify([{ id: "t1", runId: "run-r15p1", status }]), "utf-8");
 }
 
+/** Force a detectable mtime change.
+ *
+ * Windows CI: NTFS mtime granularity (~10-15 ms) can make two rapid writes land
+ * on the SAME mtime tick, and "running"/"waiting" are the same byte length — so
+ * a stat-gate (mtimeMs + size) legitimately sees "no change" and serves the
+ * cached entry. The production staleness window is bounded by the 200 ms TTL
+ * (≈ one extra 160 ms render tick), but the PIN must be deterministic across
+ * platforms, so the test advances mtime explicitly. */
+function bumpMtime(tasksPath: string): void {
+	const future = new Date(Date.now() + 2000);
+	fs.utimesSync(tasksPath, future, future);
+}
+
 function statuses(tasks: Array<{ status?: string }>): string[] {
 	return tasks.map((t) => t.status ?? "?");
 }
@@ -65,6 +78,7 @@ test("R15-P1: a write inside the TTL is NOT hidden by the cache (mtime invalidat
 
 	// Flip the status on disk — the worker parked on `ask` case GATE 3 exists for.
 	writeTasks(tasksPath, "waiting");
+	bumpMtime(tasksPath); // Windows: same-size write may share the mtime tick
 	// Immediately (no >= TTL sleep): mtime changed → cache miss → fresh read.
 	assert.deepEqual(statuses(readTasksCoalesced(tasksPath, eventsPath, runId)), ["waiting"]);
 });
