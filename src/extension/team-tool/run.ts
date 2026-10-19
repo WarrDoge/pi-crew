@@ -27,6 +27,7 @@ async function executeTeamRun(...args: Parameters<typeof ExecuteTeamRunFn>): Pro
 import { spawnBackgroundTeamRun } from "../../runtime/async-runner.ts";
 import { resolveCrewRuntime, runtimeResolutionState } from "../../runtime/model/runtime-resolver.ts";
 import { captureRunModelContext, resolveParentModel } from "../../runtime/model/session-model.ts";
+import { resolveHostVerifyGateSpec } from "../../runtime/verification/verify-gate.ts";
 import { appendEventAsync, readEventsCursor } from "../../state/event-log/event-log.ts";
 import type { RunMetrics } from "../../state/stores/run-metrics.ts";
 import type { RuntimeResolutionState, TeamRunManifest, TeamTaskState } from "../../state/types.ts";
@@ -495,6 +496,14 @@ export async function handleRun(params: TeamToolParamsValue, ctx: TeamContext): 
 		);
 	}
 	const executedConfig = effectiveRunConfig(loadedConfig.config, params.config);
+	// M1-7 (R47-1): pin the host-owned verify-gate ground truth AT DISPATCH —
+	// this host process read of the project manifests happens BEFORE any
+	// worker can run, so the snapshot is pristine. The run manifest carries it
+	// to the verifier pre-gate (task-runner), which re-hashes the task cwd
+	// against it and never re-derives checks from the worker-mutable
+	// task-cwd package.json. Undefined when the project has neither manifests
+	// nor a check preset — the gate then resolves no checks (fail-closed).
+	const hostVerifyGateSpec = await resolveHostVerifyGateSpec(resolvedCtx.cwd);
 	const runtime = await resolveCrewRuntime(executedConfig);
 	const runtimeResolution = runtimeResolutionState(runtime);
 	// DEBUG: log what we received (gated to avoid stdout pollution in production)
@@ -514,6 +523,8 @@ export async function handleRun(params: TeamToolParamsValue, ctx: TeamContext): 
 		...updatedManifest,
 		runtimeResolution,
 		runConfig: executedConfig,
+		// M1-7 (R47-1): host-owned verify-gate spec (see hostVerifyGateSpec above).
+		...(hostVerifyGateSpec ? { verifyGateSpec: hostVerifyGateSpec } : {}),
 		// Background/async runs re-enter through background-runner in a detached
 		// process with no ExtensionContext. Snapshot the model routing inputs so
 		// they survive the hand-off instead of being rediscovered from models.json.

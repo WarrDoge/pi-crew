@@ -113,13 +113,17 @@ describe("handleRun", () => {
 			captured.push(String(chunk));
 			return true;
 		}) as typeof process.stderr.write;
+		// M1-8 (R45-S2): executeWorkers is no longer settable via params.config
+		// (sensitive drop — kill-switch precedence). The dry-run cheapness comes
+		// from the env kill-switch instead (the sanctioned channel).
+		const prevWorkers = process.env.PI_CREW_EXECUTE_WORKERS;
+		process.env.PI_CREW_EXECUTE_WORKERS = "0";
 		try {
 			const res = await handleRun(
 				makeParams({
 					agent: "executor",
 					goal: "verify ignored run kind",
 					runKind: "dynamic-workflow",
-					config: { executeWorkers: false },
 				}),
 				makeCtx(tmp),
 			);
@@ -128,6 +132,8 @@ describe("handleRun", () => {
 			assert.equal(loaded?.manifest.runKind, "team-run");
 			assert.match(captured.join(""), /runKind='dynamic-workflow'.*not dynamic/);
 		} finally {
+			if (prevWorkers === undefined) delete process.env.PI_CREW_EXECUTE_WORKERS;
+			else process.env.PI_CREW_EXECUTE_WORKERS = prevWorkers;
 			process.stderr.write = originalStderr;
 			removeTrackedTempDir(tmp);
 		}
