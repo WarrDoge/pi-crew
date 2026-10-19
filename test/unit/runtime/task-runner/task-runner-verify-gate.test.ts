@@ -79,6 +79,9 @@ test("U13 acceptance: green gate → verifier task completes WITHOUT spawning th
 	assert.match(resultText, /test-critical: exit=0 PASS/);
 	// Provenance recorded on the task state (U6B mount note: evaluator marker).
 	assert.equal((finished.diagnostics as Record<string, { verdict: string }> | undefined)?.verifyGate?.verdict, "PASS");
+	// R47-V7: the synthesized skip result is provenance-tagged so the
+	// effectiveness guard excludes it from observable work.
+	assert.equal((finished.diagnostics as Record<string, unknown> | undefined)?.synthetic, true);
 	// Diagnostic event says the spawn was skipped.
 	const events = fs.readFileSync(created.manifest.eventsPath, "utf8");
 	assert.match(events, /task\.verifier_pre_gate/);

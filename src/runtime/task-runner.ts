@@ -246,6 +246,12 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 								reason: preGate.decision.reason,
 								evidenceLines: preGate.outcome.evidenceLines,
 							},
+							// R47-V7 (2026-10-19): the skip path FABRICATES the terminal result
+							// below (exitCode:0, green summary, no model attempts). Tag the
+							// provenance so consumers — the effectiveness guard — never mistake
+							// this synthesized result for real worker output.
+							// taskIsSyntheticGateSkip() (effectiveness.ts) reads this flag.
+							synthetic: true,
 						},
 					};
 					// FIX (review round): prepare the finalizer args here but DO NOT

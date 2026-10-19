@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	delegateCompletedTaskIdsFromEvents,
 	effectivenessPolicyDecision,
 	evaluateRunEffectiveness,
 	formatRunEffectivenessLines,
 	taskHasEmptyResult,
 	taskHasObservableWorkerActivity,
+	taskIsSyntheticGateSkip,
 } from "../../../../src/runtime/effectiveness.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 
@@ -192,19 +194,108 @@ test("F4: non-empty result with observed events still passes", () => {
 	assert.deepEqual(summary.noObservedWorkTaskIds, []);
 });
 
-test("verify_gate-skipped verifier counts as observable work (U13 vs guard, live-caught 2026-10-10)", () => {
-	// A gated verifier completes with NO usage/transcript/toolCount by design
-	// (the deterministic gate ran typecheck/test exit codes in the host).
-	// Before the fix this shape false-triggered "no observable worker activity"
-	// → run blocked (non-terminal) → sync team calls hung forever.
-	const gated: TeamTaskState = {
+test("R47-V7: synthetic gate-skip result is NOT observable work", () => {
+	// task-runner.ts tags the deterministic gate-skip path `synthetic` — its
+	// exitCode:0 + green summary are FABRICATED, not real worker output.
+	// Before this tag the gate verdict alone certified the run "effective"
+	// (R47-V7 — V1's laundering step). The gate verdict stays on diagnostics
+	// (genuine evidence); only the synthesized result is excluded.
+	const synthetic: TeamTaskState = {
+		id: "03_verify",
+		role: "verifier",
+		status: "completed",
+		diagnostics: {
+			verifyGate: { verdict: "PASS", reason: "deterministic_pass", evidenceLines: ["typecheck: exit=0 PASS"] },
+			synthetic: true,
+		},
+	} as unknown as TeamTaskState;
+	assert.equal(taskIsSyntheticGateSkip(synthetic), true);
+	assert.equal(taskHasObservableWorkerActivity(synthetic), false, "synthetic gate-skip is not observable work");
+	// A gate verdict WITHOUT the synthetic provenance tag still counts — the
+	// U13 >=2026-10-10 shape (and any pre-tag persisted task) is preserved;
+	// the exclusion is provenance-specific, not a blanket reversal.
+	const legacyGated: TeamTaskState = {
 		id: "03_verify",
 		status: "completed",
 		diagnostics: { verifyGate: { verdict: "PASS", reason: "deterministic_pass", evidenceLines: ["typecheck: exit=0 PASS"] } },
 	} as unknown as TeamTaskState;
-	assert.equal(taskHasObservableWorkerActivity(gated), true);
+	assert.equal(taskHasObservableWorkerActivity(legacyGated), true);
 	// The gate context alone must not leak into OTHER shapes: a task without
 	// any evidence still reports unobservable.
 	const bare: TeamTaskState = { id: "x", status: "completed" } as unknown as TeamTaskState;
 	assert.equal(taskHasObservableWorkerActivity(bare), false);
+});
+
+function syntheticVerifier(id = "03_verify", role = "verifier"): TeamTaskState {
+	return {
+		id,
+		runId: "run_effective",
+		role,
+		agent: role,
+		title: id,
+		status: "completed",
+		dependsOn: [],
+		cwd: "/tmp/project",
+		finishedAt: "2026-01-01T00:00:01.000Z",
+		diagnostics: {
+			verifyGate: { verdict: "PASS", reason: "deterministic_pass", evidenceLines: ["typecheck: exit=0 PASS"] },
+			synthetic: true,
+		},
+	} as unknown as TeamTaskState;
+}
+
+test("R47-V7: synthetic gate-skip is excluded from the observable score (not counted effective)", () => {
+	const summary = evaluateRunEffectiveness({
+		manifest: manifest("trusted"),
+		tasks: [syntheticVerifier()],
+		executeWorkers: true,
+	});
+	assert.equal(summary.observable, 0, "synthetic gate-skip does not count as observable work");
+	assert.deepEqual(summary.noObservedWorkTaskIds, ["03_verify"]);
+});
+
+test("R47-V7/U13: a synthetic gate-skip alone never escalates the guard to blocked (no hang)", () => {
+	// U13 (live-caught 2026-10-10): a gated verifier carries no usage/transcript
+	// by design; escalating it to "blocked" makes the run non-terminal and a
+	// sync team call hangs forever. The R47-V7 exclusion must not re-open that:
+	// severity stays at most "warning" (non-blocking notify).
+	const summary = evaluateRunEffectiveness({
+		manifest: manifest("trusted"),
+		tasks: [syntheticVerifier("03_verify", "verifier")], // verifier = WRITE role (pre-fix escalated warn→blocked)
+		executeWorkers: true,
+	});
+	assert.equal(summary.severity, "warning", "synthetic gate-skip must not auto-escalate to blocked");
+	assert.notEqual(summary.severity, "blocked");
+	// The P0.1 guard is intact: a genuinely idle MUTATING task still blocks.
+	const mixed = evaluateRunEffectiveness({
+		manifest: manifest("trusted"),
+		tasks: [syntheticVerifier(), task("01_exec")],
+		executeWorkers: true,
+	});
+	assert.equal(mixed.severity, "blocked", "a genuine idle mutating task still blocks");
+});
+
+test("R47-V7 + R9-F3 (one provenance-tagged change): delegate.completed counts, synthetic gate-skip does not", () => {
+	// The R9-F3 fix (count delegate.completed) must not let a synthetic
+	// gate-skip slip back in as "observable" (V7); the SAME provenance tag that
+	// makes each half work keeps them from re-opening each other.
+	const delegateTask = {
+		id: "gc-1",
+		runId: "run_effective",
+		role: "explorer",
+		agent: "delegate",
+		title: "delegate: x",
+		status: "completed",
+		dependsOn: [],
+		cwd: "/tmp/project",
+	} as unknown as TeamTaskState;
+	const ids = delegateCompletedTaskIdsFromEvents([{ type: "delegate.completed", data: { subId: "gc-1", ok: true } }]);
+	const summary = evaluateRunEffectiveness({
+		manifest: manifest("trusted"),
+		tasks: [delegateTask, syntheticVerifier()],
+		executeWorkers: true,
+		delegateCompleted: ids,
+	});
+	assert.deepEqual(summary.noObservedWorkTaskIds, ["03_verify"], "delegate counted, synthetic excluded");
+	assert.equal(summary.observable, 1);
 });

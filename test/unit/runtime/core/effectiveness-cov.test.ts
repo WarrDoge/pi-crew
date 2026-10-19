@@ -80,6 +80,22 @@ describe("effectiveness", () => {
 		it("returns true when jsonEvents is set", () => {
 			assert.equal(taskHasObservableWorkerActivity(makeTask({ jsonEvents: 42 })), true);
 		});
+
+		it("R47-V7: excludes provenance-tagged synthetic gate-skip results", () => {
+			assert.equal(
+				taskHasObservableWorkerActivity(
+					makeTask({ diagnostics: { verifyGate: { verdict: "PASS", reason: "deterministic_pass" }, synthetic: true } }),
+				),
+				false,
+			);
+			// Non-synthetic gate verdict (U13 / pre-tag shape) still counts.
+			assert.equal(
+				taskHasObservableWorkerActivity(
+					makeTask({ diagnostics: { verifyGate: { verdict: "PASS", reason: "deterministic_pass" } } }),
+				),
+				true,
+			);
+		});
 	});
 
 	describe("resolveEffectivenessGuardMode", () => {
