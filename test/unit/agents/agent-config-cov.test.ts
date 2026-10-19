@@ -65,7 +65,11 @@ describe("getAgentSessionOptions", () => {
 	it("returns tools for planner role", () => {
 		const opts = getAgentSessionOptions("planner");
 		assert.ok(opts.excludeTools);
-		assert.ok(opts.excludeTools!.includes("ask_question"));
+		// live exclusions (edit/write/bash/web); `ask_question` was a dead entry
+		// (no such host tool — `ask` is live) removed 2026-10-19 fix-wave 6.
+		assert.ok(opts.excludeTools!.includes("bash"));
+		assert.ok(opts.excludeTools!.includes("edit"));
+		assert.ok(!opts.excludeTools!.includes("ask_question"));
 	});
 
 	it("does not return tools for a role without explicit tools list", () => {
