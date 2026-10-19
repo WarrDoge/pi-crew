@@ -12,6 +12,15 @@ import type { TeamTaskState, UsageState } from "./types.ts";
  * call — summing across turns would count it N times.
  * See: https://github.com/nichekate/pi-subagents3/issues/38 and
  * docs/archive/pi-subagents3-deep-analysis.md
+ *
+ * M3-4 / R43-N2 (2026-10-19 fix-wave 6): the ledger above covers a task's OWN
+ * work. DELEGATE spend is booked on the PARENT task record
+ * (`allocation.tokensSpent`, written by the broker at delegate admission —
+ * see crew-broker.ts and delegate/delegate-finalize.ts) and is therefore NOT
+ * part of `aggregateUsage`. Budget enforcement must add it explicitly through
+ * {@link taskTokenTotal} / {@link sumDelegateTokensSpent}; pre-fix nothing read
+ * `allocation.tokensSpent`, so a nested delegate storm was invisible to
+ * `budgetTotal` and bypassed the abort entirely (probe-verified round 43).
  */
 
 export function aggregateUsage(tasks: TeamTaskState[]): UsageState | undefined {
@@ -28,6 +37,38 @@ export function aggregateUsage(tasks: TeamTaskState[]): UsageState | undefined {
 		total.turns = (total.turns ?? 0) + (task.usage.turns ?? 0);
 	}
 	return found ? total : undefined;
+}
+
+/** M3-4 / R43-N2: DELEGATE spend booked on one task record, in TOKENS —
+ *  the same unit as `UsageState.input/output/cacheWrite`. Sourced from the
+ *  broker-side tally (`allocation.tokensSpent`), which since M3-4/R44-N4 is
+ *  the host-decided ADMISSION RESERVATION, never the child's self-reported
+ *  `message_end` usage. Values are clamped at 0 so a corrupt record can never
+ *  subtract from the run total. */
+export function delegateTokensSpent(task: TeamTaskState): number {
+	const spent = task.allocation?.tokensSpent ?? 0;
+	return Number.isFinite(spent) && spent > 0 ? spent : 0;
+}
+
+/** M3-4 / R43-N2: total delegate spend across the run, in TOKENS. */
+export function sumDelegateTokensSpent(tasks: TeamTaskState[]): number {
+	let total = 0;
+	for (const task of tasks) total += delegateTokensSpent(task);
+	return total;
+}
+
+/** M3-4 / R43-N2: A TASK'S FULL COST in TOKENS — its own work
+ *  (`input + output + cacheWrite`, the budget proxy's rule) PLUS the delegate
+ *  spend it booked. This is THE per-task number budget enforcement must use;
+ *  `aggregateUsage` alone cannot see grandchildren.
+ *
+ *  No double count: a grandchild is a shadow task (`gc-*`, no stepId) that
+ *  never runs under the scheduler, so its usage never lands in a
+ *  `task.usage` — its cost exists ONLY as the parent's reservation. */
+export function taskTokenTotal(task: TeamTaskState): number {
+	const usage = task.usage;
+	const own = (usage?.input ?? 0) + (usage?.output ?? 0) + (usage?.cacheWrite ?? 0);
+	return own + delegateTokensSpent(task);
 }
 
 export function formatUsage(usage: UsageState | undefined): string {

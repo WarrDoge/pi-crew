@@ -328,7 +328,9 @@ test("U5 ACCEPTANCE: restart mid-run + resume replay + resend → the worker rec
 		// ── The durable record backs both dedup layers. ──
 		const delivery = readDeliveryState(manifest);
 		assert.equal(delivery.messages[sent.message.id], "acknowledged");
-		assert.equal(delivery.requestIds?.[`inbox:${requestId}`], sent.message.id);
+		// M3-9 / R33-1: the index key is RECIPIENT-scoped (direction:taskId:requestId)
+		// so a group fan-out requestId acked by one recipient never starves siblings.
+		assert.equal(delivery.requestIds?.[`inbox:task-1:${requestId}`], sent.message.id);
 		await drainEvents();
 	} finally {
 		cleanup();
@@ -399,6 +401,62 @@ test("U5 audit: events log the dedup chain (mailbox.pickup → mailbox.pickup_de
 		assert.equal(dedups.length, 1, "deduped skips log once per key per process (no 500ms-tick spam)");
 		assert.equal(dedups[0]!.data?.requestId, requestId);
 		assert.ok(["requestId", "acknowledged"].includes(String(dedups[0]!.data?.layer)), "layer is audited");
+	} finally {
+		cleanup();
+	}
+});
+
+/**
+ * M3-9 / R33-1 (fix-wave 6, round-33 probe "1/0/0") — a group fan-out mints ONE
+ * requestId and reuses it for every recipient (crew-broker handleMsgSend), so the
+ * pickup dedup key MUST be recipient-scoped. Run-scoped, the first acking
+ * recipient suppressed every sibling row at its own pickup: the probe observed
+ * 1 delivered / 0 / 0 out of three recipients.
+ *
+ * Invariant under test: N recipients sharing one requestId each receive the
+ * row exactly once, and each gets its OWN delivery-index entry.
+ */
+test("M3-9/R33-1: one group-fanout requestId delivers to ALL recipients (no 1/0/0 collapse)", async () => {
+	const { manifest, stateRoot, cleanup } = makeFixture("fanout");
+	const recipients = ["gc-a", "gc-b", "gc-c"];
+	// The broker's fan-out shape: same requestId, one row per recipient mailbox.
+	const requestId = `${RUN_ID}:leader:fanout-1`;
+	for (const recipient of recipients) {
+		appendMailboxMessage(manifest, {
+			id: `msg_fanout_${recipient}`,
+			direction: "inbox",
+			from: "leader",
+			to: recipient,
+			taskId: recipient,
+			body: `group broadcast for ${recipient}`,
+			kind: "message",
+			requestId,
+		});
+	}
+	try {
+		for (const recipient of recipients) {
+			const picked = pollWorkerInbox({ stateRoot, runId: RUN_ID, taskId: recipient, seenIds: new Set() });
+			assert.equal(picked.length, 1, `recipient ${recipient} must receive its copy`);
+			assert.equal(picked[0]!.taskId, recipient);
+			// Durable ack, exactly as the worker's post-send path does.
+			acknowledgeWorkerInboxDelivery({ stateRoot, runId: RUN_ID, taskId: recipient }, picked);
+		}
+		// Each recipient owns a recipient-scoped index entry for the SHARED requestId.
+		const delivery = readDeliveryState(manifest);
+		for (const recipient of recipients) {
+			assert.equal(
+				delivery.requestIds?.[`inbox:${recipient}:${requestId}`],
+				`msg_fanout_${recipient}`,
+				`recipient-scoped delivery key for ${recipient}`,
+			);
+		}
+		// Restart each worker: the durable record still prevents a SECOND delivery
+		// to anyone (exactly-once is not weakened by the scoping).
+		for (const recipient of recipients) {
+			const afterRestart = pollWorkerInbox({ stateRoot, runId: RUN_ID, taskId: recipient, seenIds: new Set() });
+			assert.equal(afterRestart.length, 0, `${recipient} must not re-deliver after restart`);
+		}
+		await new Promise((resolve) => setTimeout(resolve, 20));
 	} finally {
 		cleanup();
 	}

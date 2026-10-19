@@ -19,8 +19,9 @@ import { flushPendingAtomicWrites } from "../state/atomic-write.ts";
 import { appendEventAsync } from "../state/event-log/event-log.ts";
 import { loadRunManifestById, saveRunManifestAsync, saveRunTasksAsync, updateRunStatus } from "../state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../state/types.ts";
-import { aggregateUsage, formatTokens } from "../state/usage.ts";
+import { formatTokens, taskTokenTotal } from "../state/usage.ts";
 import { logInternalError } from "../utils/internal-error.ts";
+import { abortRunDelegates } from "./broker/delegate/delegate-abort.ts";
 import { MERGE_LOCK_BUSY_RETRY_DELAYS_MS, withRunLockBusyRetryAsync } from "./broker/protocol/lock-busy.ts";
 import { saveCrewAgents } from "./crew-agent-records.ts";
 import { cancelNonTerminalTasks, markBlocked } from "./dispatch-batch.ts";
@@ -47,6 +48,16 @@ export interface PerTaskBudgetCheckResult {
  * Check cumulative token usage against per-task budget thresholds.
  * Returns a structured result — callers decide how to act (warn vs abort).
  *
+ * M3-4 / R43-N2 (2026-10-19 fix-wave 6): `totalUsed` is now the FULL run cost
+ * — each task's own tokens PLUS the delegate spend booked on it
+ * (`taskTokenTotal`, i.e. `allocation.tokensSpent`). Pre-fix the check summed
+ * `task.usage` only, and grandchildren never write `task.usage` (they are
+ * broker-managed shadow records), so a nested delegate storm could burn an
+ * unbounded multiple of `budgetTotal` without ever tripping the abort
+ * (probe-verified round 43). The delegate amount is the BROKER-SIDE tally —
+ * the host-decided admission reservation — not the child's self-report
+ * (R44-N4), so an under-reporting child cannot hide its spend.
+ *
  * Exported for unit testing.
  */
 export function checkPerTaskBudget(
@@ -56,8 +67,8 @@ export function checkPerTaskBudget(
 	budgetAbort: number,
 	fairShareFraction = 0.5,
 ): PerTaskBudgetCheckResult {
-	const usage = aggregateUsage(tasks);
-	const totalUsed = (usage?.input ?? 0) + (usage?.output ?? 0) + (usage?.cacheWrite ?? 0);
+	let totalUsed = 0;
+	for (const task of tasks) totalUsed += taskTokenTotal(task);
 	const abort = totalUsed >= budgetAbort * budgetTotal;
 	const warning = !abort && totalUsed >= budgetWarning * budgetTotal;
 	// Fair share threshold based on TOTAL budget, not remaining budget.
@@ -66,8 +77,9 @@ export function checkPerTaskBudget(
 	const fairShareThreshold = budgetTotal * fairShareFraction;
 	const fairShareViolators: string[] = [];
 	for (const task of tasks) {
-		if (!task.usage) continue;
-		const taskTotal = (task.usage.input ?? 0) + (task.usage.output ?? 0) + (task.usage.cacheWrite ?? 0);
+		// M3-4: a delegate-heavy parent is charged for its grandchildren too.
+		const taskTotal = taskTokenTotal(task);
+		if (taskTotal === 0) continue;
 		// Only flag tasks that individually consumed a significant portion of the
 		// budget (>10% of total) AND exceeded the fair share threshold.
 		if (fairShareThreshold > 0 && taskTotal > fairShareThreshold && taskTotal > budgetTotal * 0.1) {
@@ -128,6 +140,12 @@ export async function terminaliseRunWithDrain(
 	// and be clobbered to "skipped" (observed CI flake: 02_b skipped on
 	// team-runner-budget-abort-inflight across v0.9.59 / cfd68d06 / 12386af2).
 	const inflightTaskIds = ctx.dispatchedTaskIds;
+	// M3-5/R43-N3: a run going terminal must also cancel its in-flight DELEGATE
+	// grandchildren. This drain only covers the run's own dispatch units; the
+	// grandchildren live in the broker's abort registry (fire-and-forget spawn
+	// before the fix, so they outlived every abort path by up to their own 24h
+	// deadline while still spending and holding nested slots).
+	abortRunDelegates(ctx.manifest.runId, opts.failedReason.slice(0, 120) || "run-terminal");
 	const outcomes = await drainPendingUnits(ctx.pendingUnits, ctx.runController);
 	const validResults: { manifest: TeamRunManifest; tasks: TeamTaskState[] }[] = [];
 	for (const outcome of outcomes) {
@@ -271,7 +289,9 @@ export async function enforceRunBudget(ctx: SchedulerContext): Promise<Scheduler
 		for (const violatorId of budgetCheck.fairShareViolators) {
 			const violator = tasks.find((t) => t.id === violatorId);
 			if (!violator) continue;
-			const taskTotal = (violator.usage?.input ?? 0) + (violator.usage?.output ?? 0) + (violator.usage?.cacheWrite ?? 0);
+			// M3-4/R43-N2: same full-cost rule as the threshold check (own usage
+			// + booked delegate spend) so the message matches the decision.
+			const taskTotal = taskTokenTotal(violator);
 			const message = `Task '${violatorId}' consumed ${formatTokens(taskTotal)} (${Math.round((taskTotal / input.budgetTotal) * 100)}% of total budget) — exceeds fair share`;
 			// ROUND 12: console → logInternalError, explicit "warn" severity.
 			logInternalError("team-runner.fair-share", new Error(message), `runId=${manifest.runId} taskId=${violatorId}`, "warn");

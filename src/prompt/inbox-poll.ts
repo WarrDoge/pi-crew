@@ -25,7 +25,8 @@
  *     `sinceTs` watermark — one message delivers once;
  *   - U5 (2026-10-10): dedup is ALSO durable across restarts — delivered
  *     rows are recorded in delivery.json (`messages[id]="acknowledged"` +
- *     `${direction}:${requestId}` index) and re-read on the next poll, so a
+ *     `${direction}:${recipientTaskId}:${requestId}` index — recipient-scoped,
+ *     M3-9/R33-1) and re-read on the next poll, so a
  *     worker that restarts mid-run (fresh process, EMPTY seen-set) never
  *     re-delivers. A resend carrying the same requestId is dropped by the
  *     same index; duplicate rows under one requestId deliver exactly once.
@@ -44,6 +45,7 @@ import {
 	readAllMailboxMessages,
 	readDeliveryState,
 	recordMailboxRequestIdDelivery,
+	requestIdDeliveryKey,
 } from "../state/coordination/mailbox.ts";
 import { appendEventFireAndForget } from "../state/event-log/event-log.ts";
 import type { TeamRunManifest } from "../state/types.ts";
@@ -201,7 +203,13 @@ export function pollWorkerInbox(pickup: WorkerInboxPickup, limit?: number): Mail
 		// was PREVENTED — audited via mailbox.pickup_deduped (once per key
 		// per process so the 500ms re-scan cannot spam the event log).
 		const requestId = messageIdempotencyKey(m);
-		const dedupKey = requestId !== undefined ? `${m.direction}:${requestId}` : undefined;
+		// M3-9 / R33-1: the index key is RECIPIENT-scoped
+		// (`direction:recipient:requestId`). A group fan-out mints ONE requestId
+		// and reuses it for every recipient, so the pre-fix run-scoped key let the
+		// first acking recipient suppress every sibling at its own pickup
+		// (probe: 1 delivered / 0 / 0). Same-row duplicate protection is
+		// unaffected — that is the per-message `messages[id]` record below.
+		const dedupKey = requestId !== undefined ? requestIdDeliveryKey(m.direction, taskId, requestId) : undefined;
 		if (dedupKey !== undefined) {
 			// (direction, requestId) index — catches resends carrying the same
 			// requestId AND duplicate rows under one requestId.
@@ -258,6 +266,10 @@ export function acknowledgeWorkerInboxDelivery(
 			picked.map((m) => ({
 				direction: m.direction,
 				messageId: m.id,
+				// M3-9 / R33-1: record WHICH recipient consumed the row — the index
+				// key is recipient-scoped, so group fan-out siblings keep their own
+				// exactly-once records.
+				taskId,
 				requestId: messageIdempotencyKey(m),
 			})),
 		);

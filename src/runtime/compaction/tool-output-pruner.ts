@@ -95,13 +95,18 @@ export interface PruneResult {
 }
 
 // ---------------------------------------------------------------------------
-// Token estimation (rough char/4 heuristic, matching gajae-code)
+// Token estimation
 // ---------------------------------------------------------------------------
+// M3-10 / R34: the single char→token / text→token conversion lives in
+// src/utils/token-counter.ts. This site used to carry its own wrapper around
+// `countTokens`; it now uses the shared `estimateTokensForText` so pruner
+// budgets, handoff budgets (task-output-context.ts) and prompt-diet estimates
+// (prompt-builder.ts) all share one denominator and one unit (TOKENS).
 
-import { countTokens } from "../../utils/token-counter.ts";
+import { countTokens, estimateTokensForText } from "../../utils/token-counter.ts";
 
 function estimateTokens(text: string): number {
-	return countTokens(text);
+	return estimateTokensForText(text);
 }
 
 // ---------------------------------------------------------------------------

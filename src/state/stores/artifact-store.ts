@@ -318,3 +318,92 @@ export function writeArtifact(artifactsRoot: string, options: ArtifactWriteOptio
 		retention: options.retention ?? "run",
 	};
 }
+
+// ── Read-side integrity (M3-27 / R44-N3) ────────────────────────────────────
+//
+// Round 44 (probe r50b-s3/n3): `contentHash` was stamped at WRITE time and then
+// consumed for display (`inspect.ts`), as a cache key (`task-output-context.ts`)
+// and for the write-skip compare (`finalize-run.ts`) — but NEVER verified on a
+// read. A worker (or anything else with same-uid write access) could rewrite
+// `artifacts/<run>/results/<task>.md` between the write and the leader's read
+// and the tampered body was served with `hash-mismatch-but-still-served: true`.
+//
+// `readVerifiedArtifact` is that missing read path: it re-hashes the bytes on
+// disk and compares them to the descriptor's pinned `contentHash`. The result is
+// a discriminated union so callers must decide what a mismatch means (refuse the
+// evidence, flag it, or re-read) instead of silently consuming bytes.
+
+/** Why a verified read did not return trusted content. */
+export type ArtifactVerifyFailure = "missing" | "unreadable" | "hash-mismatch" | "no-pinned-hash" | "outside-artifacts-root";
+
+export type ArtifactReadResult =
+	| {
+			ok: true;
+			content: string;
+			/** sha256 of the bytes just read (always matches `contentHash`). */
+			contentHash: string;
+	  }
+	| {
+			ok: false;
+			reason: ArtifactVerifyFailure;
+			/** Bytes as read (absent when the file could not be read at all) —
+			 *  surfaced for diagnostics only; never treat as trusted evidence. */
+			content?: string;
+			/** sha256 of the bytes on disk, when they were read. */
+			actualHash?: string;
+			/** The descriptor's pinned hash, when it had one. */
+			expectedHash?: string;
+	  };
+
+export interface ArtifactVerifyOptions {
+	/** When supplied, the artifact path must resolve INSIDE this root
+	 *  (realpath-contained, mirrors the R44-N1 prune containment). */
+	artifactsRoot?: string;
+	/** Require a pinned `contentHash` on the descriptor. Default false: a
+	 *  descriptor written before hashes existed returns
+	 *  `{ ok: false, reason: "no-pinned-hash" }` so a caller that NEEDS
+	 *  integrity can fail closed without guessing. */
+	requirePinnedHash?: boolean;
+}
+
+/**
+ * R44-N3 read-side verification: read an artifact and verify its pinned sha256.
+ *
+ * Never throws (a missing/unreadable file is a `{ ok: false }` result — this is
+ * called from evidence paths that must degrade, not crash).
+ */
+export function readVerifiedArtifact(
+	descriptor: Pick<ArtifactDescriptor, "path" | "contentHash">,
+	options: ArtifactVerifyOptions = {},
+): ArtifactReadResult {
+	if (options.artifactsRoot !== undefined) {
+		try {
+			resolveRealContainedPath(path.resolve(options.artifactsRoot), descriptor.path);
+		} catch {
+			return {
+				ok: false,
+				reason: "outside-artifacts-root",
+				...(descriptor.contentHash ? { expectedHash: descriptor.contentHash } : {}),
+			};
+		}
+	}
+	let content: string;
+	try {
+		content = fs.readFileSync(descriptor.path, "utf-8");
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		return {
+			ok: false,
+			reason: code === "ENOENT" ? "missing" : "unreadable",
+			...(descriptor.contentHash ? { expectedHash: descriptor.contentHash } : {}),
+		};
+	}
+	const actualHash = hashContent(content);
+	const expectedHash = descriptor.contentHash;
+	if (expectedHash === undefined) {
+		if (options.requirePinnedHash === true) return { ok: false, reason: "no-pinned-hash", content, actualHash };
+		return { ok: true, content, contentHash: actualHash };
+	}
+	if (actualHash !== expectedHash) return { ok: false, reason: "hash-mismatch", content, actualHash, expectedHash };
+	return { ok: true, content, contentHash: actualHash };
+}

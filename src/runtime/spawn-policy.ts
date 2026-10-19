@@ -64,9 +64,35 @@ export type SpawnPolicyDenyReason =
 	| "depth-exceeded"
 	| "slots-exhausted"
 	| "budget-insufficient"
+	| "budget-not-granted"
+	| "budget-unmetered"
 	| "model-invalid"
 	| "timeout-invalid"
 	| "workspace-conflict";
+
+/** M3-3 / R43-N1: what a delegate request that carries NO `budgetTokens` is
+ *  worth. `"deny"` is the fail-closed default of this pure policy API — an
+ *  unmetered delegation is a budget bypass. The broker explicitly passes
+ *  `"allow"` (the documented pre-M3-3 behavior for nesting runs without a
+ *  `budgetTotal`, e.g. the nested-slot-only deployments) and then records
+ *  `unmetered: true` on the `delegate.admitted` event so the allow is never
+ *  silent — the workitem's "refuse or explicit allow" shape. */
+export type UnmeteredDelegatePolicy = "deny" | "allow";
+
+/** M3-3 / R43-N1: the budget accounting a caller must apply for the admitted
+ *  grandchild. `metered: false` means the request carried no budgetTokens (and
+ *  the caller opted into {@link UnmeteredDelegatePolicy} `"allow"`).
+ *  `grantedTokens` is the EFFECTIVE grant the gate evaluated — the parent's own
+ *  allocation when present, else the seeded run-level grant — so the caller
+ *  writes exactly the number the gate admitted against (never a second,
+ *  diverging derivation). */
+export interface DelegateBudgetDecision {
+	metered: boolean;
+	grantedTokens: number;
+	spentTokens: number;
+	/** Requested reservation (undefined when `metered === false`). */
+	requestedTokens?: number;
+}
 
 export interface DelegateAdmissionInput {
 	/** Resolved max depth (nesting.maxDepth default 4; env clamp mirrors PI_CREW_MAX_DEPTH 1..10). */
@@ -86,6 +112,18 @@ export interface DelegateAdmissionInput {
 	untrusted?: boolean;
 	/** Nested-slot budget snapshot (used/max). */
 	slots: NestedSlotSnapshot;
+	/** M3-3 / R43-N1 SEED: the token budget available to this parent task from
+	 *  the RUN-level grant (manifest `budgetTotal`, `budgetUnlimited !== true`).
+	 *  Used only when the parent task record carries no `allocation` of its own —
+	 *  the pre-fix state of EVERY task, because nothing ever produced
+	 *  `tokensGranted` (ADR line 140 follow-up that never landed). Omitting it
+	 *  keeps the fail-closed "no grant" reading.
+	 *  `budgetUnlimited === true` callers must NOT pass it (an unmetered run has
+	 *  nothing to seed from). */
+	parentBudgetGrantTokens?: number;
+	/** M3-3 / R43-N1: policy for a request WITHOUT `budgetTokens` (see
+	 *  {@link UnmeteredDelegatePolicy}). Default `"deny"`. */
+	unmeteredDelegates?: UnmeteredDelegatePolicy;
 	/** Requested grandchild parameters (all optional in the tool surface). */
 	requested?: {
 		role?: string;
@@ -128,6 +166,9 @@ export interface SpawnPolicyDecision {
 	 *  ({@link effectiveGrandchildToolPolicy}). Present on ALLOW decisions so
 	 *  the spawn side never has to re-derive tier logic. */
 	effectiveToolPolicy?: ResolvedToolPolicy;
+	/** M3-3 / R43-N1: the budget accounting the caller must apply — always
+	 *  present on ALLOW decisions. */
+	budget?: DelegateBudgetDecision;
 }
 
 export function isExecutorClassRole(role: string): boolean {
@@ -260,16 +301,47 @@ export function evaluateDelegateAdmission(input: DelegateAdmissionInput): SpawnP
 	}
 
 	// 5. Parent allocation sufficiency — reserve up-front or reject.
+	//
+	// M3-3 / R43-N1 (2026-10-19 fix-wave 6): the grant is SEEDED here. Before
+	// this fix `tokensGranted` had no producer anywhere in the tree (census:
+	// four conditional writers, all requiring an allocation to already exist),
+	// so `granted` was always 0 for every real task: budgeted delegates
+	// (budgetTokens >= 1) were ALWAYS denied "budget-insufficient" — i.e. the
+	// whole ADR-5 §5 budget machinery was dead code — while delegates without
+	// budgetTokens skipped the gate entirely and ran unmetered with no trace.
+	// Effective grant = the task's own allocation when present, else the
+	// run-level grant the caller supplies (parentBudgetGrantTokens).
+	const granted = parentTask.allocation?.tokensGranted ?? input.parentBudgetGrantTokens ?? 0;
+	const spent = parentTask.allocation?.tokensSpent ?? 0;
+	const remaining = granted - spent;
+	const budget: DelegateBudgetDecision = {
+		metered: requested?.budgetTokens !== undefined,
+		grantedTokens: granted,
+		spentTokens: spent,
+		...(requested?.budgetTokens !== undefined ? { requestedTokens: requested.budgetTokens } : {}),
+	};
 	if (requested?.budgetTokens !== undefined) {
-		const granted = parentTask.allocation?.tokensGranted ?? 0;
-		const spent = parentTask.allocation?.tokensSpent ?? 0;
-		const remaining = granted - spent;
+		if (granted <= 0) {
+			// Explicit refusal instead of the pre-fix accidental "0 remaining".
+			return deny(
+				"budget-not-granted",
+				`delegate rejected: parent task '${parentTask.taskId}' has no token budget granted (requested ${requested.budgetTokens}); the run has no budgetTotal to seed one from — drop budgetTokens or set a run budget`,
+			);
+		}
 		if (requested.budgetTokens > remaining) {
 			return deny(
 				"budget-insufficient",
 				`delegate rejected: requested budget ${requested.budgetTokens} tokens exceeds parent task '${parentTask.taskId}' remaining allocation ${remaining} (${granted} granted - ${spent} spent)`,
 			);
 		}
+	} else if ((input.unmeteredDelegates ?? "deny") !== "allow") {
+		// M3-3 / R43-N1: an unmetered delegate is a budget bypass — the pure
+		// policy denies unless the caller explicitly opted in (the broker does,
+		// and records `unmetered: true`).
+		return deny(
+			"budget-unmetered",
+			`delegate rejected: budgetTokens is required (an unmetered grandchild escapes run budget enforcement; grant a budget or opt into unmetered delegation explicitly)`,
+		);
 	}
 
 	// 6. Model validation against the resolved catalog.
@@ -308,5 +380,6 @@ export function evaluateDelegateAdmission(input: DelegateAdmissionInput): SpawnP
 		timeoutSec,
 		...(normalizedModel !== undefined ? { model: normalizedModel } : {}),
 		effectiveToolPolicy: effectiveGrandchildToolPolicy(parentTask.role, requestedRole ?? "explorer"),
+		budget,
 	};
 }

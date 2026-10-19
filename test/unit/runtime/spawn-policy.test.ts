@@ -25,7 +25,13 @@ function baseInput(overrides?: Partial<DelegateAdmissionInput>): DelegateAdmissi
 		parentTask: { taskId: "01_impl", role: "executor", depth: 1 },
 		slots: { used: 0, max: 2 },
 		modelCatalog: ["zai/glm-5.3", "deepseek/deepseek-v4-flash"],
-		...overrides,
+		// M3-3/R43-N1: gate 5 is now part of the matrix for EVERY case. These
+		// gate-1..4/6..8 fixtures exercise their own dimension, not the budget
+		// one, so they opt into unmetered delegation explicitly (the production
+		// broker passes the same value) and seed a run grant. The budget matrix
+		// itself is covered by the dedicated gate-5 tests below.
+		unmeteredDelegates: "allow",
+		...(overrides ?? {}),
 	};
 }
 
@@ -127,7 +133,55 @@ test("gate 5 budget: exactly-remaining budget admitted (boundary)", () => {
 test("gate 5 budget: no allocation recorded → any positive budgetTokens rejected (fail-closed)", () => {
 	const d = evaluateDelegateAdmission(baseInput({ requested: { budgetTokens: 1 } }));
 	assert.equal(d.allowed, false);
-	assert.equal(d.reason, "budget-insufficient");
+	// M3-3/R43-N1: the pre-fix reason here was the ACCIDENTAL
+	// "budget-insufficient" (granted 0 defaulted, so remaining was 0 and the
+	// message blamed the request). It is now an explicit "nothing granted".
+	assert.equal(d.reason, "budget-not-granted");
+});
+
+test("gate 5 R43-N1: SEEDED run grant → budgeted delegate ADMITTED (pre-fix: no producer, always denied)", () => {
+	// The parent task record carries NO allocation — exactly the state of every
+	// real task before this fix, because nothing ever produced `tokensGranted`.
+	const d = evaluateDelegateAdmission(
+		baseInput({
+			parentTask: { taskId: "01_impl", role: "executor", depth: 1 },
+			parentBudgetGrantTokens: 100_000,
+			requested: { budgetTokens: 500 },
+		}),
+	);
+	assert.equal(d.allowed, true, "a budgeted delegate must be admitted once the grant is seeded");
+	assert.deepEqual(d.budget, { metered: true, grantedTokens: 100_000, spentTokens: 0, requestedTokens: 500 });
+});
+
+test("gate 5 R43-N1: seeded grant is capped by recorded spend (seed + spent off the same base)", () => {
+	const d = evaluateDelegateAdmission(
+		baseInput({
+			parentTask: { taskId: "01_impl", role: "executor", depth: 1, allocation: { tokensGranted: 1000, tokensSpent: 900 } },
+			parentBudgetGrantTokens: 100_000,
+			requested: { budgetTokens: 500 },
+		}),
+	);
+	assert.equal(d.allowed, false);
+	assert.equal(d.reason, "budget-insufficient", "the task's OWN allocation wins over the run-level seed");
+	assert.match(d.message ?? "", /1000 granted - 900 spent/);
+});
+
+test("gate 5 R43-N1: request WITHOUT budgetTokens is refused by default (unmetered delegation is a bypass)", () => {
+	const d = evaluateDelegateAdmission(
+		baseInput({
+			unmeteredDelegates: undefined, // policy default
+			parentBudgetGrantTokens: 100_000,
+			requested: { role: "explorer" },
+		}),
+	);
+	assert.equal(d.allowed, false);
+	assert.equal(d.reason, "budget-unmetered");
+});
+
+test("gate 5 R43-N1: explicit `unmeteredDelegates: 'allow'` admits and REPORTS the unmetered mode (broker audit)", () => {
+	const d = evaluateDelegateAdmission(baseInput({ requested: { role: "explorer" } }));
+	assert.equal(d.allowed, true);
+	assert.deepEqual(d.budget, { metered: false, grantedTokens: 0, spentTokens: 0 });
 });
 
 test("gate 6 model-invalid: unvalidated provider/model pass-through rejected at admission", () => {

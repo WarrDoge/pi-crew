@@ -151,6 +151,13 @@ export const TEAM_EVENT_TYPES = [
 	"delegate.completed",
 	"delegate.timed_out",
 	"delegate.rolled_up",
+	// M3-5/R43-N3 (2026-10-19 fix-wave 6): a run/owner abort reached an
+	// in-flight grandchild (broker delegate abort registry → spawner signal).
+	"delegate.cancelled",
+	// M3-5/R43-N4: the parent task was already terminal when the grandchild
+	// settled, so the fenced result was redirected to the RUN inbox instead of
+	// an unreadable parent mailbox (delegate/delegate-finalize.ts).
+	"delegate.rerouted",
 	// Budget tracking events
 	"budget.initialized",
 	"budget.warning",

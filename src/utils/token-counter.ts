@@ -16,6 +16,53 @@
 /** Density threshold above which content is classified as code. */
 const CODE_DENSITY_THRESHOLD = 0.1;
 
+/**
+ * M3-10 / R34 — THE character→token conversion constant for every estimate
+ * path in the tree. UNIT CONTRACT: every budget/estimate surface in pi-crew is
+ * denominated in **TOKENS** (never characters); a site that only has a
+ * character COUNT converts with {@link estimateTokensFromChars}, and a site
+ * that has the text itself MUST use {@link estimateTokensForText} (the honest
+ * BPE/CJK-aware estimator below) instead of the coarse constant.
+ *
+ * Pre-M3-10 there were three divergent denominators: `round(chars / 4)`
+ * (prompt-builder), a duplicated `max(countTokens(body), Σ measured)` mirror
+ * (task-output-context), and raw `countTokens` (pruner / dynamic-workflow).
+ * All three now funnel through this module so a budget number means the same
+ * thing everywhere; see `estimateTokensFromChars` / `effectiveTokenEstimate` /
+ * `estimateTokensForText`.
+ */
+export const CHARS_PER_TOKEN = 4;
+
+/**
+ * Convert a character COUNT to tokens using the single documented constant.
+ *
+ * Use ONLY when the text itself is not available at the call site (e.g. the
+ * prompt-diet breakdown tracks component char counts, not bodies). When the
+ * text IS available, use {@link estimateTokensForText} — this constant is a
+ * coarse ASCII-prose proxy (~4 chars/token) that under-counts CJK ~2-3x.
+ */
+export function estimateTokensFromChars(chars: number): number {
+	if (!Number.isFinite(chars) || chars <= 0) return 0;
+	return Math.round(chars / CHARS_PER_TOKEN);
+}
+
+/**
+ * The U10 measured-token anchor, shared by every budget-estimate site: a REAL
+ * measurement (message_end usage / persisted `TeamTaskState.usage`) can only
+ * TIGHTEN the estimate, never loosen it below the heuristic. `undefined`
+ * measurement keeps the plain estimate.
+ */
+export function effectiveTokenEstimate(estimated: number, measuredTokens?: number): number {
+	return measuredTokens === undefined ? estimated : Math.max(estimated, measuredTokens);
+}
+
+/** Estimate tokens for TEXT — the honest path (same values as
+ *  {@link countTokens}). Every text-available estimate site must call this
+ *  rather than converting `text.length` with {@link estimateTokensFromChars}. */
+export function estimateTokensForText(text: string): number {
+	return countTokens(text);
+}
+
 /** Divisor for code content alpha estimation (~3.5 chars/token). */
 const CODE_ALPHA_DIVISOR = 3.5;
 

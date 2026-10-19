@@ -39,7 +39,6 @@
 import { randomUUID } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import * as net from "node:net";
-import { withRunLockSync } from "../../state/coordination/locks.ts";
 import {
 	appendMailboxMessageAsync,
 	appendMailboxMessageIdempotentAsync,
@@ -60,7 +59,9 @@ import { resolveCrewMaxDepth } from "../model/pi-args.ts";
 import { NestedSlotBudget } from "../scheduling/nested-slots.ts";
 import { evaluateDelegateAdmission } from "../spawn-policy.ts";
 import { type BrokerToken, BrokerTokenRegistry } from "./crew-broker-tokens.ts";
+import { DelegateAbortRegistry } from "./delegate/delegate-abort.ts";
 import { type DelegateEventTarget, type DelegateEventType, recordDelegateEvent } from "./delegate/delegate-event.ts";
+import { delegateTerminalEvent, finalizeDelegateResult } from "./delegate/delegate-finalize.ts";
 import { promoteShadowToRunning } from "./delegate/shadow-lifecycle.ts";
 import { fanoutMailboxMessage } from "./mailbox-observer/mailbox-fanout.ts";
 import type { CrewBrokerOptions, ServerConnection } from "./protocol/connection-state.ts";
@@ -155,6 +156,9 @@ export class CrewBroker {
 	/** T3/R5 (ADR-5 §2): nested-slot budget for delegate grandchildren — lazily
 	 *  sized from options (max(1, floor(globalWorkerSemaphore/2)) or override). */
 	private nestedSlots: NestedSlotBudget | undefined;
+	/** M3-5/R43-N3: abort controllers for in-flight delegate grandchildren —
+	 *  aborted on run terminalise (abortDelegatesForRun) and on stop(). */
+	private readonly delegateAborts = new DelegateAbortRegistry();
 	/** A single observable handshake counter (test/observability). */
 	private handshakeCount = 0;
 	/** R10-3: stat-gated manifest/tasks cache shared by all task.waitStatus
@@ -242,6 +246,30 @@ export class CrewBroker {
 			this.tokens.revokeToken(token);
 			this.taskTokens.delete(taskId);
 		}
+	}
+
+	/** M3-5 / R43-N3: cancel every in-flight DELEGATE GRANDCHILD of `runId`.
+	 *  Called from the run-terminal paths (budget abort / cancellation via
+	 *  budget-enforcement.ts → abortRunDelegates) and from stop(). Before this
+	 *  existed the spawner was fire-and-forget: a budget abort left grandchildren
+	 *  running to their own deadline (up to 24h), still spending and still
+	 *  holding nested slots. Returns the number cancelled; idempotent. */
+	abortDelegatesForRun(runId: string, reason = "run-terminal"): number {
+		if (typeof runId !== "string" || runId.length === 0) return 0;
+		const aborted = this.delegateAborts.abortRun(runId, { reason });
+		if (aborted > 0) {
+			logInternalError(
+				"crew-broker.delegate.abort-run",
+				new Error(`${aborted} delegate grandchild(ren) cancelled`),
+				`runId=${runId} reason=${reason}`,
+			);
+		}
+		return aborted;
+	}
+
+	/** Number of in-flight delegate grandchildren (diagnostics / tests). */
+	get inFlightDelegateCount(): number {
+		return this.delegateAborts.size;
 	}
 
 	/** Issue the orchestrator token for `runId` (F-06). Cryptographically
@@ -363,6 +391,9 @@ export class CrewBroker {
 	async stop(): Promise<void> {
 		if (this.stopped) return;
 		this.stopped = true;
+		// M3-5/R43-N3: cancel every in-flight grandchild FIRST — broker teardown
+		// must not leave delegate spawns running to their own 24h deadline.
+		this.delegateAborts.abortAll({ reason: "broker-stop" });
 		// Phase 1.3: unregister the mailbox observer before closing connections.
 		if (this.mailboxObserverUnsub) {
 			try {
@@ -1527,6 +1558,18 @@ export class CrewBroker {
 				// ADR-5 §12: the delegate surface is an escalation — trusted only by the
 				// explicit user opt-in threaded from config.nesting.enabled (sensitive).
 				untrusted: this.options.nestingTrustedEscalation !== true,
+				// M3-3 / R43-N1 SEED: the run-level token budget is the grant every
+				// task inherits when its own record carries no allocation (pre-fix
+				// state of EVERY task — nothing produced `tokensGranted`, so every
+				// budgeted delegate was denied and every unmetered one slipped by).
+				// `budgetUnlimited` opts out of enforcement entirely ⇒ no seed.
+				...(fresh.manifest.budgetTotal !== undefined && fresh.manifest.budgetUnlimited !== true
+					? { parentBudgetGrantTokens: fresh.manifest.budgetTotal }
+					: {}),
+				// M3-3 / R43-N1: unmetered delegation stays available (documented
+				// pre-fix behavior for nesting runs without a budgetTotal) but is now
+				// an EXPLICIT, audited allow (`unmetered: true` on delegate.admitted).
+				unmeteredDelegates: "allow",
 				workspace: {
 					serializeEnabled: this.options.serializeOnPathOverlap === true,
 					overlappingInFlightExecutors: overlapping,
@@ -1549,20 +1592,25 @@ export class CrewBroker {
 				};
 			}
 			// Reserve the requested budget pessimistically (ADR-5 §5): tokensSpent
-			// += budgetTokens now; the completion roll-up reconciles to actual usage
-			// (refund the difference). Single writer under the run lock.
+			// += budgetTokens now. M3-3/R43-N1: the reservation ALSO seeds the parent
+			// allocation when the record has none — the `decision.budget.grantedTokens`
+			// the gate admitted against is the write-once `tokensGranted`
+			// (state-helpers.ts merge keeps disk's value verbatim). Pre-fix the
+			// `parentAllocation` guard silently skipped the reserve for every task
+			// that had no allocation, i.e. for every task.
+			// M3-4/R44-N4: this reservation IS the spend — no settle-time refund.
 			let reserved = 0;
-			const parentAllocation = task.allocation;
+			const budgetDecision = decision.budget;
 			let tasksAfterReserve = fresh.tasks;
-			if (requested.budgetTokens !== undefined && parentAllocation) {
-				reserved = requested.budgetTokens;
+			if (budgetDecision?.metered === true) {
+				reserved = budgetDecision.requestedTokens ?? 0;
 				const updatedTasks = fresh.tasks.map((t) =>
 					t.id === parentTaskId
 						? {
 								...t,
 								allocation: {
-									tokensGranted: parentAllocation.tokensGranted,
-									tokensSpent: (parentAllocation.tokensSpent ?? 0) + reserved,
+									tokensGranted: budgetDecision.grantedTokens,
+									tokensSpent: budgetDecision.spentTokens + reserved,
 								},
 							}
 						: t,
@@ -1609,6 +1657,8 @@ export class CrewBroker {
 			subId,
 			childDepth: decision.childDepth,
 			role: requested.role ?? "explorer",
+			// M3-3/R43-N1: an unmetered allow is EXPLICIT in the audit trail.
+			...(decision.budget?.metered === false ? { unmetered: true } : {}),
 			...(reserved > 0 ? { reservedTokens: reserved } : {}),
 		});
 		// S1#1: pre-mint the grandchild-scoped token when (and only when) the
@@ -1623,6 +1673,10 @@ export class CrewBroker {
 		// RR-023 F3 (finding #3, run team_20260929041427): model-less gc spawn fell
 		// through to the pi GLOBAL default — inherit the parent task's model.
 		const gcModel = requested.model ?? parentModel;
+		// M3-5/R43-N3: register the grandchild's abort controller BEFORE the
+		// spawn starts, so a run terminalise / budget abort / broker stop that
+		// lands mid-spawn still cancels it (no orphan outliving the run).
+		const delegateAbort = this.delegateAborts.register(subId, runId);
 		// Background grandchild lifecycle (ADR-5 §1/§6).
 		const spawner = this.options.grandchildSpawner ?? spawnDelegateGrandchild;
 		void (async () => {
@@ -1644,6 +1698,8 @@ export class CrewBroker {
 					...(requested.maxTurns !== undefined ? { maxTurns: requested.maxTurns } : {}),
 					timeoutSec: decision.timeoutSec ?? 900,
 					depthOverride: decision.childDepth ?? 2,
+					// M3-5/R43-N3: owner cancellation (registry-driven).
+					signal: delegateAbort.signal,
 					// RR-012 F16: promote shadow queued→running once the process exists.
 					onSpawn: (pid) => {
 						if (pid !== null) promoteShadowToRunning(cwd, runId, subId);
@@ -1652,110 +1708,32 @@ export class CrewBroker {
 			} catch (err) {
 				outcome = { ok: false, resultText: `delegate spawn failed: ${(err as Error).message}` };
 			}
-			// S3 fence hardening: neutralize smuggled end-fence markers in the
-			// grandchild's raw text, then wrap (the client re-fences too — the
-			// mailbox is an unauthenticated same-uid channel by design).
-			const sanitizedText = outcome.resultText.replace(/^--- (end )?delegate /gm, "-- ~delegate ").slice(0, 65_536);
-			const fenced = `--- delegate ${subId} ${outcome.timedOut ? "(timed out)" : outcome.ok ? "(ok)" : "(failed)"} ---\n${sanitizedText}\n--- end delegate ${subId} ---`;
-			// Durable delivery (ADR-5 §1): fenced result into the PARENT task's
-			// mailbox + budget roll-up + slot release — run-locked RMW.
 			try {
-				const fresh = loadRunManifestById(cwd, runId);
-				if (fresh) {
-					withRunLockSync(fresh.manifest, () => {
-						const latest = loadRunManifestById(cwd, runId);
-						if (!latest) return;
-						void appendMailboxMessageAsync(latest.manifest, {
-							direction: "inbox",
-							from: `delegate:${subId}`,
-							to: parentTaskId,
-							taskId: parentTaskId,
-							body: fenced,
-							kind: "response",
-							data: { subId, ok: outcome.ok, timedOut: outcome.timedOut === true },
-						}).catch((err) =>
-							logInternalError(
-								"crew-broker.delegate.mailbox",
-								err instanceof Error ? err : new Error(String(err)),
-								`runId=${runId}`,
-							),
-						);
-						// Roll-up (ADR-5 §5): reconcile the pessimistic reservation to
-						// actual usage; refund the difference. Unattributed → keep reserve.
-						let tasksToWrite = latest.tasks;
-						if (reserved > 0) {
-							const parent = latest.tasks.find((t) => t.id === parentTaskId);
-							const parentAlloc = parent?.allocation;
-							if (parentAlloc) {
-								const actual = Math.max(0, Math.min(outcome.usageTokens ?? reserved, reserved));
-								const tokensSpent = (parentAlloc.tokensSpent ?? 0) - reserved + actual;
-								tasksToWrite = tasksToWrite.map((t) =>
-									t.id === parentTaskId
-										? { ...t, allocation: { tokensGranted: parentAlloc.tokensGranted, tokensSpent } }
-										: t,
-								);
-								this.recordDelegateEvent(latest.manifest, "delegate.rolled_up", parentTaskId, {
-									subId,
-									actualTokens: actual,
-								});
-							}
-						}
-						// S1#1 (verifier N1): the terminal flip is UNCONDITIONAL — never depends
-						// on a reservation. RR-012 F16: onSpawn promotes the record to "running"
-						// during execution; this flip terminalizes every settle path.
-						saveRunTasks(
-							latest.manifest,
-							tasksToWrite.map((t) =>
-								t.id === subId
-									? {
-											...t,
-											status: outcome.ok ? ("completed" as const) : ("failed" as const),
-											completedAt: new Date().toISOString(),
-										}
-									: t,
-							),
-						);
-					});
-				}
-			} catch (err) {
-				logInternalError("crew-broker.delegate.finalize", err instanceof Error ? err : new Error(String(err)), `runId=${runId}`);
-				// P2-8c: best-effort refund when finalize fails — the reservation
-				// must not linger inflated after a roll-up write failure.
-				if (reserved > 0) {
-					try {
-						const rf = loadRunManifestById(cwd, runId);
-						if (rf) {
-							withRunLockSync(rf.manifest, () => {
-								const rl = loadRunManifestById(cwd, runId);
-								if (!rl) return;
-								const par = rl.tasks.find((t) => t.id === parentTaskId);
-								const pa = par?.allocation;
-								if (pa) {
-									saveRunTasks(
-										rl.manifest,
-										rl.tasks.map((t) =>
-											t.id === parentTaskId
-												? {
-														...t,
-														allocation: {
-															tokensGranted: pa.tokensGranted,
-															tokensSpent: Math.max(0, (pa.tokensSpent ?? 0) - reserved),
-														},
-													}
-												: t,
-										),
-									);
-								}
-							});
-						}
-					} catch {
-						/* refund is best-effort; the startup reconcile is the follow-up */
-					}
-				}
+				// S3 fence hardening: neutralize smuggled end-fence markers in the
+				// grandchild's raw text, then wrap (the client re-fences too — the
+				// mailbox is an unauthenticated same-uid channel by design).
+				const sanitizedText = outcome.resultText.replace(/^--- (end )?delegate /gm, "-- ~delegate ").slice(0, 65_536);
+				const statusTag = outcome.cancelled ? "(cancelled)" : outcome.timedOut ? "(timed out)" : outcome.ok ? "(ok)" : "(failed)";
+				const fenced = `--- delegate ${subId} ${statusTag} ---\n${sanitizedText}\n--- end delegate ${subId} ---`;
+				// Durable delivery + budget charge + shadow terminal flip — all
+				// inside one run lock, off a fresh disk read (delegate-finalize.ts
+				// owns the R43-N4 reroute and the R44-N4 broker-side charge).
+				finalizeDelegateResult({
+					brokerCwd: cwd,
+					runId,
+					parentTaskId,
+					subId,
+					fenced,
+					ok: outcome.ok,
+					...(outcome.timedOut !== undefined ? { timedOut: outcome.timedOut } : {}),
+					reservedTokens: reserved,
+					...(outcome.usageTokens !== undefined ? { selfReportedTokens: outcome.usageTokens } : {}),
+				});
 			} finally {
+				this.delegateAborts.release(subId);
 				this.nestedSlotBudget().release(subId);
 			}
-			this.recordDelegateEvent(loaded.manifest, outcome.timedOut ? "delegate.timed_out" : "delegate.completed", parentTaskId, {
+			this.recordDelegateEvent(loaded.manifest, delegateTerminalEvent(outcome), parentTaskId, {
 				subId,
 				ok: outcome.ok,
 			});

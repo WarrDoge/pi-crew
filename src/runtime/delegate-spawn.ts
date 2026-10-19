@@ -59,6 +59,13 @@ export interface GrandchildSpawnInput {
 	/** Grandchild-scoped broker credentials (S1#1 — NEVER the parent token). */
 	brokerSpawn?: { socketPath: string; token: string };
 	onSpawn?: (pid: number | null) => void;
+	/** M3-5 / R43-N3: owner-side cancellation. The broker's delegate abort
+	 *  registry aborts this on run terminalise / budget abort / broker stop, so
+	 *  a grandchild can no longer outlive its run by up to its own 24h deadline
+	 *  (pre-fix: fire-and-forget spawner with no abort path). Aborting produces
+	 *  `{ ok: false, cancelled: true }` — distinct from the deadline
+	 *  `timedOut` outcome so the settle path can audit which one happened. */
+	signal?: AbortSignal;
 }
 
 export interface GrandchildSpawnResult {
@@ -66,9 +73,14 @@ export interface GrandchildSpawnResult {
 	/** Fenced-ish result text (caller fences before mailbox delivery). */
 	resultText: string;
 	/** Usage in tokens for roll-up (input+output+cache summed over
-	 *  message_end events); undefined = unattributed. */
+	 *  message_end events); undefined = unattributed.
+	 *  M3-4/R44-N4: AUDIT ONLY — the budget charge is the host-side
+	 *  reservation, never this self-attested number. */
 	usageTokens?: number;
 	timedOut?: boolean;
+	/** M3-5/R43-N3: the OWNER aborted the spawn (run terminalise / budget abort
+	 *  / broker stop) — distinct from the grandchild's own deadline. */
+	cancelled?: boolean;
 }
 
 /**
@@ -141,7 +153,18 @@ export async function spawnDelegateGrandchild(input: GrandchildSpawnInput): Prom
 	const artifactsRoot = grandchildArtifactsRoot(input.cwd, input.runId, input.parentTaskId, input.subId);
 	fs.mkdirSync(artifactsRoot, { recursive: true });
 
+	// M3-5/R43-N3: two abort sources — this spawn's own deadline and the
+	// OWNER (broker abort registry). `ownerAborted` distinguishes them for the
+	// settle audit; the AbortController it drives is the single signal handed to
+	// runChildPi, so both paths kill the child the same way.
 	const abort = new AbortController();
+	let ownerAborted = false;
+	const onOwnerAbort = (): void => {
+		ownerAborted = true;
+		abort.abort(input.signal?.reason);
+	};
+	if (input.signal?.aborted) onOwnerAbort();
+	else input.signal?.addEventListener("abort", onOwnerAbort, { once: true });
 	const timer = setTimeout(() => abort.abort(), input.timeoutSec * 1000);
 	timer.unref?.();
 
@@ -178,13 +201,19 @@ export async function spawnDelegateGrandchild(input: GrandchildSpawnInput): Prom
 		const ok = result.exitCode === 0;
 		return { ok, resultText: grandchildResultText(result), ...(usageTokens !== undefined ? { usageTokens } : {}) };
 	} catch (error) {
-		const timedOut = abort.signal.aborted;
+		const timedOut = abort.signal.aborted && !ownerAborted;
+		const cancelled = ownerAborted;
 		return {
 			ok: false,
-			timedOut,
-			resultText: timedOut ? "[delegate timed out]" : `delegate spawn failed: ${(error as Error).message}`,
+			...(cancelled ? { cancelled } : { timedOut }),
+			resultText: cancelled
+				? "[delegate cancelled: run terminated]"
+				: timedOut
+					? "[delegate timed out]"
+					: `delegate spawn failed: ${(error as Error).message}`,
 		};
 	} finally {
 		clearTimeout(timer);
+		input.signal?.removeEventListener("abort", onOwnerAbort);
 	}
 }

@@ -141,3 +141,45 @@ test("cacheWrite included in total usage", () => {
 test("checkPerTaskBudget is exported for unit testing", () => {
 	assert.equal(typeof checkPerTaskBudget, "function");
 });
+
+// ── M3-4 / R43-N2: DELEGATE spend enters budget enforcement ────────────────
+//
+// Pre-fix, `checkPerTaskBudget` summed `task.usage` only. A grandchild's cost is
+// booked on its PARENT record as `allocation.tokensSpent` (broker-side tally) and
+// never appears in any `task.usage`, so a nested delegate storm could burn
+// unlimited budget without ever tripping `budgetAbort` (probe-verified round 43).
+
+function delegatingTask(id: string, ownOutput: number, delegateSpent: number): TeamTaskState {
+	return {
+		...task(id, { input: 0, output: ownOutput }),
+		allocation: { tokensGranted: 100_000, tokensSpent: delegateSpent },
+	};
+}
+
+test("M3-4/R43-N2: booked delegate spend counts toward totalUsed (invisible pre-fix)", () => {
+	const tasks = [delegatingTask("a", 1000, 9000)];
+	const result = checkPerTaskBudget(tasks, 100_000, 0.8, 0.95);
+	assert.equal(result.totalUsed, 10_000, "own 1000 + delegate 9000");
+	assert.equal(result.abort, false);
+});
+
+test("M3-4/R43-N2: delegate spend alone trips the abort threshold (nested storm)", () => {
+	// Own usage is negligible; the grandchildren are what exceed the run budget.
+	const tasks = [delegatingTask("a", 100, 96_000)];
+	const result = checkPerTaskBudget(tasks, 100_000, 0.8, 0.95);
+	assert.equal(result.totalUsed, 96_100);
+	assert.equal(result.abort, true, "a nested delegate storm must not bypass budgetTotal");
+});
+
+test("M3-4/R43-N2: a delegate-heavy parent is flagged by the fair-share heuristic", () => {
+	const tasks = [delegatingTask("delegator", 0, 60_000), task("b", { input: 100, output: 100 })];
+	const result = checkPerTaskBudget(tasks, 100_000, 0.8, 0.95);
+	assert.deepEqual(result.fairShareViolators, ["delegator"], "fair share must see the delegate spend");
+});
+
+test("M3-4/R43-N2: corrupt (negative / non-finite) allocation cannot subtract from the run total", () => {
+	const negative = delegatingTask("a", 500, -1_000_000);
+	const nonFinite = delegatingTask("b", 0, Number.NaN);
+	const result = checkPerTaskBudget([negative, nonFinite], 100_000, 0.8, 0.95);
+	assert.equal(result.totalUsed, 500, "only the real own-usage counts");
+});

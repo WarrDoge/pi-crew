@@ -19,7 +19,9 @@ export type DelegateEventType =
 	| "delegate.rejected"
 	| "delegate.completed"
 	| "delegate.timed_out"
-	| "delegate.rolled_up";
+	| "delegate.cancelled"
+	| "delegate.rolled_up"
+	| "delegate.rerouted";
 
 export type DelegateEventTarget = { eventsPath: string; runId: string };
 

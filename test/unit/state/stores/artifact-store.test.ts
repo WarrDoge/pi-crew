@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import { writeArtifact } from "../../../../src/state/stores/artifact-store.ts";
+import { readVerifiedArtifact, writeArtifact } from "../../../../src/state/stores/artifact-store.ts";
 
 // Use realpath to resolve symlinks (macOS /var/folders → /private/var/folders).
 // atomicWriteFile refuses to write through untrusted symlink paths.
@@ -102,4 +102,95 @@ test("M2 regression: writeArtifact redacts quoted-JSON & nested secrets via stru
 	// Structure preserved (still valid JSON).
 	assert.doesNotThrow(() => JSON.parse(onDisk));
 	fs.rmSync(root, { recursive: true, force: true });
+});
+
+// ── M3-27 / R44-N3: read-side hash verification ──────────────────────────────
+//
+// Round 44 probe (r50b-s3/n3): `contentHash` was written at write time but never
+// verified on a read — a tampered artifact was served with
+// `hash-mismatch-but-still-served: true`. readVerifiedArtifact is that missing
+// read path; these pins cover the tamper case, the happy case, missing files,
+// descriptors without a pinned hash, and root containment.
+
+test("M3-27/R44-N3: readVerifiedArtifact returns the content when the pinned hash matches", () => {
+	const root = fs.mkdtempSync(path.join(realTmp, "pi-crew-art-verify-ok-"));
+	try {
+		const desc = writeArtifact(root, {
+			kind: "log",
+			relativePath: "evidence/result.md",
+			content: "VERIFIER EVIDENCE: all gates green\n",
+			producer: "verifier",
+		});
+		const read = readVerifiedArtifact(desc);
+		assert.equal(read.ok, true);
+		if (read.ok) {
+			assert.equal(read.content, "VERIFIER EVIDENCE: all gates green\n");
+			assert.equal(read.contentHash, desc.contentHash);
+		}
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("M3-27/R44-N3: a TAMPERED artifact is refused (probe n3 replay: served bytes ≠ pinned hash)", () => {
+	const root = fs.mkdtempSync(path.join(realTmp, "pi-crew-art-verify-bad-"));
+	try {
+		const desc = writeArtifact(root, {
+			kind: "log",
+			relativePath: "evidence/result.md",
+			content: "VERIFIER EVIDENCE: gate FAILED, do not merge\n",
+			producer: "verifier",
+		});
+		// Same-uid rewrite between write and read (the probe's attack).
+		fs.writeFileSync(desc.path, "VERIFIER EVIDENCE: all gates green, safe to merge\n");
+		const read = readVerifiedArtifact(desc);
+		assert.equal(read.ok, false);
+		if (!read.ok) {
+			assert.equal(read.reason, "hash-mismatch");
+			assert.equal(read.expectedHash, desc.contentHash);
+			assert.notEqual(read.actualHash, desc.contentHash);
+			// The untrusted bytes are surfaced for diagnostics only — a caller must
+			// not treat `content` as evidence when ok === false.
+			assert.match(read.content ?? "", /all gates green/);
+		}
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("M3-27/R44-N3: missing / unreadable / unpinned descriptors fail closed with distinct reasons", () => {
+	const root = fs.mkdtempSync(path.join(realTmp, "pi-crew-art-verify-miss-"));
+	try {
+		const desc = writeArtifact(root, { kind: "log", relativePath: "gone.md", content: "x", producer: "t" });
+		fs.rmSync(desc.path, { force: true });
+		const missing = readVerifiedArtifact(desc);
+		assert.equal(missing.ok, false);
+		if (!missing.ok) assert.equal(missing.reason, "missing");
+
+		// No pinned hash: trusted by default (legacy descriptors), refused when the
+		// caller demands integrity.
+		const dir = path.join(root, "legacy.md");
+		fs.writeFileSync(dir, "legacy body");
+		const legacy = { path: dir } as { path: string; contentHash?: string };
+		assert.equal(readVerifiedArtifact(legacy).ok, true);
+		const strict = readVerifiedArtifact(legacy, { requirePinnedHash: true });
+		assert.equal(strict.ok, false);
+		if (!strict.ok) assert.equal(strict.reason, "no-pinned-hash");
+	} finally {
+		fs.rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("M3-27/R44-N3: artifactsRoot containment refuses an out-of-root path (R44-N1 sibling guard)", () => {
+	const root = fs.mkdtempSync(path.join(realTmp, "pi-crew-art-verify-root-"));
+	const outside = path.join(realTmp, `pi-crew-art-outside-${Date.now()}.md`);
+	try {
+		fs.writeFileSync(outside, "outside the artifacts root");
+		const read = readVerifiedArtifact({ path: outside }, { artifactsRoot: root });
+		assert.equal(read.ok, false);
+		if (!read.ok) assert.equal(read.reason, "outside-artifacts-root");
+	} finally {
+		fs.rmSync(outside, { force: true });
+		fs.rmSync(root, { recursive: true, force: true });
+	}
 });
