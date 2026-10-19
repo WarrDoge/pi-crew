@@ -11,6 +11,7 @@ import type { TeamRunManifest, TeamTaskState } from "../state/types.ts";
 import { logInternalError } from "../utils/internal-error.ts";
 import { findRunStateDir } from "../utils/paths.ts";
 import { recordFromTask, upsertCrewAgent } from "./crew-agent-records.ts";
+import { reapRecordedWorkerOrphans } from "./process/orphan-reaper.ts";
 import { checkProcessLiveness } from "./process-status.ts";
 
 /** Age threshold for orphaned temp directory cleanup: 1 hour. */
@@ -466,6 +467,25 @@ function repairStaleRun(
 		} catch {
 			/* non-critical */
 		}
+	}
+	// R39-M3 (fix-wave 6, EP3): reclaim the cancelled tasks' recorded worker
+	// processes. The reconciler historically repaired run STATE only — an orphan
+	// worker re-parented to PID 1 stayed alive and burned a slot forever. This
+	// reaps only pids confirmed by the AUTHORITATIVE zombie signal (crew-subagent
+	// marker + dead crew-parent), so a live worker is never touched. Best-effort.
+	try {
+		const reapTargets = onlyTaskIds ? tasks.filter((task) => onlyTaskIds.has(task.id)) : tasks;
+		const reapResult = reapRecordedWorkerOrphans(reapTargets);
+		if (reapResult.reaped.length > 0) {
+			logInternalError(
+				"stale-reconciler",
+				new Error(`reaped ${reapResult.reaped.length} orphaned worker process(es): ${reapResult.reaped.join(",")}`),
+				manifest.runId,
+				"warn",
+			);
+		}
+	} catch (reapError) {
+		logInternalError("stale-reconciler", reapError, `orphan reap failed for ${manifest.runId}`, "warn");
 	}
 	return repairedTasks;
 }

@@ -27,7 +27,7 @@ interface CorruptEntry {
 	reason: string;
 }
 
-interface StuckTask {
+export interface StuckTask {
 	runId: string;
 	taskId: string;
 	staleMs: number;
@@ -80,6 +80,18 @@ function readRunTasks(stateRoot: string): TeamTaskState[] {
  */
 export function detectStuckTasks(run: { runId: string; stateRoot: string }, now: number): StuckTask[] {
 	const tasks = readRunTasks(run.stateRoot);
+	return stuckTasksFromRecords(tasks, run.runId, now);
+}
+
+/**
+ * R48-N1 (2026-10-19): pure stuck-task detection over an ALREADY-loaded task
+ * array. Extracted from {@link detectStuckTasks} so the status surface — which
+ * already holds `tasks` in memory — can consult the SAME external heartbeat-age
+ * signal without a second disk read. This is the EXTERNAL (timestamp-based)
+ * signal the status `needsAttention` surface previously never had: it does not
+ * trust the worker's self-reported `activityState`.
+ */
+export function stuckTasksFromRecords(tasks: TeamTaskState[], runId: string, now: number): StuckTask[] {
 	const stuck: StuckTask[] = [];
 
 	for (const task of tasks) {
@@ -103,7 +115,7 @@ export function detectStuckTasks(run: { runId: string; stateRoot: string }, now:
 		const staleMs = now - latest;
 		if (staleMs > STUCK_TASK_THRESHOLD_MS) {
 			stuck.push({
-				runId: run.runId,
+				runId,
 				taskId: task.id,
 				staleMs,
 				detail: `stale ${Math.round(staleMs / 60_000)}m (last activity: ${new Date(latest).toISOString()})`,

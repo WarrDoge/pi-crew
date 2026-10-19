@@ -101,24 +101,68 @@ test("isLikelyOrphanedActiveRun: false for async runs with pid", () => {
 	assert.equal(isLikelyOrphanedActiveRun(manifest), false);
 });
 
-test("isLikelyOrphanedActiveRun: true for stale run with specific summary and no agents", () => {
+test("isLikelyOrphanedActiveRun: true for stale run with no agents (structural, R48-N2)", () => {
 	const staleTime = Date.now() - 3 * 60 * 1000; // 3 minutes ago
 	const manifest = {
 		status: "running",
 		updatedAt: new Date(staleTime).toISOString(),
-		summary: "Creating workflow prompts and placeholder results.",
 	} as TeamRunManifest;
 	assert.equal(isLikelyOrphanedActiveRun(manifest, [], Date.now()), true);
 });
 
-test("isLikelyOrphanedActiveRun: false for stale run with no agents but different summary", () => {
+test("isLikelyOrphanedActiveRun: summary text is irrelevant to the verdict (R48-N2)", () => {
 	const staleTime = Date.now() - 3 * 60 * 1000;
-	const manifest = {
+	const magic = {
+		status: "running",
+		updatedAt: new Date(staleTime).toISOString(),
+		summary: "Creating workflow prompts and placeholder results.",
+	} as TeamRunManifest;
+	const other = {
 		status: "running",
 		updatedAt: new Date(staleTime).toISOString(),
 		summary: "Some other summary",
 	} as TeamRunManifest;
-	assert.equal(isLikelyOrphanedActiveRun(manifest, [], Date.now()), false);
+	assert.equal(isLikelyOrphanedActiveRun(magic, [], Date.now()), true);
+	assert.equal(isLikelyOrphanedActiveRun(other, [], Date.now()), true);
+});
+
+test("isLikelyOrphanedActiveRun: true for a stale run with a frozen running agent (R48-N2 blind spot)", () => {
+	const now = Date.now();
+	const staleTime = new Date(now - 20 * 60 * 1000).toISOString();
+	const manifest = { status: "running", updatedAt: staleTime } as TeamRunManifest;
+	const agents = [
+		{
+			id: "a1",
+			runId: "r",
+			taskId: "t1",
+			agent: "executor",
+			role: "executor",
+			runtime: "child-process" as const,
+			status: "running" as const,
+			startedAt: new Date(now - 25 * 60 * 1000).toISOString(),
+		},
+	];
+	assert.equal(isLikelyOrphanedActiveRun(manifest, agents, now), true);
+});
+
+test("isLikelyOrphanedActiveRun: false when a stale run's agent still reports recent activity", () => {
+	const now = Date.now();
+	const staleTime = new Date(now - 20 * 60 * 1000).toISOString();
+	const manifest = { status: "running", updatedAt: staleTime } as TeamRunManifest;
+	const agents = [
+		{
+			id: "a1",
+			runId: "r",
+			taskId: "t1",
+			agent: "executor",
+			role: "executor",
+			runtime: "child-process" as const,
+			status: "running" as const,
+			startedAt: staleTime,
+			progress: { recentTools: [], recentOutput: [], toolCount: 3, lastActivityAt: new Date(now - 30_000).toISOString() },
+		},
+	];
+	assert.equal(isLikelyOrphanedActiveRun(manifest, agents, now), false);
 });
 
 test("isLikelyOrphanedActiveRun: false for recently updated run", () => {

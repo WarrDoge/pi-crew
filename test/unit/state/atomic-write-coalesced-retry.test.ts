@@ -7,7 +7,9 @@
  * re-throw: the buffered write was silently dropped (surfaced during the
  * 2026-08-25 perf-round-2 final review as "dead retry path"). This suite
  * pins the fixed behavior: a failed flush RE-QUEUES the entry with backoff
- * and the retry lands the data; after MAX_FLUSH_RETRIES the error propagates.
+ * and the retry lands the data; after MAX_FLUSH_RETRIES the entry is DROPPED
+ * and the degradation is reported — never re-thrown (R39-M1, fix-wave 6: a
+ * rethrow from the coalesce timer used to kill the whole host process).
  */
 
 import assert from "node:assert/strict";

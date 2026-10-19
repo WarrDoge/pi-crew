@@ -62,11 +62,35 @@ export function isFinishedRunStatus(status: string): boolean {
 }
 
 /**
- * Secondary threshold: runs that have been "running" for more than this without
- * any active agents (all queued, no progress) are also considered orphaned.
- * This catches foreground team runs where the planner got stuck with 0 tool calls.
+ * R48-N2 (2026-10-19): window (ms) within which an agent's last recorded
+ * activity timestamp still proves its host process is alive. Mirrors the
+ * health-monitor's STUCK_TASK_THRESHOLD_MS (5 min).
  */
-const ORPHANED_NO_PROGRESS_MS = 5 * 60 * 1000;
+const AGENT_ACTIVITY_LIVENESS_MS = 5 * 60 * 1000;
+
+/** Agent statuses that are terminal — never count as liveness evidence. */
+const TERMINAL_AGENT_STATUSES = new Set<CrewAgentRecord["status"]>(["completed", "failed", "cancelled", "stopped"]);
+
+/** Latest recorded agent activity timestamp (ms epoch), or NaN when none. */
+function agentLatestActivityAt(agent: CrewAgentRecord): number {
+	const raw = agent.progress?.lastActivityAt;
+	if (!raw) return Number.NaN;
+	const parsed = new Date(raw).getTime();
+	return Number.isFinite(parsed) ? parsed : Number.NaN;
+}
+
+/**
+ * R48-N2: does this agent provide RECENT durable activity evidence that its
+ * host process is still alive? A frozen `running` agent that never wrote
+ * progress (the zombie-sync blind spot) returns false. Terminal agents are
+ * never evidence. Deliberately NOT based on `run.summary` — the legacy
+ * magic-summary gate is gone.
+ */
+export function hasRecentAgentActivityEvidence(agent: CrewAgentRecord, now = Date.now(), livenessMs = AGENT_ACTIVITY_LIVENESS_MS): boolean {
+	if (TERMINAL_AGENT_STATUSES.has(agent.status)) return false;
+	const at = agentLatestActivityAt(agent);
+	return Number.isFinite(at) && now - at < livenessMs;
+}
 
 export function isLikelyOrphanedActiveRun(
 	run: TeamRunManifest,
@@ -79,19 +103,17 @@ export function isLikelyOrphanedActiveRun(
 	const updatedAt = new Date(run.updatedAt).getTime();
 	if (!Number.isFinite(updatedAt)) return false;
 
-	// Primary check: run hasn't been updated in a while
+	// R48-N2: structural orphan test. A run whose manifest has not been updated
+	// within `staleMs` is orphaned UNLESS some agent still reports recent durable
+	// activity evidence — which proves the executing host is alive. This replaces
+	// the legacy magic-string summary gate plus the all-queued-only check, both of
+	// which were structurally blind:
+	//   * a FROZEN `running` agent (never queued) defeated both branches, and
+	//   * any 0-agent stale run whose summary happened not to match was ignored.
+	// The `summary` field is now irrelevant — the decision is purely structural.
 	if (now - updatedAt >= staleMs) {
-		if (agents.length === 0) return run.summary === "Creating workflow prompts and placeholder results.";
-		return agents.every((agent) => agent.status === "queued" && !agent.completedAt && !agent.progress);
-	}
-
-	// Secondary check: run has been running without any progress for too long
-	if (now - updatedAt >= ORPHANED_NO_PROGRESS_MS) {
-		// If no agent is "running" or has made progress, the run is likely stuck
-		const hasActiveAgent = agents.some((agent) => agent.status === "running" || agent.progress || agent.toolUses);
-		if (!hasActiveAgent && agents.length > 0) {
-			return true;
-		}
+		const livenessMs = Math.max(staleMs, AGENT_ACTIVITY_LIVENESS_MS);
+		return !agents.some((agent) => hasRecentAgentActivityEvidence(agent, now, livenessMs));
 	}
 
 	return false;
