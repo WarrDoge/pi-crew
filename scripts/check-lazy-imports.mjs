@@ -129,7 +129,10 @@ const BUDGETS = {
 		// crew-broker.ts for the wc-gate; it was previously type-only). The two
 		// wc-gate extractions (this + root-gate/settings-enum merges in the other
 		// direction) keep crew-broker.ts ≤ 2000 with pure moves, no new modules.
-		maxFiles: 528,
+		// Fix-wave 6 / M1-4 (2026-10-19): 528 → 529 — runtime/sanitize/worker-text.ts
+		// (generic fenceWorkerText helper for R38-C1/EP1; statically imported by
+		// api/read.ts — hot read path, must stay in the value graph).
+		maxFiles: 529,
 		forbid: ["test/", "scripts/", "docs/", "dist/"],
 	},
 };

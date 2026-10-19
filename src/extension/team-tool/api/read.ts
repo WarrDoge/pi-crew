@@ -15,6 +15,7 @@ import { agentOutputPath, readCrewAgentEventsCursor, readCrewAgentStatus, readCr
 import { readForegroundControlStatus, writeForegroundInterruptRequest } from "../../../runtime/foreground-control.ts";
 import { probeLiveSessionRuntime } from "../../../runtime/live-session/live-session-runtime.ts";
 import { resolveCrewRuntime } from "../../../runtime/model/runtime-resolver.ts";
+import { fenceWorkerText } from "../../../runtime/sanitize/worker-text.ts";
 import { readEvents, readEventsCursor } from "../../../state/event-log/event-log.ts";
 import { globMatch } from "../../../utils/glob-match.ts";
 import { resolveRealContainedPath } from "../../../utils/safe-paths.ts";
@@ -201,7 +202,11 @@ export const handleGetAgentResult: ApiOperationHandler = (hctx) => {
 			true,
 		);
 	const task = loaded.tasks.find((item) => item.id === agent.taskId);
-	const text = safeReadContainedFile(loaded.manifest.artifactsRoot, task?.resultArtifact?.path) ?? JSON.stringify(agent, null, 2);
+	const artifactText = safeReadContainedFile(loaded.manifest.artifactsRoot, task?.resultArtifact?.path);
+	// R38-C1 (EP1 seed): result-artifact bytes are worker-authored — fence them
+	// before they enter the privileged session. The no-artifact fallback (agent
+	// record JSON) is runtime-owned and stays unfenced.
+	const text = artifactText !== undefined ? fenceWorkerText(artifactText, { source: "agent-result" }) : JSON.stringify(agent, null, 2);
 	return result(text, {
 		action: "api",
 		status: "ok",
@@ -294,7 +299,9 @@ export const handleReadAgentTranscript: ApiOperationHandler = (hctx) => {
 	const fallbackText = artifactText ? "" : (safeReadContainedFile(loaded.manifest.stateRoot, fallbackPath) ?? "");
 	const transcriptPath = artifactText ? artifactTranscriptPath : fallbackPath;
 	const text = artifactText || fallbackText;
-	return result(text || `(no transcript at ${transcriptPath})`, {
+	// R38-C1 (EP1 seed): transcript/output.log bytes are worker-authored — fence
+	// them; the no-transcript fallback is runtime-owned and stays unfenced.
+	return result(text ? fenceWorkerText(text, { source: "agent-transcript" }) : `(no transcript at ${transcriptPath})`, {
 		action: "api",
 		status: "ok",
 		runId: loaded.manifest.runId,
@@ -403,7 +410,9 @@ export const handleDiff: ApiOperationHandler = (hctx) => {
 		const content = safeReadContainedFile(loaded.manifest.artifactsRoot, artifact.path);
 		if (content) {
 			const display = content.length > 4000 ? content.slice(0, 4000) + "\n... (truncated)" : content;
-			parts.push(`\n--- ${artifact.path} ---\n${display}`);
+			// R38-C1 (EP1 seed): diff/patch bytes are worker-authored — fence them
+			// per artifact (per-op fencing; headers stay runtime-owned).
+			parts.push(`\n--- ${artifact.path} ---\n${fenceWorkerText(display, { source: "diff" })}`);
 		}
 	}
 	return result(parts.join("\n"), {
