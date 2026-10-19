@@ -19,8 +19,8 @@ import type { TeamContext } from "../../../../src/extension/team-tool/context.ts
 import { assertRootOnlyAction, isRootSession, rootGateBlockReason } from "../../../../src/extension/team-tool/destructive-gate.ts";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { textFromToolResult } from "../../../../src/extension/tool-result.ts";
-import { userPiRoot } from "../../../../src/utils/paths.ts";
 import type { TeamToolParamsValue } from "../../../../src/schema/team-tool-schema.ts";
+import { userPiRoot } from "../../../../src/utils/paths.ts";
 
 const WORKER_ENV = { PI_CREW_KIND: "subagent", PI_CREW_DEPTH: "1" } as const;
 const ROOT_ENV = { PI_CREW_KIND: "", PI_CREW_DEPTH: "0" } as const;
@@ -135,16 +135,27 @@ describe("rootGateBlockReason (raw params resolution)", () => {
 		// is caller-controlled and must NOT bypass the root-gate.
 		assert.ok(rootGateBlockReason({ action: "workflow-create", confirm: true, config: { name: "pwn", script: "x" } }, WORKER_ENV));
 		assert.ok(
-			rootGateBlockReason({ action: "workflow-create", confirm: true, scope: "project", config: { name: "pwn", script: "x", scope: "project" } }, WORKER_ENV),
+			rootGateBlockReason(
+				{ action: "workflow-create", confirm: true, scope: "project", config: { name: "pwn", script: "x", scope: "project" } },
+				WORKER_ENV,
+			),
 		);
-		assert.ok(rootGateBlockReason({ action: "workflow-create", confirm: true, config: { name: "pwn", script: "x", scope: "user" } }, WORKER_ENV));
+		assert.ok(
+			rootGateBlockReason(
+				{ action: "workflow-create", confirm: true, config: { name: "pwn", script: "x", scope: "user" } },
+				WORKER_ENV,
+			),
+		);
 		assert.ok(rootGateBlockReason({ action: "workflow-save", confirm: true, config: { name: "pwn", script: "x" } }, WORKER_ENV));
 		assert.ok(rootGateBlockReason({ action: "workflow-delete", confirm: true, config: { name: "x" } }, WORKER_ENV));
 		// reads stay open
 		assert.equal(rootGateBlockReason({ action: "workflow-get", config: { name: "x" } }, WORKER_ENV), undefined);
 		assert.equal(rootGateBlockReason({ action: "workflow-list" }, WORKER_ENV), undefined);
 		// root session: allowed
-		assert.equal(rootGateBlockReason({ action: "workflow-create", confirm: true, config: { name: "pwn", script: "x" } }, ROOT_ENV), undefined);
+		assert.equal(
+			rootGateBlockReason({ action: "workflow-create", confirm: true, config: { name: "pwn", script: "x" } }, ROOT_ENV),
+			undefined,
+		);
 		assert.equal(rootGateBlockReason({ action: "workflow-delete", confirm: true, config: { name: "x" } }, ROOT_ENV), undefined);
 	});
 
@@ -154,9 +165,15 @@ describe("rootGateBlockReason (raw params resolution)", () => {
 		assert.ok(rootGateBlockReason({ action: "export", config: { runId: "team_x", scope: "user" } }, WORKER_ENV));
 		// project/default stay worker-reachable (mirrors handleImport's project default)
 		assert.equal(rootGateBlockReason({ action: "import", config: { path: "/tmp/b.json" } }, WORKER_ENV), undefined);
-		assert.equal(rootGateBlockReason({ action: "import", scope: "user", config: { path: "/tmp/b.json", scope: "project" } }, WORKER_ENV), undefined);
+		assert.equal(
+			rootGateBlockReason({ action: "import", scope: "user", config: { path: "/tmp/b.json", scope: "project" } }, WORKER_ENV),
+			undefined,
+		);
 		assert.equal(rootGateBlockReason({ action: "export", config: { runId: "team_x" } }, WORKER_ENV), undefined);
-		assert.equal(rootGateBlockReason({ action: "export", scope: "user", config: { runId: "team_x", scope: "project" } }, WORKER_ENV), undefined);
+		assert.equal(
+			rootGateBlockReason({ action: "export", scope: "user", config: { runId: "team_x", scope: "project" } }, WORKER_ENV),
+			undefined,
+		);
 		// root session: user scope allowed
 		assert.equal(rootGateBlockReason({ action: "import", config: { path: "/tmp/b.json", scope: "user" } }, ROOT_ENV), undefined);
 	});
@@ -167,22 +184,44 @@ describe("rootGateBlockReason (raw params resolution)", () => {
 		// create: carrier absent → user default (fail-closed; matches the handler)
 		assert.ok(rootGateBlockReason({ action: "create", scope: "project", config: { name: "evil" } }, WORKER_ENV));
 		// create: cfg "project" wins even when top-level says "user" → open (project-tier write)
-		assert.equal(rootGateBlockReason({ action: "create", scope: "user", config: { scope: "project", name: "ok" } }, WORKER_ENV), undefined);
-		// settings
-		assert.ok(rootGateBlockReason({ action: "settings", scope: "project", config: { args: "set broker.enabled true", scope: "user" } }, WORKER_ENV));
 		assert.equal(
-			rootGateBlockReason({ action: "settings", scope: "user", config: { args: "set broker.enabled true", scope: "project" } }, WORKER_ENV),
+			rootGateBlockReason({ action: "create", scope: "user", config: { scope: "project", name: "ok" } }, WORKER_ENV),
+			undefined,
+		);
+		// settings
+		assert.ok(
+			rootGateBlockReason(
+				{ action: "settings", scope: "project", config: { args: "set broker.enabled true", scope: "user" } },
+				WORKER_ENV,
+			),
+		);
+		assert.equal(
+			rootGateBlockReason(
+				{ action: "settings", scope: "user", config: { args: "set broker.enabled true", scope: "project" } },
+				WORKER_ENV,
+			),
 			undefined,
 		);
 		// config
-		assert.ok(rootGateBlockReason({ action: "config", scope: "project", config: { broker: { enabled: true }, scope: "user" } }, WORKER_ENV));
-		assert.equal(rootGateBlockReason({ action: "config", scope: "user", config: { broker: { enabled: true }, scope: "project" } }, WORKER_ENV), undefined);
+		assert.ok(
+			rootGateBlockReason({ action: "config", scope: "project", config: { broker: { enabled: true }, scope: "user" } }, WORKER_ENV),
+		);
+		assert.equal(
+			rootGateBlockReason({ action: "config", scope: "user", config: { broker: { enabled: true }, scope: "project" } }, WORKER_ENV),
+			undefined,
+		);
 		// update (facade scope is a pre-filter; management.ts gates the resolved resource's tier)
 		assert.ok(rootGateBlockReason({ action: "update", scope: "project", config: { scope: "user", name: "x" } }, WORKER_ENV));
-		assert.equal(rootGateBlockReason({ action: "update", scope: "user", config: { scope: "project", name: "x" } }, WORKER_ENV), undefined);
+		assert.equal(
+			rootGateBlockReason({ action: "update", scope: "user", config: { scope: "project", name: "x" } }, WORKER_ENV),
+			undefined,
+		);
 		// import (project default — only an explicit cfg "user" is gated)
 		assert.ok(rootGateBlockReason({ action: "import", scope: "project", config: { path: "x", scope: "user" } }, WORKER_ENV));
-		assert.equal(rootGateBlockReason({ action: "import", scope: "user", config: { path: "x", scope: "project" } }, WORKER_ENV), undefined);
+		assert.equal(
+			rootGateBlockReason({ action: "import", scope: "user", config: { path: "x", scope: "project" } }, WORKER_ENV),
+			undefined,
+		);
 	});
 });
 

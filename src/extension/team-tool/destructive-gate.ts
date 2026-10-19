@@ -155,7 +155,9 @@ export function assertRootOnlyAction(
 		new RootSessionRequiredError(
 			`root-session required: team action '${action}'${subcommand ? ` (${subcommand})` : ""} ${what}. ` +
 				"This session is a pi-crew worker (PI_CREW_KIND/subagent or depth>0); user-tier state persists beyond the task and is reserved for the user's root pi session. " +
-				(what.includes("project") ? "" : "Re-run with config: {scope: 'project'} for project-local effects, or from the root session."),
+				(what.includes("project")
+					? ""
+					: "Re-run with config: {scope: 'project'} for project-local effects, or from the root session."),
 		);
 	switch (action) {
 		case "schedule":
