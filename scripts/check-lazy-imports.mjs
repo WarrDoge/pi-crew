@@ -513,7 +513,11 @@ for (const [entry, budget] of Object.entries(BUDGETS)) {
 		);
 	}
 	for (const pattern of budget.forbid ?? []) {
-		const hit = graph.filter((f) => f.includes(pattern));
+		// R18-3 windows fix (wave-6 CI): graph paths come from path.relative() —
+		// backslashes on Windows — while forbid patterns are written with forward
+		// slashes ("test/"). Normalize before the substring match or the gate
+		// silently passes every forbidden edge on Windows.
+		const hit = graph.filter((f) => f.replaceAll("\\", "/").includes(pattern));
 		if (hit.length > 0) {
 			failures.push(`entry ${entry} must not reach ${pattern}:\n` + hit.map((f) => `    ${f}`).join("\n"));
 		}
