@@ -518,12 +518,15 @@ export function currentGeneration(eventsPath: string): number {
 
 /**
  * R-03: Atomically bump and persist the generation sidecar. Called by
- * `rotateEventLogUnlocked` after truncating the events file and by
- * `applyCompactionUnlocked` after rewriting it (EP4/R32-M1). Assumes the
+ * `rotateEventLogUnlocked` after truncating the events file, by
+ * `applyCompactionUnlocked` after rewriting it (EP4/R32-M1), and by
+ * `quarantinePoisonedEventsFile` after renaming the poisoned file away
+ * (EP4/FS10 residual, wave-6 M4-R2 — a rename is the same file-instance
+ * change at the SAME path, so byte-offset cursors must reset). Assumes the
  * caller already holds the event-log lock (or accepts the unlocked race).
  * Returns the new generation value.
  */
-function bumpGenerationUnlocked(eventsPath: string): number {
+export function bumpGenerationUnlocked(eventsPath: string): number {
 	const next = currentGeneration(eventsPath) + 1;
 	try {
 		atomicWriteFile(generationPath(eventsPath), String(next));

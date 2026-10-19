@@ -500,3 +500,43 @@ describe("handleSettings ui.* keys (M1-9)", () => {
 		});
 	});
 });
+
+// ─── R45-S1 (wave-6 M4-R2): getNested read-side inherited-member guard ────────
+// `get <key>` resolved INHERITED members because the walker had no own-property
+// check — `get __proto__.toString` walked Object.prototype and formatValue
+// printed the function source; `get constructor` returned Object. The write
+// path already refused dangerous segments (isDangerousPath in setNested); this
+// pins the read path's matching guard (Object.hasOwn at each hop).
+
+describe("handleSettings get — inherited-member guard (R45-S1)", () => {
+	it("does not resolve __proto__ / inherited Object.prototype members", () => {
+		const tmp = createTrackedTempDir("settings-inherited-");
+		try {
+			const proto = textFromToolResult(handleSettings(makeConfig("get __proto__.toString"), makeCtx(tmp)));
+			assert.ok(!proto.includes("native code"), `__proto__.toString must not leak the function source, got: ${proto}`);
+			assert.ok(proto.includes("__proto__.toString = <not set>"), `expected an unset value, got: ${proto}`);
+
+			const ctor = textFromToolResult(handleSettings(makeConfig("get constructor"), makeCtx(tmp)));
+			assert.ok(!ctor.includes("function Object"), `constructor must not resolve to Object, got: ${ctor}`);
+			assert.ok(ctor.includes("constructor = <not set>"), `expected an unset value, got: ${ctor}`);
+
+			const nested = textFromToolResult(handleSettings(makeConfig("get constructor.prototype.toString"), makeCtx(tmp)));
+			assert.ok(!nested.includes("native code"), `nested inherited hop must not leak, got: ${nested}`);
+		} finally {
+			removeTrackedTempDir(tmp);
+		}
+	});
+
+	it("control: a real OWN nested key still resolves", () => {
+		const tmp = createTrackedTempDir("settings-ownkey-");
+		try {
+			// `limits.maxConcurrentWorkers` is a real own key — the guard must not break
+			// legitimate reads (value comes from the loaded effective config or its default).
+			const text = textFromToolResult(handleSettings(makeConfig("get limits.maxConcurrentWorkers"), makeCtx(tmp)));
+			assert.match(text, /limits\.maxConcurrentWorkers = \d+/, `own key must still resolve, got: ${text}`);
+			assert.ok(!text.includes("<not set>"), `own key must not read as unset, got: ${text}`);
+		} finally {
+			removeTrackedTempDir(tmp);
+		}
+	});
+});

@@ -195,6 +195,14 @@ export function listLocales(): string[] {
 // --- Initialization ---
 
 export function initI18n(pi: ExtensionAPI): () => void {
+	// R49-F3 (pi-core census): the `pi-core/i18n/*` channels below are a PHANTOM
+	// protocol in pi 0.77 and 1.0.4 — the resolved api literal + dist contain ZERO
+	// emitters/consumers for `pi-core/i18n/registerBundle`, `.../localeChanged` and
+	// `.../requestApi`, so `pi.events.on(...)` never fires and the locale stays
+	// locked to the default (`currentLocale` stays undefined → English/built-in
+	// fallback via t()). Harmless today (no runtime callers rely on a non-default
+	// locale); kept as forward-compat shims. Re-check before wiring any locale
+	// switch to this path.
 	try {
 		pi.events?.emit?.("pi-core/i18n/registerBundle", {
 			namespace,

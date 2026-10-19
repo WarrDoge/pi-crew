@@ -193,9 +193,10 @@ export async function runTeamTask(input: TaskRunnerInput): Promise<{ manifest: T
 					},
 					metricRegistry: input.metricRegistry,
 				});
-				// Diagnostic event (task.verifier_pre_gate — U6B's event type; the
-				// TEAM_EVENT_TYPES registry entry stays report-only pending a
-				// src/state/** lane, same as classifier-pre-gate's own appends).
+				// Diagnostic event (task.verifier_pre_gate — U6B's event type; now REGISTERED
+				// in TEAM_EVENT_TYPES at src/state/contracts.ts:306, so the earlier
+				// "report-only pending a src/state/** lane" note is stale — checked clean
+				// by `check:event-types --enforce` in CI).
 				appendEventFireAndForget(manifest.eventsPath, {
 					type: "task.verifier_pre_gate",
 					runId: manifest.runId,

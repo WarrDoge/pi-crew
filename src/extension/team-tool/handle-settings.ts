@@ -61,7 +61,11 @@ const EFFECTIVE_DEFAULTS: Record<string, unknown> = {
 	"reliability.ambientStatusInjection": true,
 	"reliability.forcePreflight": false,
 	"reliability.scopeModels": false,
-	"telemetry.enabled": false,
+	// R45-F3: the real default is ON — observability installs the metric sink when
+	// `config.telemetry?.enabled !== false` (registration/observability.ts:109), so
+	// an unset key means enabled. This map only drives the "(default)" display;
+	// `false` here printed a wrong default for `team-settings get telemetry.enabled`.
+	"telemetry.enabled": true,
 	"notifications.enabled": false,
 };
 
@@ -88,10 +92,17 @@ function setNested(obj: Record<string, unknown>, path: string, value: unknown): 
 }
 
 function getNested(obj: Record<string, unknown>, path: string): unknown {
+	// R45-S1 read-side (wave-6 M4-R2): mirror the write path's guard. A raw
+	// dotted key resolves INHERITED members without an own-property check —
+	// `get __proto__.toString` / `get constructor` walk Object.prototype and the
+	// value is printed by formatValue (function source) and returned in the typed
+	// result. Refuse any hop the object does not OWN. (The write path already
+	// rejects dangerous segments via isDangerousPath in setNested.)
 	const keys = path.split(".");
 	let current: unknown = obj;
 	for (const key of keys) {
 		if (!current || typeof current !== "object") return undefined;
+		if (!Object.hasOwn(current, key)) return undefined;
 		current = (current as Record<string, unknown>)[key];
 	}
 	return current;
@@ -99,7 +110,12 @@ function getNested(obj: Record<string, unknown>, path: string): unknown {
 
 function formatValue(value: unknown, key?: string): string {
 	if (value === undefined || value === null) {
-		const def = key ? EFFECTIVE_DEFAULTS[key] : undefined;
+		// R45-S1 read-side (wave-6 M4-R2): `EFFECTIVE_DEFAULTS` is a plain object
+		// literal, so an unguarded `EFFECTIVE_DEFAULTS["constructor"]` resolves the
+		// INHERITED Object constructor and prints its source — the same
+		// inherited-member leak as the getNested walker (pinned by
+		// `get constructor`). Require an OWN entry.
+		const def = key && Object.hasOwn(EFFECTIVE_DEFAULTS, key) ? EFFECTIVE_DEFAULTS[key] : undefined;
 		if (def !== undefined) return `${String(def)} (default)`;
 		return "<not set>";
 	}

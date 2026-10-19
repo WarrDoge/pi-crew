@@ -43,11 +43,10 @@
  *     when a real classifier answer informed the decision (fallback paths are
  *     already counted by the service's calls_total and must not double-report
  *     a decision they did not make). Percentages derive from decisions_total.
- *     NOTE: `task.verifier_pre_gate` is NOT yet in TEAM_EVENT_TYPES
- *     (src/state/contracts.ts) — src/state/** is outside U6B's file
- *     ownership, so registration is deferred to the U13 mount commit (see
- *     MOUNT POINT below); scripts/check-event-types-registry.mjs runs
- *     report-only today.
+ *     NOTE (UPDATED fix-wave 6 / M4): `task.verifier_pre_gate` IS now in
+ *     TEAM_EVENT_TYPES (`src/state/contracts.ts:306`) — the U6B deferral is
+ *     resolved. `check:event-types` runs `--enforce` in CI (`.github/workflows/
+ *     ci.yml`); the local npm script is still report-only (R17-M1).
  *
  * Concurrency: the seam caps host classify at 4 parallel calls; each consumer
  * (retry-triage, ambient-noise gate, this pre-gate) issues at most ONE

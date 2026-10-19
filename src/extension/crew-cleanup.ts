@@ -79,6 +79,12 @@ export function registerCleanupHandler(pi: ExtensionAPI, opts?: { disposeTermina
 			// suppression; on REAL shutdowns (quit/reload) the flag is unset
 			// and this cleanup still drains the registry, as does the
 			// process-exit hook (tryRegisterSessionCleanup) when pi dies.
+			// R49-F6: this gate is a SWITCH FLAG (`isSessionSwitchInFlight()`), not the
+			// reason-aware gate used by lifecycle-handlers.ts:165-166. On a `reload` shutdown
+			// the flag can still read true (it is cleared on the next session_start), so
+			// this handler may skip a cleanup the reason-gate would have run — the
+			// process-exit hook (tryRegisterSessionCleanup) is the backstop. Divergence
+			// is deliberate (never kill workers on a navigational switch) but not obvious.
 			if (isSessionSwitchInFlight()) return;
 			// Kill all child-pi processes
 			await cleanupChildProcesses();

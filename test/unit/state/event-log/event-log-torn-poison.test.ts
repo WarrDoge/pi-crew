@@ -30,7 +30,12 @@ import {
 	readEventsWithIntegrity,
 	type TeamEvent,
 } from "../../../../src/state/event-log/event-log.ts";
-import { compactEventLog, generationPath, rotateEventLogUnlocked } from "../../../../src/state/event-log/event-log-rotation.ts";
+import {
+	compactEventLog,
+	currentGeneration,
+	generationPath,
+	rotateEventLogUnlocked,
+} from "../../../../src/state/event-log/event-log-rotation.ts";
 import { loadPoisonMarkers, poisonMarkerPath } from "../../../../src/state/event-log/poison-marker.ts";
 
 const POISON_LINE = '{"this is not valid json"\n';
@@ -251,6 +256,11 @@ test("cap: 1000 markers tolerated; the 1001st poisons the file into quarantine (
 		assert.equal(fs.existsSync(poisonMarkerPath(eventsPath)), false, "sidecar removed with the file");
 		const quarantined = fs.readdirSync(dir).filter((entry) => entry.startsWith("events.jsonl.corrupt-"));
 		assert.equal(quarantined.length, 1, "file preserved as <name>.corrupt-<ts> for diagnosis");
+		// EP4/FS10 residual (wave-6 M4-R2): the quarantine rename is a file-instance
+		// change at the SAME path, so the generation sidecar is bumped — a byte-offset
+		// cursor holding the old generation detects the change (cursor.ts:765 stale-gen
+		// check) and resets instead of resuming past the (now absent) file's offsets.
+		assert.equal(currentGeneration(eventsPath), 1, "quarantine bumps the .gen sidecar (stale cursor reset)");
 
 		// Subsequent reads stay safe and never throw.
 		const again = readEventsWithIntegrity(eventsPath);

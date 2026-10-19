@@ -3,7 +3,7 @@ import { applyAttentionState, formatActivityAge, resolveCrewControlConfig } from
 import { extractCommandTrace } from "../../runtime/command-trace.ts";
 import { readCrewAgents } from "../../runtime/crew-agent-records.ts";
 import { deadletterStatusLine } from "../../runtime/deadletter.ts";
-import { evaluateRunEffectiveness } from "../../runtime/effectiveness.ts";
+import { delegateCompletedTaskIdsFromEvents, evaluateRunEffectiveness } from "../../runtime/effectiveness.ts";
 import { computePhaseProgress } from "../../runtime/phase-progress.ts";
 import { checkProcessLiveness, isActiveRunStatus } from "../../runtime/process-status.ts";
 import { stripWorkerEscapes } from "../../runtime/sanitize/worker-text.ts";
@@ -253,6 +253,16 @@ export function handleStatus(params: TeamToolParamsValue, ctx: TeamContext): PiT
 		tasks,
 		executeWorkers: manifest.runtimeResolution?.kind !== "scaffold",
 		runtimeConfig: cfg.runtime,
+		// EP2 parity rider (wave-6 M4-R2): finalize-run passes the delegate.completed
+		// id set so a grandchild delegate task (real output delivered via the broker
+		// mailbox, no usage/transcript of its own) is NOT misread as no-observed-work.
+		// status omitted it, so the SAME run rendered a phantom `noObservedWork` row
+		// here while finalize counted it as work. `allEvents` is the bounded
+		// cursor/tail read above (not the full readEvents call finalize uses) —
+		// best-effort parity: a delegate.completed event that has already scrolled
+		// out of the tail window is not recoverable here, matching the reader's
+		// bounded contract.
+		delegateCompleted: delegateCompletedTaskIdsFromEvents(allEvents),
 	});
 	const noObservedWorkTasks = effectiveness.noObservedWorkTaskIds
 		.map((id) => tasks.find((task) => task.id === id))

@@ -897,8 +897,7 @@ export async function runLiveSessionTask(input: LiveSessionSpawnInput): Promise<
 		// tasks or the (now real) verdict consumer marks the evidence unverified
 		// and the green contract blocks the run (fail-closed — correct for real
 		// verifiers, wrong for the success mock).
-		const mockVerdictSuffix =
-			input.task.role === "verifier" ? "\nPASS: mock verifier — mock live-session success" : "";
+		const mockVerdictSuffix = input.task.role === "verifier" ? "\nPASS: mock verifier — mock live-session success" : "";
 		const mockText = `Mock live-session success for ${input.agent.name}${inherited}${mockVerdictSuffix}`;
 		const event = {
 			type: "message_end",

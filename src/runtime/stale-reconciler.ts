@@ -146,6 +146,14 @@ const STALE_ALIVE_PID_MS = 24 * 60 * 60 * 1000; // 24 hours
 const ACTIVE_EVIDENCE_TTL_MS = 5 * 60 * 1000;
 /** For no-PID runs, repair when ALL running tasks have heartbeat stale beyond this threshold. */
 const NO_PID_HEARTBEAT_STALE_MS = 5 * 60 * 1000; // 5 minutes — same as heartbeat-gradient deadMs
+/** EP3 residual (wave-6 M4-R2): how long an ALIVE pid may pin a task as healthy
+ * after its heartbeat/activity went stale. Mirrors process-status.ts
+ * STALE_ACTIVE_RUN_MS (30 min) — the same "PID is alive but the run is
+ * suspiciously old" horizon the async scanner already layers on the pid-only
+ * probe. Beyond it, an alive pid is treated as a RECYCLED/REPARENTED orphan
+ * (host SIGKILLed → worker reparents to PID 1 and keeps answering kill(0))
+ * instead of a healthy mid-turn worker, so the reaper can reclaim it. */
+const ALIVE_PID_TRUST_CAP_MS = 30 * 60 * 1000;
 
 /**
  * Phase 1: Check if a result file already exists for the run.
@@ -332,9 +340,16 @@ function isTaskHeartbeatStale(task: TeamTaskState, now: number): boolean {
 	// PID-liveness gate for exactly this ("alive → downgrade dead→stale"); the
 	// reconciler MUST apply the same gate before repairing, or it kills healthy
 	// runs at the 5-minute mark mid-turn. A truly dead pid still repairs as before.
+	//
+	// EP3 residual (wave-6 M4-R2): the alive-pid gate is CAPPED. A host SIGKILL
+	// reparents its worker to PID 1; the orphan keeps answering kill(pid,0), so
+	// the pre-fix gate pinned the task as healthy FOREVER and the reaper never
+	// ran (runtime-proven: still burning a slot at +40min). Past
+	// ALIVE_PID_TRUST_CAP_MS an alive pid is a recycled/reparented orphan, not a
+	// mid-turn worker — treat it as stale.
 	const taskPid = task.heartbeat?.pid ?? task.checkpoint?.childPid;
 	const pidAlive = taskPid ? checkProcessLiveness(taskPid).alive : false;
-	if (taskPid && pidAlive) return false;
+	if (taskPid && pidAlive && elapsed <= ALIVE_PID_TRUST_CAP_MS) return false;
 	if (getCrewEnv("PI_CREW_DEBUG_STALE") === "1") {
 		// F1 forensic (battery 2026-09-10): sidecar log of every STALE verdict so
 		// live repros can show exactly what the reconciler saw (pid present? alive?
