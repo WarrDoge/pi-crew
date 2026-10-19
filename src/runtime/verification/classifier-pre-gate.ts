@@ -53,6 +53,26 @@
  * (retry-triage, ambient-noise gate, this pre-gate) issues at most ONE
  * concurrent call, so the aggregate stays within the budget.
  *
+ * ── R47-V2 / M3-28 (fix-wave 6, 2026-10-19): NO PRODUCTION CALLER ──
+ * U13 did mount this pre-gate (verify-gate.ts), but only on the
+ * `verdict === "INCONCLUSIVE"` branch and with the literal gate verdict as
+ * input. The block path below requires {@link isPassShapedVerdict} — PASS
+ * vocabulary AND no failure vocabulary — which an "INCONCLUSIVE" label can
+ * never satisfy, so the mount could only ever produce
+ * `escalate_verdict_failed` (blockVerifier false), i.e. spend without a
+ * decision plus a misleading `classifier_*` spawn-reason label.
+ * M3-28 therefore REMOVED that mount call site; this module now has no
+ * production caller. The block branch is retained as the library contract a
+ * future mount can use, under the invariant it always had:
+ *   blockVerifier === true  ⇒  the input verdict was unambiguously pass-shaped
+ *                              and the classifier's score/confidence were
+ *                              decisive. A caller that cannot supply a
+ *                              pass-shaped verdict must NOT mount this gate —
+ *                              it cannot decide anything there.
+ * Consequence: `blocked` / `classifier_blocked` are unreachable in production
+ * until such a mount exists (pinned by
+ * test/unit/runtime/verification/verify-gate-classifier-census.test.ts).
+ *
  * ── MOUNT POINT (U13 lane — this module is intentionally NOT wired yet) ──
  * The verifier spawn path stays UNTOUCHED by U6B per lane ownership:
  *   - verification-gates.ts command-gate spawn logic: NOT modified here
@@ -121,7 +141,9 @@ const VERDICT_PASS_RE = /\b(pass(?:ed)?|green|succeed(?:ed)?|success(?:ful)?|ok|
 
 /** A verdict reaches the block path ONLY when unambiguously pass-shaped:
  *  matches PASS vocabulary AND carries no failure vocabulary. Explicit
- *  failures and ambiguous labels ("INCONCLUSIVE", blank) both escalate. */
+ *  failures and ambiguous labels ("INCONCLUSIVE", blank) both escalate.
+ *  R47-V2: this predicate is why the verdict a caller feeds in decides whether
+ *  the gate can block at all — see the module-header invariant. */
 function isPassShapedVerdict(verdict: string): boolean {
 	return VERDICT_PASS_RE.test(verdict) && !VERDICT_FAIL_RE.test(verdict);
 }

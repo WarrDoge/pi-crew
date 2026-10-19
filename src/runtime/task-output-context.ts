@@ -6,12 +6,14 @@ import { atomicWriteFile } from "../state/atomic-write.ts";
 import { writeArtifact } from "../state/stores/artifact-store.ts";
 import type { ArtifactDescriptor, TeamRunManifest, TeamTaskState } from "../state/types.ts";
 import { resolveRealContainedPath } from "../utils/safe-paths.ts";
-import { countTokens } from "../utils/token-counter.ts";
+import { effectiveTokenEstimate, estimateTokensForText } from "../utils/token-counter.ts";
 import type { WorkflowStep } from "../workflows/workflow-config.ts";
 import { applyCompactPipeline } from "./compaction/compact-pipeline.ts";
 import { ANSI_STRIP_STAGE, BLANK_COLLAPSE_STAGE, TruncationStage } from "./compaction/compact-stages/index.ts";
 import { splitWithImportantLines } from "./compaction/important-line-classifier.ts";
 import { DEFAULT_PRUNE_CONFIG, type FileEditEvent, pruneToolOutputs, type ToolResultEntry } from "./compaction/tool-output-pruner.ts";
+import { stripWorkerEscapes } from "./sanitize/worker-text.ts";
+import { sanitizeTaskText } from "./task-packet.ts";
 
 export interface DependencyContextEntry {
 	taskId: string;
@@ -572,6 +574,46 @@ function sanitizeFencedBody(body: string): string {
 	return body.replace(DEPENDENCY_CONTROL_CHAR_PATTERN, "").replace(/<\/dependency-context/g, "&lt;/dependency-context");
 }
 
+/**
+ * M3-1 (R47-2/V3, fix-wave 6): the SEC-4 scrub applied to worker-authored
+ * dependency output at the PROMPT SEAM (`prompt-builder.ts`
+ * `renderDependencyContextBlock`), i.e. the single choke point every
+ * `<dependency-context>` block passes through on its way into a worker prompt.
+ *
+ * Why a seam scrub on top of {@link sanitizeFencedBody}:
+ *  - `sanitizeFencedBody` only runs on the RENDER path
+ *    (`renderDependencyOutputContext`), so a leader-supplied
+ *    `input.dependencyContextText` override (`pre-execution.ts`, documented
+ *    "passes through unchanged") reached the prompt completely raw; and even
+ *    on the render path it only neutralized the CLOSING tag, leaving the
+ *    opening tag, escape sequences and directive lines intact.
+ *  - The consumer is not a human: dependency output lands in the prompt of the
+ *    NEXT worker, which for verifier-role tasks is bash-capable and
+ *    write-privileged (`role-permission.ts` WRITE_ROLES). Fence-escape and
+ *    instruction smuggling there is a trust-boundary break, not cosmetics.
+ *
+ * Transforms (order matters):
+ *  1. `stripWorkerEscapes` — remove ANSI/OSC/DCS/CSI sequences, bare ESC and
+ *     C0/C1 controls (including CR) so nothing can rewrite terminal state and
+ *     so the line-anchored passes below see real line boundaries.
+ *  2. `sanitizeTaskText` — the SEC-4 directive/injection scrub the task text
+ *     already goes through (task-packet.ts): strips SYSTEM/INSTRUCTION/OVERRIDE
+ *     style directives, bracketed directives, encoded payloads and hidden
+ *     comment/script blocks.
+ *  3. Neutralize BOTH fence tags. The reading worker's parser (and any human
+ *     reader) must see exactly one `<dependency-context>` opener and one
+ *     closer, both authored by us: a smuggled closer could end the DATA block
+ *     early, a smuggled opener could nest a second block.
+ *
+ * Idempotent on already-scrubbed input (the render path's output re-enters here
+ * unchanged), so double application is safe.
+ */
+export function scrubDependencyContextBody(body: string): string {
+	const escaped = stripWorkerEscapes(body);
+	const deDirectived = sanitizeTaskText(escaped);
+	return deDirectived.replace(/<(\/?)dependency-context/g, "&lt;$1dependency-context");
+}
+
 // ── Handoff budget (effective-token cap on this layer: countTokens — ──
 // CJK-aware, in-tree utils/token-counter.ts — anchored upward by measured
 // worker usage, U10) ───────────────────────────────────────────────────────
@@ -628,17 +670,22 @@ function measuredHandoffTokens(context: DependencyOutputContext): number {
 }
 
 /** Measure a candidate context in EFFECTIVE tokens (U10): the
- *  `countTokens` heuristic on the rendered body (R5-7, DR-02: CJK-aware —
- *  replaces the chars/4 estimate that under-counted CJK summaries ~2-3x),
- *  floored by the measured-token anchor — `max(heuristic, Σ measured output
- *  tokens of full-form deps)`, mirroring the render byte-for-byte (same parts
- *  builder; `.trim()` matches the render join). The max rule mirrors
- *  `estimateTokens(chars, measuredTokens)` in prompt-builder.ts: a real
- *  measurement can only TIGHTEN the estimate (spec U10 — the budget must
- *  never be exceeded when measured usage is larger than the heuristic),
- *  never loosen it below the heuristic. */
+ *  {@link estimateTokensForText} heuristic on the rendered body (R5-7, DR-02:
+ *  CJK-aware — replaces the chars/4 estimate that under-counted CJK summaries
+ *  ~2-3x), floored by the measured-token anchor — `max(heuristic, Σ measured
+ *  output tokens of full-form deps)`, mirroring the render byte-for-byte (same
+ *  parts builder; `.trim()` matches the render join).
+ *
+ *  M3-10 / R34: the anchor rule is `effectiveTokenEstimate` in
+ *  src/utils/token-counter.ts — the SAME helper prompt-builder.ts's
+ *  `estimateTokens` composes, so both budget surfaces share one denominator
+ *  and one unit (TOKENS). The previous hand-copied `Math.max(...)` mirror here
+ *  is gone. */
 function measureHandoffTokens(context: DependencyOutputContext): number {
-	return Math.max(countTokens(buildDependencyOutputBodyParts(context).join("\n").trim()), measuredHandoffTokens(context));
+	return effectiveTokenEstimate(
+		estimateTokensForText(buildDependencyOutputBodyParts(context).join("\n").trim()),
+		measuredHandoffTokens(context),
+	);
 }
 
 /** Budget active iff it is a positive finite number at or below the ceiling;

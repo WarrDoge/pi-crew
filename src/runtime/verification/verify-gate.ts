@@ -70,7 +70,6 @@ import * as fs from "node:fs";
 import { getCrewEnvBool, getCrewEnvInt } from "../../config/env-vars.ts";
 import type { MetricRegistry } from "../../observability/metric-registry.ts";
 import type { VerifierPreGateResult } from "./classifier-pre-gate.ts";
-import { classifyVerifierPreGate } from "./classifier-pre-gate.ts";
 import { executeCommand } from "./verification-gates.ts";
 // Static edge is graph-free: verification-integrity.ts is already in the
 // index.bundle value-import graph (goal.ts/goal-wrap.ts/goal-loop-runner.ts
@@ -505,7 +504,10 @@ export interface VerifierGatePreGateInput {
 	hostSpec?: VerifyGateHostSpec;
 	signal?: AbortSignal;
 	timeoutMs?: number;
-	/** U6B classifier layer args — consulted ONLY on INCONCLUSIVE. */
+	/** @deprecated M3-28 (R47-V2): NEVER consulted — the gate's structured verdict
+	 *  can never be pass-shaped, so the U6B classifier could only ever escalate
+	 *  (see the call-site note in {@link runVerifierGatePreGate}). Kept only so the
+	 *  task-runner dispatch call site still type-checks; delete together with it. */
 	classifier?: {
 		enabled: boolean;
 		modelRegistry: unknown;
@@ -625,27 +627,24 @@ export async function runVerifierGatePreGate(input: VerifierGatePreGateInput): P
 			};
 		}
 	}
-	let preGate: VerifierPreGateResult | undefined;
-	if (outcome.verdict === "INCONCLUSIVE" && input.classifier?.enabled) {
-		try {
-			preGate = await classifyVerifierPreGate({
-				enabled: true,
-				modelRegistry: input.classifier.modelRegistry,
-				classifierModel: input.classifier.classifierModel,
-				verdict: {
-					verdict: outcome.verdict,
-					evidenceLines: outcome.evidenceLines,
-					changedFiles: [],
-				},
-				eventsPath: input.classifier.eventsPath,
-				runId: input.classifier.runId,
-				...(input.classifier.taskId !== undefined ? { taskId: input.classifier.taskId } : {}),
-				metricRegistry: input.metricRegistry,
-			});
-		} catch {
-			preGate = undefined; // soft: escalate to the LLM verifier
-		}
-	}
+	// ── M3-28 (R47-V2, fix-wave 6): the U6B classifier layer is NOT consulted ──
+	// The consult used to live here, guarded by `outcome.verdict === "INCONCLUSIVE"`
+	// and fed the literal gate verdict. That input can never be pass-shaped:
+	// `classifyVerifierPreGate` blocks only when `isPassShapedVerdict(...)` is true
+	// (classifier-pre-gate.ts — PASS vocabulary AND no failure vocabulary), and
+	// "INCONCLUSIVE" matches the failure vocabulary (…conclusive → no PASS match
+	// at all), so `action` was ALWAYS escalate_verdict_failed ⇒ blockVerifier
+	// false ⇒ the same spawn decision the no-classifier branch yields. Net effect
+	// of the consult: one model call, one task.verifier_pre_gate event and one
+	// decisions_total counter for a decision that could never differ.
+	// Wiring it "for real" is not possible from here: a state that says
+	// INCONCLUSIVE cannot be conclusive evidence of a pass, so there is nothing
+	// for the classifier to legitimately block on. Removed (spend without a
+	// decision, plus a misleading `classifier_*` reason label).
+	// `input.classifier` stays on the interface (deprecated) because the dispatch
+	// call site in task-runner.ts passes it; removing the field is a follow-up
+	// that must land with that call site.
+	const preGate: VerifierPreGateResult | undefined = undefined;
 	const decision = resolveVerifierSpawnDecision(outcome, preGate);
 	incMetric(input.metricRegistry, "crew.verification.verify_gate_runs_total", "Deterministic verify_gate executions by verdict", {
 		verdict: outcome.verdict,

@@ -119,6 +119,70 @@ export interface TaskExecutionResult {
 /** Result-artifact provenance tags (see {@link TaskExecutionResult.resultSource}). */
 export type ResultSource = "rawFinalText" | "finalText" | "session" | "stdout" | "stderr" | "findings" | "none";
 
+/** Verifier verdict as read from the worker's own result text. */
+export type VerifierVerdict = "pass" | "fail" | "none";
+
+/**
+ * Verdict line shape of the verifier output contract
+ * (`live-session-runtime.ts` buildOutputContract → "PASS: <what verified> —
+ * <evidence>" / "FAIL: <what failed> — <reason>"). Tolerates the markdown
+ * decorations real workers emit (`**PASS:**`, `- FAIL:`, `> PASS:`,
+ * `` `PASS:` ``, `# PASS:`), but only at line start — a bare mention of the
+ * word inside prose does NOT count, and the colon is REQUIRED (the contract
+ * has one; a colon-less "PASS" is prose, not a verdict).
+ */
+const VERIFIER_VERDICT_LINE = /^[\s*_>#`=-]*(PASS|FAIL)\s*:/i;
+
+/**
+ * M3-2 (R47-3/V4, fix-wave 6): read the verifier verdict out of the
+ * authoritative result sources.
+ *
+ * Before the fix the `^(PASS:|FAIL:)` pattern existed ONLY in
+ * `output-validator.ts`, OR'd with `MARKDOWN_STRUCTURED` — it answered "is some
+ * contract format present?", never "which verdict?", and a `FAIL:` result
+ * completed the task green. This is the semantic reader the terminal state
+ * consults.
+ *
+ * Precedence (fail-closed):
+ *  - ANY `FAIL:` line wins, even next to a `PASS:` line (a contradictory
+ *    verdict is not a pass; a verifier that reports a failure must never be
+ *    rubber-stamped).
+ *  - Otherwise ≥1 `PASS:` line ⇒ "pass".
+ *  - No verdict line in ANY source ⇒ "none" (not verified — the caller
+ *    downgrades self-attested evidence, it does NOT fail the task: a verifier
+ *    that delivered a substantive report without the magic line made a
+ *    reporting error, not a verification failure).
+ *
+ * Sources are scanned in priority order (raw pre-compaction finalText → parsed
+ * finalText → stdout) and the first source carrying a verdict decides, so a
+ * compaction-truncated tail cannot lose the verdict line.
+ */
+export function extractVerifierVerdict(...sources: Array<string | undefined>): VerifierVerdict {
+	for (const source of sources) {
+		if (!source) continue;
+		let sawPass = false;
+		for (const line of source.split("\n")) {
+			const match = VERIFIER_VERDICT_LINE.exec(line);
+			if (!match) continue;
+			if (match[1]?.toUpperCase() === "FAIL") return "fail";
+			sawPass = true;
+		}
+		if (sawPass) return "pass";
+	}
+	return "none";
+}
+
+/** First verdict line of a source set — the failure-cause excerpt. */
+function firstVerdictLine(...sources: Array<string | undefined>): string {
+	for (const source of sources) {
+		if (!source) continue;
+		for (const line of source.split("\n")) {
+			if (VERIFIER_VERDICT_LINE.test(line)) return line.trim().slice(0, 300);
+		}
+	}
+	return "";
+}
+
 /** Final persisted task state returned by finalizeTaskResult. */
 export interface FinalTaskResult {
 	manifest: TeamRunManifest;
@@ -433,6 +497,61 @@ export async function finalizeTaskResult(ctx: TaskExecutionContext, execResult: 
 		}
 	}
 
+	// ─── M3-2 (R47-3/V4, fix-wave 6): the PASS:/FAIL: verdict is a REAL consumer ───
+	// Before this block NOTHING read the verdict: the terminal status came from
+	// `error`/`noYield` alone, so a verifier that answered "FAIL: <red tests>"
+	// ended `completed` and the run could close out green on it. The ruling is
+	// two-sided and fail-closed:
+	//   FAIL → hard-fail the task now (error marker + exitCode bump + last model
+	//          attempt success:false — the same precedent as the
+	//          empty/stderr-only gate above), so retry/escalate policy sees it;
+	//   PASS → required before the task's self-attested evidence counts as
+	//          VERIFIED (evidence ruling right after the evidence computation
+	//          below); a missing verdict is "not verified", never a failure.
+	// Excluded: the deterministic gate-skip path (task-runner.ts skip branch
+	// terminalises the verifier task itself with the GATE's summary as stdout and
+	// stamps diagnostics.verifyGate + synthetic — the deterministic gate already
+	// verified, there is no LLM verdict to read) and scaffold mode (no worker).
+	const verifierVerdictApplies =
+		task.role === "verifier" &&
+		runtimeKind !== "scaffold" &&
+		task.diagnostics?.verifyGate === undefined &&
+		task.diagnostics?.synthetic !== true;
+	const verifierVerdict: VerifierVerdict = verifierVerdictApplies
+		? extractVerifierVerdict(rawFinalText, parsedOutput?.finalText, finalStdout)
+		: "none";
+	if (!error && verifierVerdictApplies && verifierVerdict === "fail") {
+		const verdictLine = firstVerdictLine(rawFinalText, parsedOutput?.finalText, finalStdout);
+		error = `Verifier verdict FAIL (failureCause: verifier-verdict-fail): ${verdictLine}`;
+		exitCode = exitCode === 0 ? 1 : exitCode;
+		if (modelAttempts?.length) {
+			modelAttempts = modelAttempts.map((attempt, index) =>
+				index === modelAttempts!.length - 1 ? { ...attempt, success: false, exitCode, error } : attempt,
+			);
+		}
+		outputValidation = {
+			valid: false,
+			formatMatch: true,
+			structurePreserved: true,
+			issues: [`verifier-verdict-fail: ${verdictLine}`],
+		};
+		await appendEventAsync(manifest.eventsPath, {
+			type: "task.output_validation",
+			runId: manifest.runId,
+			taskId: task.id,
+			message: "Verifier verdict FAIL — task failed instead of completing green",
+			data: {
+				valid: false,
+				formatMatch: true,
+				structurePreserved: true,
+				issues: outputValidation.issues,
+				failureCause: "verifier-verdict-fail",
+				verdict: "FAIL",
+				verdictLine,
+			},
+		});
+	}
+
 	// --- ECC VERIFICATION_LOOP: Compute verification evidence before building task object ---
 	// Compute verification evidence (may be async if verification commands need to run)
 	const baseEvidence = createVerificationEvidence(
@@ -515,6 +634,31 @@ export async function finalizeTaskResult(ctx: TaskExecutionContext, execResult: 
 					notes: `Verification execution failed (fail-closed): ${message}`,
 				};
 			}
+		}
+	}
+
+	// ─── M3-2 (R47-3/V4): PASS required for VERIFIED ───
+	// Command-backed evidence stands on its own (a verifier task whose contract
+	// declares real commands is verified by their exit codes). Without commands
+	// the evidence is SELF-ATTESTED, and self-attestation of a verifier task is
+	// now gated on its own verdict line:
+	//   PASS           → satisfied, note stamped (the verdict was consumed);
+	//   missing/none   → observedGreenLevel "none" + satisfied:false, so
+	//                    policy-engine (evaluateGreenContract → green_unsatisfied)
+	//                    blocks the run instead of closing it green.
+	if (verifierVerdictApplies && !error && taskPacket.verification) {
+		const commandBacked = verificationEvidence.commands.some((command) => command.status === "passed");
+		if (!commandBacked) {
+			const notes = verificationEvidence.notes ?? "";
+			verificationEvidence =
+				verifierVerdict === "pass"
+					? { ...verificationEvidence, satisfied: true, notes: `${notes} — verifier verdict: PASS`.trim() }
+					: {
+							...verificationEvidence,
+							satisfied: false,
+							observedGreenLevel: "none",
+							notes: `${notes} — not verified: verifier output carries no PASS:/FAIL: verdict line`.trim(),
+						};
 		}
 	}
 
