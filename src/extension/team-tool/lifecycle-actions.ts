@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { removeGuidance } from "../../config/markers.ts";
 import { appendHookEvent, executeHook } from "../../hooks/registry.ts";
+import { abortRunDelegates } from "../../runtime/broker/delegate/delegate-abort.ts";
 import { killProcessPid } from "../../runtime/child-pi/child-pi.ts";
 import { terminateLiveAgentsForRun } from "../../runtime/live-session/live-agent-manager.ts";
 import type { TeamToolParamsValue } from "../../schema/team-tool-schema.ts";
@@ -315,6 +316,12 @@ export async function handleForget(params: TeamToolParamsValue, ctx: TeamContext
 	// Without this, forgetting a running run orphans those processes (separate
 	// process groups via setsid) which keep executing and consuming tokens after
 	// their state directory is gone. Mirrors handleCancel's cleanup.
+	// M4-R1(c) (fix-wave 6 residual, M3-A / R43-N3): the in-flight DELEGATE
+	// grandchildren too — they live in the broker's abort registry (own
+	// process-local lifetime) and would otherwise keep spending against a state
+	// directory this call is about to delete. Must run before the fs.rmSync
+	// calls below. Sync + never throws (0 when no broker aborter is installed).
+	abortRunDelegates(loaded.manifest.runId, "run-forgotten");
 	await terminateLiveAgentsForRun(loaded.manifest.runId, "cancelled", appendEvent, loaded.manifest.eventsPath);
 	const asyncPid = loaded.manifest.async?.pid;
 	if (asyncPid !== undefined && asyncPid > 0) {

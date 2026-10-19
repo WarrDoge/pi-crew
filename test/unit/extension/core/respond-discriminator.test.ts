@@ -11,6 +11,7 @@ import { sweepExpiredWaitingTasks } from "../../../../src/runtime/dispatch-batch
 import type { WorkerHeartbeatState } from "../../../../src/runtime/heartbeat/worker-heartbeat.ts";
 import { clearLiveAgentsForTest, registerLiveAgent } from "../../../../src/runtime/live-session/live-agent-manager.ts";
 import { checkProcessLiveness } from "../../../../src/runtime/process-status.ts";
+import { isWaitAnswerPending } from "../../../../src/runtime/stale-reconciler.ts";
 import { readMailbox } from "../../../../src/state/coordination/mailbox.ts";
 import type { TeamEvent } from "../../../../src/state/event-log/event-log.ts";
 import { loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
@@ -366,6 +367,112 @@ test("scheduler deadline owner: expired deadline + alive worker → task stays w
 		const eventsText = fs.readFileSync(loaded.manifest.eventsPath, "utf-8");
 		assert.ok(eventsText.includes('"ask.timedout"'));
 		assert.ok(eventsText.includes('"workerAlive":true'));
+	} finally {
+		teardown(fixture.cwd);
+	}
+});
+
+// ----------------------------------------------------------------------------
+// M4-R1(b) (fix-wave 6 residual, same class as M3-6): the sibling waitState
+// writers used to CLEAR the single run-level slot when the park they ended
+// owned it — dropping the shield of a THIRD task that was still parked
+// (`isWaitAnswerPending` reads only manifest.waitState). Both now re-point at
+// the surviving park and clear only when no park is left.
+// ----------------------------------------------------------------------------
+
+/** Park a second task in the same run (dead worker) and point the run-level
+ *  slot at `slotTaskId`. Returns the second fixture's task/question ids. */
+function parkSecondTask(
+	fixture: ParkedFixture,
+	slotTaskId: string,
+	slotQuestionId: string,
+	slotDeadlineMs: number,
+): { taskId: string; questionId: string } {
+	const loaded = loadRunManifestById(fixture.cwd, fixture.runId)!;
+	const other = loaded.tasks.find((t) => t.id !== fixture.taskId)!;
+	const questionId = randomUUID();
+	saveRunTasks(
+		loaded.manifest,
+		loaded.tasks.map((t) =>
+			t.id === other.id
+				? {
+						...t,
+						status: "waiting" as const,
+						heartbeat: heartbeatAt(other.id, 10 * 60_000, false),
+						waiting: { questionId, askedAt: new Date().toISOString(), deadline: Date.now() + 3_600_000 },
+					}
+				: t,
+		),
+	);
+	saveRunManifest(
+		{
+			...loaded.manifest,
+			status: "running",
+			waitState: {
+				taskId: slotTaskId,
+				questionId: slotQuestionId,
+				askedAt: new Date().toISOString(),
+				deadline: Date.now() + slotDeadlineMs,
+			},
+		},
+		{ allowTerminalExit: true },
+	);
+	return { taskId: other.id, questionId };
+}
+
+test("respond discriminator: requeuing the slot's park RE-POINTS waitState at a surviving park (M4-R1b)", async () => {
+	clearLiveAgentsForTest();
+	const fixture = await createParkedRun(heartbeatAt("t", 10 * 60_000, false), 60_000);
+	try {
+		// The run-level slot points at the park we are about to requeue; a second
+		// dead park survives it and must keep its stale-repair shield.
+		const survivor = parkSecondTask(fixture, fixture.taskId, fixture.questionId, 60_000);
+
+		const responded = await handleTeamTool(
+			{ action: "respond", runId: fixture.runId, taskId: fixture.taskId, message: "answer for A" },
+			{ cwd: fixture.cwd },
+		);
+		assert.equal(responded.isError, false, textFromToolResult(responded));
+
+		const after = loadRunManifestById(fixture.cwd, fixture.runId)!;
+		assert.equal(after.tasks.find((t) => t.id === fixture.taskId)?.status, "queued", "the slot's park was requeued (DEAD branch)");
+		assert.equal(after.tasks.find((t) => t.id === survivor.taskId)?.status, "waiting", "the second park is untouched");
+		// Pre-fix: waitState was CLEARED here → the survivor lost its shield.
+		assert.equal(after.manifest.waitState?.taskId, survivor.taskId, "waitState re-pointed at the surviving park (M4-R1b)");
+		assert.equal(after.manifest.waitState?.questionId, survivor.questionId);
+		assert.equal(isWaitAnswerPending(after.manifest), true, "the surviving park keeps its stale-repair shield");
+
+		// The LAST park being requeued still clears the slot for real.
+		const second = await handleTeamTool(
+			{ action: "respond", runId: fixture.runId, taskId: survivor.taskId, message: "answer for B" },
+			{ cwd: fixture.cwd },
+		);
+		assert.equal(second.isError, false, textFromToolResult(second));
+		const last = loadRunManifestById(fixture.cwd, fixture.runId)!;
+		assert.equal(last.manifest.waitState, undefined, "no park left → slot cleared");
+		assert.equal(isWaitAnswerPending(last.manifest), false);
+	} finally {
+		teardown(fixture.cwd);
+	}
+});
+
+test("scheduler deadline owner: ask-timeout requeue RE-POINTS waitState at a surviving park (M4-R1b)", async () => {
+	clearLiveAgentsForTest();
+	// The slot owner's deadline already expired; the second park is still live.
+	const fixture = await createParkedRun(heartbeatAt("t", 10 * 60_000, false), -1_000);
+	try {
+		const survivor = parkSecondTask(fixture, fixture.taskId, fixture.questionId, -1_000);
+
+		const sweep = await sweepExpiredWaitingTasks(fixture.cwd, fixture.runId);
+		assert.ok(sweep, "expired park must produce a sweep result");
+		assert.deepEqual(sweep.requeuedTaskIds, [fixture.taskId], "only the expired park is requeued");
+
+		const after = loadRunManifestById(fixture.cwd, fixture.runId)!;
+		assert.equal(after.tasks.find((t) => t.id === survivor.taskId)?.status, "waiting", "the live park is untouched");
+		// Pre-fix: waitState was CLEARED here → the survivor lost its shield.
+		assert.equal(after.manifest.waitState?.taskId, survivor.taskId, "waitState re-pointed at the still-parked task (M4-R1b)");
+		assert.equal(after.manifest.waitState?.questionId, survivor.questionId);
+		assert.equal(isWaitAnswerPending(after.manifest), true, "the surviving park keeps its shield");
 	} finally {
 		teardown(fixture.cwd);
 	}

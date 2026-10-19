@@ -1834,10 +1834,31 @@ export class CrewBroker {
 						}
 					: t,
 			);
+			// M4-R1(a) (fix-wave 6 residual, M3-C): `waitState` is a SINGLE
+			// run-level slot and `isWaitAnswerPending` (stale-reconciler) reads
+			// ONLY it — that slot is the shield keeping a parked (deliberately
+			// non-heartbeating) worker from being stale-reaped / orphan-cancelled.
+			// Overwriting it unconditionally with the NEWER park SHORTENED the
+			// shield whenever the new park asked for a shorter timeout (the
+			// clamp allows 1s..1h), so an older, longer park could lose its
+			// protection while still awaiting an answer. Same invariant as
+			// wait.resolve's repointedWaitState: the slot follows the park with
+			// the LATEST deadline — a park never shortens a live shield (living
+			// slightly long only delays repair, the fail-safe direction).
+			const currentSlot = fresh.manifest.waitState;
+			const currentOwner = currentSlot === undefined ? undefined : fresh.tasks.find((t) => t.id === currentSlot.taskId);
+			const keepCurrentSlot =
+				currentSlot !== undefined &&
+				typeof currentSlot.deadline === "number" &&
+				currentSlot.deadline > deadline &&
+				currentSlot.taskId !== taskId &&
+				currentOwner?.status === "waiting" &&
+				currentOwner.waiting?.questionId === currentSlot.questionId;
 			const updatedManifest = {
 				...fresh.manifest,
 				// manifest.status stays "running" — park NEVER flips run status (ADR item 3).
-				waitState: { taskId, questionId, askedAt, deadline }, // R2-M-A2: mirror task.waiting.deadline for shield expiry
+				// R2-M-A2: mirror task.waiting.deadline for shield expiry.
+				waitState: keepCurrentSlot ? currentSlot : { taskId, questionId, askedAt, deadline },
 				updatedAt: askedAt,
 			};
 			saveRunTasks(updatedManifest, updatedTasks);

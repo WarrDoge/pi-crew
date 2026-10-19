@@ -42,19 +42,27 @@ import { recordWaitPolicyRejection } from "./wait-auth.ts";
  * re-open the same window; living slightly long only delays repair — the
  * fail-safe direction the rest of this module already takes). A slot that
  * belongs to a DIFFERENT (newer) park is left untouched, exactly as before.
+ *
+ * M4-R1(b) (fix-wave 6 residual, same class as M3-6): the identical
+ * clear-not-repoint bug lived in the SIBLING slot writers — respond.ts's
+ * requeue path (respond.ts:250-251) and dispatch-batch.ts's ask-timeout
+ * requeue (:198-199). Both scoped the CLEAR by taskId (WP-2 round-1 P3), but
+ * when the ended park owned the slot and a THIRD task was still parked they
+ * dropped the slot, re-opening the un-shielded window M3-6 had closed for
+ * wait.resolve. The helper is exported (predicate form, so the sibling writers
+ * can pass their requeued-id SET) and reused verbatim there.
  */
-function repointedWaitState(
+export function repointWaitState(
 	tasks: TeamTaskState[],
 	current: TeamRunManifest["waitState"],
-	endedTaskId: string,
-	endedQuestionId: string,
+	isEnded: (taskId: string, questionId: string) => boolean,
 ): TeamRunManifest["waitState"] {
 	if (current === undefined) return undefined;
-	if (current.taskId !== endedTaskId || current.questionId !== endedQuestionId) return current;
+	if (!isEnded(current.taskId, current.questionId)) return current;
 	let next: TeamTaskState | undefined;
 	for (const task of tasks) {
-		if (task.id === endedTaskId) continue;
 		if (task.status !== "waiting" || task.waiting === undefined) continue;
+		if (isEnded(task.id, task.waiting.questionId)) continue;
 		if (next === undefined || task.waiting.deadline > (next.waiting?.deadline ?? 0)) next = task;
 	}
 	if (next?.waiting === undefined) return undefined;
@@ -64,6 +72,16 @@ function repointedWaitState(
 		askedAt: next.waiting.askedAt,
 		deadline: next.waiting.deadline,
 	};
+}
+
+/** wait.resolve's single-park view of {@link repointWaitState}. */
+function repointedWaitState(
+	tasks: TeamTaskState[],
+	current: TeamRunManifest["waitState"],
+	endedTaskId: string,
+	endedQuestionId: string,
+): TeamRunManifest["waitState"] {
+	return repointWaitState(tasks, current, (taskId, questionId) => taskId === endedTaskId && questionId === endedQuestionId);
 }
 
 /** @internal M3-6 test export — exercise the scoped-clear repoint directly. */

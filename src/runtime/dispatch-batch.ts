@@ -21,6 +21,7 @@ import type { TaskAttemptState, TeamRunManifest, TeamTaskState } from "../state/
 import { logInternalError } from "../utils/internal-error.ts";
 import type { WorkflowConfig, WorkflowStep } from "../workflows/workflow-config.ts";
 import { isDelegateShadowTask } from "./broker/delegate/shadow-lifecycle.ts";
+import { repointWaitState } from "./broker/protocol/wait-resolve.ts";
 import { classifyAmbientNoiseGate } from "./classifier/ambient-noise-gate.ts";
 import { resolveClassifierEnabled, resolveClassifierModel } from "./classifier/classifier-service.ts";
 import { readCrewAgents, recordFromTask, saveCrewAgents } from "./crew-agent-records.ts";
@@ -192,11 +193,16 @@ export async function sweepExpiredWaitingTasks(
 		}
 		saveRunTasks(fresh.manifest, tasks);
 		let manifest = fresh.manifest;
-		// WP-2 review round 1 (P3): clear manifest.waitState when its park was
-		// requeued — mirror the broker's clearWaitState guard, else the stale
-		// pointer shields the run from staleness repair for the full 24h TTL.
+		// WP-2 review round 1 (P3) + M4-R1(b) (fix-wave 6 residual): the ask-timeout
+		// requeue ended ONE park — scoped-forget the slot by RE-POINTING it at a
+		// surviving parked task (latest deadline wins, the wait.resolve M3-6
+		// invariant) instead of clearing it: a third task may still be parked and
+		// this single slot is its only stale-repair shield (isWaitAnswerPending
+		// reads only this field). Cleared only when no park is left — which also
+		// retires the stale-pointer-shields-the-run issue this guard was added for.
 		if (manifest.waitState && requeuedTaskIds.includes(manifest.waitState.taskId)) {
-			manifest = { ...manifest, waitState: undefined, updatedAt: new Date().toISOString() };
+			const waitState = repointWaitState(tasks, manifest.waitState, (candidateId) => requeuedTaskIds.includes(candidateId));
+			manifest = { ...manifest, waitState, updatedAt: new Date().toISOString() };
 			saveRunManifest(manifest);
 		}
 		if (

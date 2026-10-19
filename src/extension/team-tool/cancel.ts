@@ -1,4 +1,5 @@
 import { appendHookEvent, executeHook } from "../../hooks/registry.ts";
+import { abortRunDelegates } from "../../runtime/broker/delegate/delegate-abort.ts";
 import { killProcessPid } from "../../runtime/child-pi/child-pi.ts";
 import { recordFromTask, saveCrewAgents } from "../../runtime/crew-agent-records.ts";
 import { writeForegroundInterruptRequest } from "../../runtime/foreground-control.ts";
@@ -340,6 +341,16 @@ export async function handleCancel(params: TeamToolParamsValue, ctx: TeamContext
 		// still signals synchronously here — while we hold the lock — so the async
 		// background runner cannot overwrite the cancelled state we write below.
 		if (fresh.manifest.status === "running") {
+			// M4-R1(c) (fix-wave 6 residual, M3-A / R43-N3): the run is going
+			// terminal — abort its in-flight DELEGATE GRANDCHILDREN too. They live
+			// in the broker's abort registry (a separate, process-local lifetime),
+			// so without this they outlive the cancel by up to their own 24h
+			// deadline while still spending tokens and holding nested slots. Exact
+			// wiring budget-enforcement.ts terminaliseRunWithDrain already uses;
+			// abortRunDelegates is SYNC + never throws (0 when no broker aborter is
+			// installed — headless/worker-side cancels keep the pre-existing
+			// degrade, never a new failure path).
+			abortRunDelegates(fresh.manifest.runId, "run-cancelled");
 			void terminateLiveAgentsForRun(fresh.manifest.runId, "cancelled", appendEvent, fresh.manifest.eventsPath).catch((error) =>
 				logInternalError("team-tool.handleCancel.terminateLiveAgents", error, `runId=${fresh.manifest.runId}`),
 			);
