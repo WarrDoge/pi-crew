@@ -49,8 +49,15 @@ export async function runMockChildPi(
 	// SECURITY: Log mock mode activation prominently for audit trail
 	logInternalError("child-pi.mock", new Error(`Mock mode active: ${mock}`), "NOT running real agents");
 
+	// M3-2 (R47-3/V4): the verifier output contract requires a PASS:/FAIL:
+	// verdict line; happy-path mocks must emit contract-shaped output for
+	// verifier-role tasks or the (now real) verdict consumer marks the evidence
+	// unverified and the green contract blocks the run (fail-closed — correct
+	// for real verifiers, wrong for success mocks).
+	const verdictSuffix = input.role === "verifier" ? "\nPASS: mock verifier — mock success" : "";
+
 	if (mock === "success") {
-		const stdout = `[MOCK] Success for ${input.agent.name}\n`;
+		const stdout = `[MOCK] Success for ${input.agent.name}${verdictSuffix}\n`;
 		await observe(input, stdout);
 		return { exitCode: 0, stdout, stderr: "" };
 	}
@@ -62,7 +69,7 @@ export async function runMockChildPi(
 		// (default 1500ms, cap 5000ms) via PI_TEAMS_MOCK_STEER_WINDOW_MS.
 		const windowMs = Number(getCrewEnv("PI_TEAMS_MOCK_STEER_WINDOW_MS") ?? "1500");
 		await new Promise((resolve) => setTimeout(resolve, Math.min(windowMs, 5000)));
-		const text = `[MOCK] JSON success for ${input.agent.name}`;
+		const text = `[MOCK] JSON success for ${input.agent.name}${verdictSuffix}`;
 		const stdout = `${JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } })}\n${JSON.stringify({ type: "message_end", usage: { input: 10, output: 5, cost: 0.001, turns: 1 } })}\n`;
 		await observe(input, stdout);
 		return { exitCode: 0, stdout, stderr: "" };
@@ -141,7 +148,7 @@ export async function runMockChildPi(
 							},
 						],
 					})}\nADAPTIVE_PLAN_JSON_END`
-				: `[MOCK] JSON success for ${input.agent.name}`;
+				: `[MOCK] JSON success for ${input.agent.name}${verdictSuffix}`;
 		const stdout = `${JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } })}\n${JSON.stringify({ type: "message_end", usage: { input: 10, output: 5, cost: 0.001, turns: 1 } })}\n`;
 		await observe(input, stdout);
 		return { exitCode: 0, stdout, stderr: "" };
@@ -162,7 +169,7 @@ export async function runMockChildPi(
 	// parsers see exactly what a real child pi emits. Two events so the
 	// accumulation (sum) across messages is asserted, not a single snapshot.
 	if (mock === "json-usage-ledger") {
-		const text = `[MOCK] JSON usage ledger for ${input.agent.name}`;
+		const text = `[MOCK] JSON usage ledger for ${input.agent.name}${verdictSuffix}`;
 		const usageEvent = (tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }, cost: number) =>
 			JSON.stringify({
 				type: "message_end",
@@ -282,7 +289,7 @@ export async function runMockChildPi(
 		}
 		// Subsequent invocations: delegate to json-success shape so the
 		// fallback chain's second attempt succeeds and the run completes.
-		const text = `[MOCK] JSON success for ${input.agent.name}`;
+		const text = `[MOCK] JSON success for ${input.agent.name}${verdictSuffix}`;
 		const stdout = `${JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } })}\n${JSON.stringify({ type: "message_end", usage: { input: 10, output: 5, cost: 0.001, turns: 1 } })}\n`;
 		await observe(input, stdout);
 		return { exitCode: 0, stdout, stderr: "" };
