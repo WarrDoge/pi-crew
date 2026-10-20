@@ -201,7 +201,8 @@ test("pin: live publish reaches the UI (output not swallowed) on a healthy sessi
 	const ctx1 = makeFakeCtx("not-a-quota-provider"); // fetch short-circuits to null, no network
 
 	pi.fire("session_start", ctx1.ctx);
-	await flush();
+	// W7-B2: poll until the immediate publish actually reached the UI.
+	await waitFor(() => ctx1.state.setStatusCalls.some((call) => call.id === PROVIDER_STATUS_ID));
 
 	const providerCalls = ctx1.state.setStatusCalls.filter((call) => call.id === PROVIDER_STATUS_ID);
 	assert.ok(providerCalls.length >= 1, "immediate publish must reach the live session UI");
@@ -244,3 +245,18 @@ test("pin: timer tick after replacement publishes with the NEW session ctx", asy
 	pi.fire("session_shutdown", ctx2.ctx);
 	await flush();
 });
+
+// ---------------------------------------------------------------------------
+// W7-B2 (flake hardening 2026-10-20): the fixed 6-setImmediate flush raced
+// the session_start async init chain under CI load (4/4 file failures on the
+// 0.11.26 matrix, isolated runs green). Poll-based waits gate the SAME
+// assertions on the SAME conditions, bounded well beyond any reasonable
+// scheduler delay — no semantics change, just load immunity.
+// ---------------------------------------------------------------------------
+
+/** Yield until predicate() is true (setImmediate ticks, bounded). */
+async function waitFor(predicate: () => boolean, maxTicks = 500): Promise<void> {
+	for (let i = 0; i < maxTicks && !predicate(); i++) {
+		await new Promise<void>((resolve) => setImmediate(resolve));
+	}
+}

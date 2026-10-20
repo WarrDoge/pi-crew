@@ -773,7 +773,18 @@ test("R6-9: faulted embedded run still reports usage > 0 for burned turns", asyn
 			embeddedMitigations: { maxConcurrentEmbedded: 2 },
 		});
 		// Let turn 1 complete (assistant message + tool round-trip) before the blast.
-		await new Promise((resolve) => setTimeout(resolve, 1_500));
+		// W7-B1 (flake hardening 2026-10-20): the fixed 1.5s sleep raced BOTH the
+		// session boot AND turn-1 completion under load. Blasting too early hit an
+		// unarmed guard (no-op → watchdog 'hung-tool' after 120s); blasting before
+		// turn-1's assistant message landed left usage {input:0,...} and tripped the
+		// >0 assert below (load-flake; failed a real publish 2026-10-19). Poll for
+		// the turn-1 message_end event (bounded 30s), THEN blast — same timing as
+		// the original idle-machine behavior, deterministic under load. On poll
+		// timeout we still blast (preserves the pre-fix semantics).
+		const turnOneDeadline = Date.now() + 30_000;
+		while (Date.now() < turnOneDeadline && !scenario.events.some((event) => event?.type === "message_end")) {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
 		handleEmbeddedUncaughtException(new Error("R6-9-BLAST"), "uncaughtException");
 		const result = await runPromise;
 		assert.equal(result.exitCode, 1, "quarantined task must fail");

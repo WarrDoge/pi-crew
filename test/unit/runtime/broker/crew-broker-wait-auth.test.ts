@@ -86,10 +86,15 @@ test("recordWaitPolicyRejection appends a policy.action trace to events.jsonl", 
 		recordWaitPolicyRejection({ eventsPath, runId: "run-1" }, "task-1", "wait.request");
 
 		// Fire-and-forget append: drain the event loop until the line lands.
-		await new Promise<void>((resolve) => setImmediate(resolve));
-		await new Promise<void>((resolve) => setTimeout(resolve, 50));
-
-		const lines = fs.readFileSync(eventsPath, "utf-8").trim().split("\n");
+		// W7-B4 (flake hardening 2026-10-20): a fixed setImmediate + 50ms sleep
+		// raced the async durable append under CI load — poll for the line
+		// instead (bounded well past any sane scheduler delay).
+		const drainDeadline = Date.now() + 5_000;
+		let lines = fs.readFileSync(eventsPath, "utf-8").trim().split("\n");
+		while (Date.now() < drainDeadline && lines.length < before + 1) {
+			await new Promise<void>((resolve) => setTimeout(resolve, 10));
+			lines = fs.readFileSync(eventsPath, "utf-8").trim().split("\n");
+		}
 		assert.equal(lines.length, before + 1, "exactly one durable trace line appended");
 		const trace = JSON.parse(lines[lines.length - 1]) as TeamEvent;
 		assert.equal(trace.type, "policy.action");

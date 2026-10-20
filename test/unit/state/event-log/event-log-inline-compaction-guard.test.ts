@@ -180,7 +180,15 @@ test("R7-2(c): holdsAppendLock:true does NOT re-acquire while .alock is genuinel
 		}
 		assert.equal(threw, false, "must not re-acquire .alock when the caller declares it held");
 		const elapsed = Date.now() - start;
-		assert.ok(elapsed < 4000, `tail-merge-only apply must be fast, took ${elapsed}ms`);
+		// W7-B6 (flake hardening 2026-10-20): adaptive bound — pure-fs tail merge
+		// stretched past the fixed 4s on loaded Windows runners (R7-2 class).
+		const controlPath = path.join(path.dirname(eventsPath), `w7b6-control-${process.pid}.txt`);
+		const controlStart = Date.now();
+		fs.writeFileSync(controlPath, "x".repeat(64 * 1024));
+		fs.readFileSync(controlPath, "utf-8");
+		const controlMs = Math.max(1, Date.now() - controlStart);
+		const bound = Math.min(15_000, Math.max(4_000, controlMs * 25));
+		assert.ok(elapsed < bound, `tail-merge-only apply must be fast, took ${elapsed}ms (bound ${bound}ms, control ${controlMs}ms)`);
 		assert.ok(result, "guarded apply must produce a result");
 		assert.ok(fs.existsSync(alockDir), "the parked holder's .alock must be untouched");
 

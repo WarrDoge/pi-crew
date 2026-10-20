@@ -338,8 +338,19 @@ test("rpc mode: parent abort mid-run kills the child — aborted flag set, no or
 			signal: ac.signal,
 			onSpawn: (p) => {
 				pid = p;
-				// Kill as soon as the run is live (fixture work = 1200ms).
-				setTimeout(() => ac.abort(), 150);
+				// W7-B5 (flake hardening 2026-10-20): the fixed 150ms abort raced the
+				// child boot/handshake under CI load — aborting before the RPC client
+				// existed skipped client.abort() (kill-tree only) and tripped the
+				// "abort must have been sent" pin on healthy builds. Wait until the
+				// fixture's run ACTUALLY started (trace `run-start`), then abort
+				// mid-run (fixture work = 1200ms, poll = 25ms — ample window).
+				void (async () => {
+					const deadline = Date.now() + 10_000;
+					while (Date.now() < deadline && !readTrace(h).some((l) => l.kind === "run-start")) {
+						await new Promise((r) => setTimeout(r, 25));
+					}
+					ac.abort();
+				})();
 			},
 		});
 		assert.equal(result.aborted, true, `result=${JSON.stringify({ exitCode: result.exitCode, error: result.error })}`);

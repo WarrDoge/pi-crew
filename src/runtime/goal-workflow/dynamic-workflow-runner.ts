@@ -210,6 +210,36 @@ export async function runDynamicWorkflow(input: RunDynamicWorkflowInput): Promis
 	const dwfStore = new DwfStore(manifest.stateRoot);
 	const resumedState = dwfStore.load();
 	if (resumedState) {
+		// R14-C3 (wave 7): fingerprint check — a resume that changes the dispatch
+		// context (modelOverride/team) still replays the completed-call cache, but
+		// that replay now carries an operator-visible mismatch warning instead of
+		// silently passing off old-model results as current-model work.
+		const savedCtx2 = resumedState.dispatchContext;
+		const norm = (v: string | undefined): string | undefined => (v && v.length > 0 ? v : undefined);
+		if (savedCtx2 && norm(savedCtx2.modelOverride) !== norm(input.modelOverride)) {
+			await appendEventAsync(eventsPath, {
+				type: "dwf.resume_context_mismatch",
+				runId: manifest.runId,
+				data: {
+					axis: "modelOverride",
+					checkpoint: savedCtx2.modelOverride ?? null,
+					current: input.modelOverride ?? null,
+				},
+				message: `resume modelOverride differs from checkpoint (was ${savedCtx2.modelOverride ?? "default"}, now ${input.modelOverride ?? "default"}) — replayed agent results were produced under the checkpoint's model`,
+			});
+		}
+		if (savedCtx2 && norm(savedCtx2.team) !== norm(input.team?.name)) {
+			await appendEventAsync(eventsPath, {
+				type: "dwf.resume_context_mismatch",
+				runId: manifest.runId,
+				data: {
+					axis: "team",
+					checkpoint: savedCtx2.team ?? null,
+					current: input.team?.name ?? null,
+				},
+				message: `resume team differs from checkpoint (was ${savedCtx2.team ?? "default"}, now ${input.team?.name ?? "default"}) — replayed agent results were produced under the checkpoint's team`,
+			});
+		}
 		await appendEventAsync(eventsPath, {
 			type: "dwf.resumed",
 			runId: manifest.runId,
@@ -228,6 +258,14 @@ export async function runDynamicWorkflow(input: RunDynamicWorkflowInput): Promis
 	const timeoutController = new AbortController();
 	const combinedSignal = AbortSignal.any([signal, timeoutController.signal]);
 
+	// R14-C3 (wave 7): dispatch-time fingerprint stamped into every checkpoint
+	// save; the resume path above compares it against the CURRENT dispatch
+	// context and emits dwf.resume_context_mismatch on drift.
+	const dispatchContext: { modelOverride?: string; team?: string } = {
+		...(input.modelOverride ? { modelOverride: input.modelOverride } : {}),
+		...(input.team?.name ? { team: input.team.name } : {}),
+	};
+
 	const ctx = makeWorkflowCtx(manifest, {
 		concurrency: input.concurrency ?? workflow.maxConcurrency ?? 4,
 		signal: combinedSignal,
@@ -241,9 +279,11 @@ export async function runDynamicWorkflow(input: RunDynamicWorkflowInput): Promis
 		resumedState,
 		// round-18 P2-3: checkpoint after each ctx.agent() call so a crash between calls
 		// leaves durable state. onCheckpoint captures the closure values at call time.
+		// R14-C3 (wave 7): dispatchContext (declared above the ctx) is stamped into
+		// every save so a later resume can compare against the current dispatch.
 		onCheckpoint: (state) => {
 			try {
-				dwfStore.save(state);
+				dwfStore.save({ ...state, dispatchContext });
 			} catch (error) {
 				logInternalError("dynamic-workflow-runner.checkpoint-save", error, `runId=${manifest.runId}`);
 			}

@@ -36,6 +36,20 @@ function tmpDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-r24-deadlock-"));
 }
 
+/**
+ * W7-B3 (flake hardening): time a trivial fs round-trip in the SAME directory
+ * (a DIFFERENT file — hence a different lock) to measure current I/O load.
+ * The perf bounds below scale with this control instead of assuming an idle
+ * runner, while staying capped below the ~5s lock-timeout deadlock signature.
+ */
+function timeControlFsOp(dir: string): number {
+	const controlPath = path.join(dir, "w7b3-control.txt");
+	const start = Date.now();
+	fs.writeFileSync(controlPath, "x".repeat(64 * 1024));
+	fs.readFileSync(controlPath, "utf-8");
+	return Math.max(1, Date.now() - start);
+}
+
 function writeEvents(filePath: string, count: number): void {
 	const lines: string[] = [];
 	for (let i = 0; i < count; i++) {
@@ -82,8 +96,13 @@ describe("Round 24 BUG 1: re-entrant lock deadlock on compaction/rotation", () =
 		try {
 			const start = Date.now();
 			// Simulate appendEventInsideLock: we hold the lock, then compact via the
-			// unlocked core (the fix). This must complete FAST (< 2s, well under the
-			// 5s timeout) and actually compact.
+			// unlocked core (the fix). This must complete FAST and actually compact.
+			// W7-B3 (flake hardening 2026-10-20): a fixed 2s wall-clock bound tripped
+			// under CI load (observed 3912ms on healthy rotation). The real deadlock
+			// signature is the ~5s lock-timeout spin, so the bound adapts to a
+			// same-dir control fs-op and stays strictly under 5s.
+			const controlMs = timeControlFsOp(dir);
+			const bound = Math.min(4_900, Math.max(2_000, controlMs * 25));
 			const result = withEventLogLockSync(filePath, () => {
 				const prepared = prepareCompaction(filePath, {
 					compactToCount: 10,
@@ -91,7 +110,10 @@ describe("Round 24 BUG 1: re-entrant lock deadlock on compaction/rotation", () =
 				return prepared ? applyCompactionUnlocked(filePath, prepared) : undefined;
 			});
 			const elapsed = Date.now() - start;
-			assert.ok(elapsed < 2000, `in-lock compaction should be fast, took ${elapsed}ms (deadlock regression?)`);
+			assert.ok(
+				elapsed < bound,
+				`in-lock compaction should be fast, took ${elapsed}ms (bound ${bound}ms, control ${controlMs}ms — deadlock regression?)`,
+			);
 			assert.ok(result && result.eventsRemoved > 0, `compaction should have run inside the lock, got ${JSON.stringify(result)}`);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
@@ -104,9 +126,12 @@ describe("Round 24 BUG 1: re-entrant lock deadlock on compaction/rotation", () =
 		writeEvents(filePath, 50);
 		try {
 			const start = Date.now();
+			// W7-B3: adaptive bound — see the compaction test above.
+			const controlMs = timeControlFsOp(dir);
+			const bound = Math.min(4_900, Math.max(2_000, controlMs * 25));
 			const result = withEventLogLockSync(filePath, () => rotateEventLogUnlocked(filePath));
 			const elapsed = Date.now() - start;
-			assert.ok(elapsed < 2000, `in-lock rotation should be fast, took ${elapsed}ms`);
+			assert.ok(elapsed < bound, `in-lock rotation should be fast, took ${elapsed}ms (bound ${bound}ms, control ${controlMs}ms)`);
 			assert.equal(result, true, "rotation should succeed inside the lock");
 			// Original file truncated to empty; archive created.
 			assert.equal(fs.readFileSync(filePath, "utf-8"), "", "original truncated");

@@ -289,7 +289,15 @@ function validateExplicitBin(explicit: string): string | undefined {
 		}
 	} catch (e) {
 		if (e instanceof Error && e.message.includes("allowed prefixes")) throw e;
-		logInternalError("pi-spawn", e, "validateExplicitBin: unexpected realpathSync error", "error");
+		// R2-L-A2 (wave 7): the drop is now stated explicitly in the message — the
+		// operator sees that their explicit pin was IGNORED and which fallback ran,
+		// not just the raw realpath error.
+		logInternalError(
+			"pi-spawn",
+			e,
+			`validateExplicitBin: unexpected realpathSync error — explicit PI_TEAMS_PI_BIN='${resolved}' IGNORED, falling back to default pi resolution`,
+			"error",
+		);
 		return undefined;
 	}
 	return resolved;

@@ -195,8 +195,20 @@ function startThemeSourceSubscription(theme: object, subscription: ThemeSourceSu
 		subscription.unsubscribeSource = removeListener;
 		return;
 	}
+	// R2-L-B9 (wave 7, 2026-10-20): the poll closure previously held a STRONG
+	// ref to the theme — an abandoned subscription (consumer never calls the
+	// returned unsubscribe) kept the theme + subscription + callbacks alive
+	// forever with a permanent 1s poll. Hold only a WeakRef: once the theme is
+	// collected, the next tick self-terminates the interval (≤1s later), after
+	// which the closure chain is collectable.
+	const weakTheme = new WeakRef<object>(theme);
 	subscription.pollTimer = setInterval(() => {
-		const nextSignature = themeSignature(theme);
+		const live = weakTheme.deref();
+		if (!live) {
+			clearInterval(subscription.pollTimer);
+			return;
+		}
+		const nextSignature = themeSignature(live);
 		if (nextSignature === subscription.lastSignature) return;
 		subscription.lastSignature = nextSignature;
 		emit();

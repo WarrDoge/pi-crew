@@ -1243,7 +1243,18 @@ export function loadRunManifestById(cwd: string, runId: string): { manifest: Tea
 	let manifest: TeamRunManifest | undefined;
 	let tasks: TeamTaskState[] | undefined;
 	while (attempts < LOAD_MANIFEST_RETRY_LIMIT) {
-		const freshStat = fs.statSync(manifestPath);
+		let freshStat: fs.Stats;
+		try {
+			freshStat = fs.statSync(manifestPath);
+		} catch (error) {
+			// R2-L-A1 (wave 7, 2026-10-20): the run dir can vanish between the
+			// caller's listing and this load (crash-recovery sweeps, artifact
+			// cleanup, operator rm). A thrown ENOENT aborted the WHOLE best-effort
+			// sweep for the session; "cannot be loaded" is undefined — the loop's
+			// own missing-file contract.
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw error;
+		}
 		// PERF (2026-08-24, Task 12 realized): after saveRunTasksCoalesced the
 		// cache keeps the manifest half of the entry while zeroing only the
 		// tasks stamps, so this slow path runs solely to refresh tasks. When the
@@ -1421,7 +1432,15 @@ export async function loadRunManifestByIdAsync(
 	let tasks: TeamTaskState[] | undefined;
 	let attempts = 0;
 	while (attempts < LOAD_MANIFEST_RETRY_LIMIT) {
-		const freshStat = await fs.promises.stat(manifestPath);
+		let freshStat: fs.Stats;
+		try {
+			freshStat = await fs.promises.stat(manifestPath);
+		} catch (error) {
+			// R2-L-A1 (wave 7): async twin — ENOENT mid-sweep returns undefined
+			// instead of aborting the caller's best-effort sweep.
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			throw error;
+		}
 		// PERF (2026-08-24, Task 12 realized): async twin of the sync reuse —
 		// after saveRunTasksCoalesced only the tasks stamps are zeroed, so when
 		// the retained manifest stamps match the fresh stat (same verification

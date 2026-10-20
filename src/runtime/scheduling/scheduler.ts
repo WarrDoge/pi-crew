@@ -92,7 +92,12 @@ export class CrewScheduler {
 		//	update() (never add()), so a normal fire's stale nextRun cannot reach here.
 		this.reportMissedCronOccurrences(job);
 		if (job.enabled) this.arm(job);
-		this.emit?.({ type: "added", job });
+		// R14-C4 (wave 7, 2026-10-20): arm() can mutate the stored entry BEFORE the
+		// added event fires (e.g. a past `once` job flips to enabled:false,
+		// lastStatus:"error" via update()). Emitting the ORIGINAL stale object
+		// confused event-order consumers (disk converged; the event stream didn't).
+		// Emit the post-arm truth from the map instead.
+		this.emit?.({ type: "added", job: this.jobs.get(job.id) ?? job });
 	}
 
 	remove(id: string): boolean {
@@ -189,6 +194,12 @@ export class CrewScheduler {
 	private arm(job: ScheduledJob): void {
 		if (this.timers.has(job.id)) return;
 		if (job.scheduleType === "interval" && job.intervalMs) {
+			// R2-L-B10 (wave 7, documented design choice): interval jobs re-arm from
+			// FIRE time via the chained hop, but the fire() → update() → disarm/arm
+			// lifecycle only re-arms after the run COMPLETES — the effective period is
+			// intervalMs + run duration, NOT schedule-aligned wall-clock spacing.
+			// Deliberate (no overlap between occurrences of the same job); recorded
+			// here so the semantics are discoverable at the arm site.
 			// 2026-09-22 spawn-storm root cause: this branch used
 			// setInterval(fire, intervalMs). Node timers are 32-bit — a LEGAL long
 			// interval (e.g. 90d = 7,776,000,000ms > 2^31-1) overflows and Node

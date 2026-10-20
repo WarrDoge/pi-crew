@@ -172,7 +172,10 @@ test("R4-2(a): sync append-lock acquirer times out while the async family holds 
 			/lock timeout/,
 		);
 		const elapsed = Date.now() - start;
-		assert.ok(elapsed < 2000, `bounded wait expected, took ${elapsed}ms`);
+		// W7-B6: adaptive bound (control fs-op) — Windows load flakes.
+		const controlMs = timeControlFsOpForLockTests(path.dirname(eventsPath));
+		const bound = Math.min(4_900, Math.max(2_000, controlMs * 25));
+		assert.ok(elapsed < bound, `bounded wait expected, took ${elapsed}ms (bound ${bound}ms, control ${controlMs}ms)`);
 		assert.ok(fs.existsSync(alockDir), "holder's lock dir must survive the timed-out acquirer");
 
 		releaseGate();
@@ -235,7 +238,11 @@ test("R4-2(b): stale .alock (old mtime + dead pid) is reclaimed by the sync acqu
 		);
 		const elapsed = Date.now() - start;
 		// Reclaim fires on the aged mtime long before the 5s timeout would.
-		assert.ok(elapsed < 2_000, `stale reclaim must be prompt, took ${elapsed}ms`);
+		// W7-B6: adaptive bound — the stale-poll lands ≈staleMs (1s) after start;
+		// the old fixed 2s was only a 2× margin on slow Windows runners.
+		const controlMs = timeControlFsOpForLockTests(path.dirname(eventsPath));
+		const bound = Math.min(4_900, Math.max(2_000, controlMs * 25));
+		assert.ok(elapsed < bound, `stale reclaim must be prompt, took ${elapsed}ms (bound ${bound}ms, control ${controlMs}ms)`);
 		assert.ok(!fs.existsSync(alockDir), "reclaimed lock dir must be released after fn");
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
@@ -316,3 +323,19 @@ test("R4-2(c): public compactEventLog compacts correctly and leaves no lock dirs
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+/**
+ * W7-B6 (flake hardening 2026-10-20): time a trivial fs round-trip in the same
+ * parent directory (different file — different lock) to measure current I/O
+ * load. Windows CI runners regularly stretch the lock-poll loops past the old
+ * fixed 2s bounds (R7-2c/d load-flakes); bounds below scale with this control
+ * while staying capped under the 5s lock timeout that would fail the test
+ * anyway via its own (stricter) path.
+ */
+export function timeControlFsOpForLockTests(dir: string): number {
+	const controlPath = path.join(dir, `w7b6-control-${process.pid}.txt`);
+	const start = Date.now();
+	fs.writeFileSync(controlPath, "x".repeat(64 * 1024));
+	fs.readFileSync(controlPath, "utf-8");
+	return Math.max(1, Date.now() - start);
+}

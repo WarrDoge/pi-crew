@@ -332,3 +332,68 @@ test("R44-N1: descriptor path exactly equal to the anchor directory is blocked",
 		fs.rmSync(anchor, { recursive: true, force: true });
 	}
 });
+
+// ---------------------------------------------------------------------------
+// W7-C2 (2026-10-20): missing-anchor silence. A run whose artifacts dir is
+// already gone (age cleanup / earlier prune / operator rm) still has its
+// manifest.json listed at session start — pruning it is success-shaped
+// (nothing to delete), and warning per stale run per boot was noise (battery
+// 2026-10-19 observation #4). ENOENT anchor → silent 0; every OTHER anchor
+// failure (symlink, non-directory) keeps the visible warn.
+// ---------------------------------------------------------------------------
+
+/** Spy on console.error; returns collected lines (restores the original). */
+function spyConsoleError(): { lines: string[]; restore(): void } {
+	const original = console.error;
+	const lines: string[] = [];
+	console.error = (...args: unknown[]) => {
+		lines.push(args.map((a) => (typeof a === "string" ? a : String(a))).join(" "));
+	};
+	return { lines, restore: () => (console.error = original) };
+}
+
+test("W7-C2: ENOENT anchor (run dir already gone) prunes 0 with NO warn log", () => {
+	const anchor = makeTmpDir();
+	fs.rmSync(anchor, { recursive: true, force: true }); // simulate already-cleaned run
+	const descriptors: ArtifactDescriptor[] = [makeDescriptor(path.join(anchor, "log.txt"), { expiresAt: iso(-60_000) })];
+	const spy = spyConsoleError();
+	try {
+		assert.equal(pruneExpiredArtifacts(descriptors, { artifactsRoot: anchor }), 0);
+		const anchorWarns = spy.lines.filter((l) => l.includes("artifact-store.prune-anchor"));
+		assert.equal(anchorWarns.length, 0, `ENOENT anchor must stay silent; got ${JSON.stringify(spy.lines)}`);
+	} finally {
+		spy.restore();
+	}
+});
+
+test("W7-C2: symlink anchor still fails closed WITH a warn (visibility retained)", () => {
+	const real = makeTmpDir();
+	const link = path.join(os.tmpdir(), `w7c2-link-${Date.now()}`);
+	fs.symlinkSync(real, link);
+	const descriptors: ArtifactDescriptor[] = [makeDescriptor(path.join(real, "log.txt"), { expiresAt: iso(-60_000) })];
+	const spy = spyConsoleError();
+	try {
+		assert.equal(pruneExpiredArtifacts(descriptors, { artifactsRoot: link }), 0);
+		const anchorWarns = spy.lines.filter((l) => l.includes("artifact-store.prune-anchor"));
+		assert.ok(anchorWarns.length > 0, "symlink anchor must keep the warn");
+	} finally {
+		spy.restore();
+		fs.rmSync(link, { force: true });
+		fs.rmSync(real, { recursive: true, force: true });
+	}
+});
+
+test("W7-C2: non-directory anchor (regular file) still warns", () => {
+	const file = path.join(os.tmpdir(), `w7c2-file-${Date.now()}.txt`);
+	fs.writeFileSync(file, "not a dir");
+	const descriptors: ArtifactDescriptor[] = [makeDescriptor("/tmp/whatever.txt", { expiresAt: iso(-60_000) })];
+	const spy = spyConsoleError();
+	try {
+		assert.equal(pruneExpiredArtifacts(descriptors, { artifactsRoot: file }), 0);
+		const anchorWarns = spy.lines.filter((l) => l.includes("artifact-store.prune-anchor"));
+		assert.ok(anchorWarns.length > 0, "non-dir anchor must keep the warn");
+	} finally {
+		spy.restore();
+		fs.rmSync(file, { force: true });
+	}
+});

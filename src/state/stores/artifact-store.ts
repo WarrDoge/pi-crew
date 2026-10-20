@@ -206,6 +206,16 @@ export function pruneExpiredArtifacts(descriptors: ArtifactDescriptor[], options
 		if (!lstat.isDirectory()) throw new Error(`artifacts root is not a directory`);
 		realAnchor = fs.realpathSync(options.artifactsRoot);
 	} catch (error) {
+		// W7-C2 (2026-10-20): a MISSING anchor directory means the run's whole
+		// artifacts tree is already gone (age-based cleanup, an earlier prune, or
+		// operator removal) — there is nothing under it left to delete, so this is
+		// success-shaped silence, not a failure. Fail-closed behavior is unchanged
+		// (return 0, nothing deleted). Session start walks EVERY retained manifest,
+		// so warning here printed one line per stale run per boot (battery
+		// 2026-10-19 observation #4). Other anchor failures (symlink anchor,
+		// non-directory, permissions) stay visible warns.
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT") return 0;
 		logInternalError(
 			"artifact-store.prune-anchor",
 			error instanceof Error ? error : new Error(String(error)),

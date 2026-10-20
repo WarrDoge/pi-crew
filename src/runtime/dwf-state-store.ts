@@ -49,6 +49,13 @@ export interface DwfCheckpointState {
 	 *  Uses Record (not Map) for JSON serialization safety. Optional: legacy
 	 *  checkpoints (and fresh states) omit it. */
 	completedAgentCalls?: Record<string, AgentResult>;
+	/** R14-C3 (wave 7, 2026-10-20): dispatch-time run context fingerprint. On
+	 * save the runner stamps {modelOverride, team}; on resume a mismatch with
+	 * the CURRENT dispatch context emits dwf.resume_context_mismatch — replayed
+	 * agent results were produced under a different model/team and the operator
+	 * should know (fail-open with visibility; the completed-call cache is still
+	 * intentional work-skip). Absent on legacy checkpoints → check skipped. */
+	dispatchContext?: { modelOverride?: string; team?: string };
 	updatedAt: string;
 }
 

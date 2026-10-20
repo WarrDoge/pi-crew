@@ -47,8 +47,8 @@
 
 1. **REGRESSION (P1, fixed in 0.11.26)** — `verifier verdict consumer` (M3-2/R47-3-V4) chặn run oan: prompt verifier child-process vẫn dạy prose → verifier trả prose → `observed=none` → policy block `green_unsatisfied`. Live-proven 2 lần (trước/sau fix). Fix: (a) `VERIFIER_VERDICT_LINE` nhận bare/decorated verdict (`PASS`, `**PASS**`, `PASS — …`, `PASS. …`, `PASS (…)`), vẫn từ chối mid-line/word-continuation; (b) siết prompt: 5 workflows + `agents/verifier.md` + 2 plan-template verifier taskTemplates yêu cầu dòng verdict chính xác. Pin: 11/11 + mutation.
 2. **Probe-hygiene** — gõ slash command khi pi session còn boot/busy → thành message cho LLM (giả "commands không register"); chờ idle + xác nhận bằng builtin command trước khi kết luận.
-3. **Observation (không phải regression)** — `manifest.usage` = null trên mọi run (kể cả run cũ 2026-10-14) → UI hiển thị "0 tok" trung thực; ngoài phạm vi wave.
-4. **Observation** — session start log `artifact-store.prune-anchor ENOENT ... skipping N descriptor(s), nothing deleted` cho run-dir đã bị auto-prune: hành vi fail-closed đúng (M1-6), nhưng log khá ồn (nhiều dòng/session start).
+3. **Observation — ĐÃ ĐÍNH CHÍNH 2026-10-20 (wave 7): KHÔNG phải bug — chẩn đoán sai nguồn.** `manifest.usage` không tồn tại trên TeamRunManifest và không code nào đọc nó; `task.usage` CÓ dữ liệu thật; run text hiển thị đúng tokens (live-proven wave 7: "4,155 tokens"); powerbar/pane ẩn khi thiếu. Xem `wave7-sdd-2026-10-20/SPEC.md` mục C1. (Ghi chú gốc sai: "manifest.usage = null trên mọi run → UI hiển thị 0 tok".)
+4. **Observation — ĐÃ FIX v0.11.28 (wave 7, C2)** — session start log `artifact-store.prune-anchor ENOENT ... skipping N descriptor(s)` cho run-dir đã bị auto-prune: ENOENT anchor giờ im lặng (success-shaped — không còn gì để xóa); các lỗi anchor khác vẫn warn. Fail-closed không đổi.
 
 ## Verdict
 
