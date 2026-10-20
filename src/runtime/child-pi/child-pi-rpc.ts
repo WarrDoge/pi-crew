@@ -340,6 +340,42 @@ function readPsEnviron(pid: number): string | undefined {
 
 let unobservableWarned = false;
 
+/** S* (v0.11.30, supersedes the wave-8 process.env swap): build the
+ *  RpcClient `env` option that yields an EXACT env for the child despite the
+ *  SDK's internal merge `{...process.env, ...options.env}` (rpc-client.js).
+ *
+ *  Mechanism (both halves experiment-verified 2026-10-20):
+ *   1. `{...A, ...{K: undefined}}` — a later key with an `undefined` value
+ *      OVERRIDES the earlier key (spread semantics).
+ *   2. Node's spawn DROPS env entries whose value is `undefined` (the child
+ *      sees the key as ABSENT, not "undefined"/"").
+ *  Together: every parent key NOT in the intended set is shadowed to
+ *  `undefined` in options.env → the merge yields `undefined` for it → Node
+ *  omits it → the child receives EXACTLY the intended set, on every OS,
+ *  deterministically — regardless of WHEN the spawn actually happens. The
+ *  wave-2b/8 sync-prefix assumption and the process.env swap both die as
+ *  requirements: even a drifted (post-await) spawn merges the same shadowed
+ *  options.env and still lands on the exact set.
+ *
+ *  Forward-compat: if upstream ever removes the process.env spread, the
+ *  undefined entries are still dropped by Node → same exact env. If a future
+ *  SDK validates env values strictly, start() throws LOUD (fail-loud, the
+ *  right direction). The post-spawn canary (verifyRpcSpawnEnvSplice) stays as
+ *  a PRODUCTION TRIPWIRE proving "child env == intended set".
+ *
+ *  Runtime typing note: RpcClient's .d.ts says Record<string,string>, but the
+ *  runtime only spreads the object into spawn (single usage, rpc-client.js)
+ *  — undefined values flow through harmlessly. Exported for unit tests. */
+export function buildExactEnvShadowOptions(
+	intendedEnv: NodeJS.ProcessEnv | Record<string, string | undefined> | undefined,
+): Record<string, string | undefined> {
+	const shadow: Record<string, string | undefined> = { ...(intendedEnv ?? {}) };
+	for (const key of Object.keys(process.env)) {
+		if (!(key in shadow)) shadow[key] = undefined;
+	}
+	return shadow;
+}
+
 /** MINOR-4 / R2-L-A7: post-spawn canary verification. The parent env carries
  *  {@link RPC_ENV_SPLICE_CANARY} while the window is open (open->close spans
  *  the spawn); the canary is NEVER in the allowlisted childEnv. If the child
@@ -452,11 +488,7 @@ async function runRpcSession(
 	const { input, effectiveTask, ctx } = plan;
 	const poolKey = poolKeyFor(input);
 	const spawnOptions = buildFinalChildPiSpawnOptions(input.cwd, ctx.mergedEnv, ctx.builtEnv, input.model);
-	// RpcClient types env as Record<string,string> — drop undefined entries.
-	const childEnv: Record<string, string> = {};
-	for (const [k, v] of Object.entries(spawnOptions.env ?? {})) {
-		if (v !== undefined) childEnv[k] = v;
-	}
+	const childEnv = buildExactEnvShadowOptions(spawnOptions.env);
 
 	let client: RpcClientInstance;
 	if (pooled) {
@@ -493,21 +525,24 @@ async function runRpcSession(
 		/* no-op unless a fresh spawn installs the real closer below */
 	};
 	if (!pooled) {
-		// Env-splice: RpcClient spawns with `{...process.env, ...options.env}`
-		// (rpc-client.js start()) — WITHOUT this splice the child would inherit
-		// the FULL parent env, silently regressing the allowlist/per-task key
-		// scoping model. The spawn happens in the SYNCHRONOUS prefix of
-		// start(), before its first await, so restoring before awaiting keeps
-		// the splice invisible to every other reader of process.env (single
-		// JS thread — no interleaving is possible inside this sync block).
-		// MINOR-4 + R2-L-A7 (wave-8): the canary WINDOW now stays open through
-		// `await startPromise` until post-spawn verification — the wave-2b
-		// version deleted the canary synchronously after start() returned, so
-		// the drifted-spawn case it exists to catch inherited a canary-free env
-		// and could NEVER fire (even on Linux). Refcounted: concurrent RPC
-		// spawns share one window; the marker is inert for non-RPC children.
-		const savedEnv = process.env;
-		delete childEnv[RPC_ENV_SPLICE_CANARY]; // belt & braces — never allowlisted
+		// S* (v0.11.30): NO process.env swap anymore. The RpcClient-internal
+		// merge `{...process.env, ...options.env}` is neutralized BY the
+		// undefined-shadow options.env (buildExactEnvShadowOptions) — the child
+		// receives exactly the intended allowlisted set no matter when the spawn
+		// fires (sync prefix or drifted past an await). The wave-2b..8 global
+		// `process.env = childEnv` splice is deleted — global mutable state gone.
+		//
+		// The canary WINDOW below is now purely a VERIFICATION aid: the marker
+		// must sit in the parent env at snapshot time so verifyRpcSpawnEnvSplice
+		// has something to detect with. It must span the await because the
+		// child's env snapshot is taken at its (possibly delayed) spawn; the
+		// shadow makes the marker harmless to the child either way. Refcounted:
+		// concurrent RPC spawns share one window.
+		// Belt & braces: SHADOW the canary to undefined (do NOT delete — a
+		// delete lets the parent-env marker win the merge; undefined overrides
+		// it). Covers the ordering gap: the shadow snapshot was taken before the
+		// window opened, so the marker was not in process.env then.
+		childEnv[RPC_ENV_SPLICE_CANARY] = undefined;
 		openRpcEnvSpliceWindow();
 		let startPromise: Promise<void>;
 		windowClosed = false;
@@ -518,12 +553,7 @@ async function runRpcSession(
 			}
 		};
 		try {
-			process.env = childEnv as unknown as NodeJS.ProcessEnv;
-			try {
-				startPromise = client.start();
-			} finally {
-				process.env = savedEnv;
-			}
+			startPromise = client.start();
 		} catch (error) {
 			closeWindowOnce();
 			throw error;

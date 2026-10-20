@@ -6,6 +6,18 @@
 
 - **fix(gate): RT24-F1 root-gate config/autonomy read over-block** — `rootGateBlockReason` counted the `args` subcommand carrier as a config patch key, so worker-origin `config {args:"show"}` READS were rejected as "writes user-scope config" (live-caught in the v0.11.24 real-test battery; docblock promised reads open). `args` added to the carrier-key sets for `config` and `autonomy`; unknown junk keys stay write-classified (fail-closed). Pinned: reads with carrier keys open, writes hidden behind the same key still gated (`unset`/patch keys), user config byte-untouched. Live-verified end-to-end (fresh `pi -p`, worker env): read allowed + dumps config; `unset` write gate-blocked verbatim "root-session required".
 
+## [0.11.30] — S\*: undefined-shadow exact-env — the RPC env-splice swap is DELETED; SDK drift is structurally inert
+
+### Security
+- **R2-L-A7 endgame (S\*)**: the wave-2b..8 defense against the RpcClient-internal merge `{...process.env, ...options.env}` relied on swapping the global `process.env` around `start()` (fragile sync-prefix assumption) and detecting a drifted spawn after the fact (canary → kill). Two experiment-verified facts make a structurally better solution possible: a later spread key with an `undefined` value OVERRIDES the earlier key, and Node's spawn DROPS `undefined` env entries (child sees the key as ABSENT, not "undefined"/""). The RpcClient env option now carries `undefined` for every parent key outside the intended allowlisted set — the SDK's own merge then produces EXACTLY the intended set, on every OS, deterministically, regardless of WHEN the spawn fires.
+  - The `process.env` global swap is **deleted** (global mutable state gone).
+  - SDK drift (spawn moved past `start()`'s first await) is **structurally inert** — there is nothing left to leak; the kill path still exists as a backstop.
+  - The canary (window + post-spawn verify, v0.11.29) is retained as a **production tripwire** proving "child env == intended set" on Linux/macOS; Windows prevention no longer depends on observation at all.
+  - Ordering subtlety pinned by test: the canary marker must be `undefined`-shadowed, NOT `delete`d (a delete lets the parent-env marker win the merge).
+
+### Tests
+- `env-splice-canary.test.ts` rewritten for S\* semantics (12 tests): mechanism pins (spread-override, real-spawn undefined-drop, builder unit), window refcount, detector formats, LIVE linux exactness (SDK-merge spawn during an open window → exact set), and the WIRING pin (drifting mock client with real merge semantics → NOT killed, env exact, run proceeds). Both mutation checks proven: removing the shadow loop → 3 S\* pins red; delete-marker → wiring red.
+
 ## [0.11.29] — 8 deferred-LOW audit: A7 env-splice canary REAL fix (+ dead-window bug), B8 choke-point redaction (2nd leak site), mutation-pins
 
 ### Security

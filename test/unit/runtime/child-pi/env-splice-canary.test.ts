@@ -1,38 +1,46 @@
 /**
- * env-splice-canary.test.ts — MINOR-4 + R2-L-A7 pins (wave 8).
+ * env-splice-canary.test.ts — MINOR-4 → R2-L-A7 → S* (v0.11.30) pins.
  *
- * The RPC env-splice contract: RpcClient.start() must spawn its child in the
- * SYNCHRONOUS prefix (while process.env is swapped to the allowlisted
- * childEnv). If an SDK update moves the spawn past the first await, the child
- * silently inherits the FULL parent env (provider keys) — the canary detects
- * that and the caller kills the child.
+ * HISTORY:
+ *  - wave-2b: /proc canary, Linux-only, marker deleted too early (dead window).
+ *  - wave-8 (v0.11.29): refcounted marker window spanning the await; the
+ *    process.env swap + canary DETECTED a drifted (post-await) spawn and
+ *    killed the child loudly.
+ *  - S* (v0.11.30): the swap is GONE. `buildExactEnvShadowOptions` puts
+ *    `undefined` in the RpcClient env option for EVERY parent key outside the
+ *    intended allowlisted set; the SDK's own merge
+ *    `{...process.env, ...options.env}` then yields undefined for those keys
+ *    and Node's spawn DROPS undefined entries — the child receives EXACTLY
+ *    the intended set on every OS, deterministically, REGARDLESS of when the
+ *    spawn fires. SDK drift is structurally INERT now (nothing to leak), and
+ *    the canary stays as a production TRIPWIRE proving the invariant.
  *
- * Wave-8 fix pins THREE things the wave-2b version got wrong:
- *  1. DEAD WINDOW: the canary used to be deleted from the parent env
- *     synchronously after start() returned — BEFORE `await startPromise`. The
- *     drifted spawn (the exact case being guarded) happened after the delete,
- *     inherited a canary-free env, and could NEVER be detected — even on
- *     Linux. The window now stays open (refcounted across concurrent RPC
- *     spawns) until post-spawn verification completes. The LIVE drift test
- *     below fails against the old ordering.
- *  2. PLATFORM COVERAGE: linux /proc/<pid>/environ; darwin `ps -Eww -o
- *     command=`; win32 has no cross-process environ API — no longer a silent
- *     PASS (one-time explicit warn via onUnobservable/logInternalError).
- *  3. INJECTABLE OBSERVATION: verifyRpcSpawnEnvSplice accepts {reader,
- *     platform, onUnobservable} so every branch is pinned cross-platform.
- *
- * Mutation checks (2026-10-20):
- *  - moving the window close back before the await (old ordering) → the LIVE
- *    drift test fails;
- *  - removing the refcount (unconditional set/delete per window) → the
- *    overlapping-window test fails.
+ * Test layers:
+ *  (a) S* mechanism pins: spread-override semantics, Node spawn dropping
+ *      undefined env values (real spawn), the shadow builder unit.
+ *  (b) Canary window pins: refcounted open/close.
+ *  (c) Detector pins: /proc + ps formats, exact-key matching, unobservable
+ *      platform signal (win32) — all via injected readers.
+ *  (d) LIVE exactness (linux): a child spawned with REAL SDK-merge semantics
+ *      during an open window receives the exact set (no canary, no probes).
+ *  (e) WIRING pin (linux): runRpcSession + a drifting mock client (spawn
+ *      after start()'s first await, real merge semantics) → NOT killed, env
+ *      exact, run proceeds to prompt delivery. Mutation check 2026-10-20:
+ *      removing the shadow loop in buildExactEnvShadowOptions flips this red
+ *      (drifted child then inherits the parent env incl. the canary marker →
+ *      verifyRpcSpawnEnvSplice kills it).
  */
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
-import { closeRpcEnvSpliceWindow, openRpcEnvSpliceWindow, verifyRpcSpawnEnvSplice } from "../../../../src/runtime/child-pi/child-pi-rpc.ts";
+import {
+	buildExactEnvShadowOptions,
+	closeRpcEnvSpliceWindow,
+	openRpcEnvSpliceWindow,
+	verifyRpcSpawnEnvSplice,
+} from "../../../../src/runtime/child-pi/child-pi-rpc.ts";
 
 const CANARY = "PI_CREW_RPC_ENV_SPLICE_CANARY";
 
@@ -40,6 +48,58 @@ const CANARY = "PI_CREW_RPC_ENV_SPLICE_CANARY";
 function closeAllWindows(): void {
 	for (let i = 0; i < 8 && process.env[CANARY] !== undefined; i++) closeRpcEnvSpliceWindow();
 }
+
+// ---------------------------------------------------------------------------
+// (a) S* mechanism pins — the two JS/Node behaviors the whole design rests on
+// ---------------------------------------------------------------------------
+
+test("S* pin 1: spread semantics — a later {K: undefined} OVERRIDES the earlier key", () => {
+	const merged = { ...{ SECRET: "real-key", OTHER: "x" }, ...{ SECRET: undefined, WANTED: "yes" } };
+	assert.equal("SECRET" in merged, true, "the key must still be present (as undefined), not removed by spread");
+	assert.equal(merged.SECRET, undefined, "undefined in the LATER object wins — the merge result is undefined, not the parent value");
+	assert.equal(merged.OTHER, "x", "parent keys not shadowed survive the merge (that is why they MUST be shadowed explicitly)");
+	assert.equal(merged.WANTED, "yes");
+});
+
+test('S* pin 2: Node spawn DROPS env entries with undefined values (child sees ABSENT, not "undefined"/"")', () => {
+	const r = spawnSync(
+		process.execPath,
+		[
+			"-e",
+			"process.stdout.write(JSON.stringify({absent: process.env.S_STAR_PROBE_SECRET === undefined, fallback: process.env.S_STAR_PROBE_WANTED ?? null}))",
+		],
+		{ env: { ...process.env, S_STAR_PROBE_SECRET: undefined, S_STAR_PROBE_WANTED: "yes" }, encoding: "utf8", timeout: 30_000 },
+	);
+	assert.equal(r.status, 0, `probe child failed: ${r.stderr}`);
+	const seen = JSON.parse(r.stdout.trim()) as { absent: boolean; fallback: string | null };
+	assert.equal(seen.absent, true, 'undefined-valued env entry must be ABSENT from the child env (not the string "undefined")');
+	assert.equal(seen.fallback, "yes", "defined entries pass through");
+});
+
+test("S* pin 3: buildExactEnvShadowOptions — parent keys outside the intended set are shadowed undefined; intended keys pass through", () => {
+	const prevProbe = process.env.PI_CREW_S_STAR_UNIT_PROBE;
+	process.env.PI_CREW_S_STAR_UNIT_PROBE = "parent-leak";
+	try {
+		const intended: Record<string, string | undefined> = { PATH: "/usr/bin", HOME: "/root", OPTIONAL_UNDEF: undefined };
+		const shadow = buildExactEnvShadowOptions(intended);
+		assert.equal(shadow.PI_CREW_S_STAR_UNIT_PROBE, undefined, "parent-only key must be shadowed to undefined");
+		assert.equal("PI_CREW_S_STAR_UNIT_PROBE" in shadow, true, "shadowed key PRESENT in the map (spread-override requirement)");
+		assert.equal(shadow.PATH, "/usr/bin");
+		assert.equal(shadow.HOME, "/root");
+		assert.equal(shadow.OPTIONAL_UNDEF, undefined, "undefined-valued intended entries stay undefined (absent in child)");
+		// Prove the end-to-end merge with the exact SDK expression:
+		const merged = { ...process.env, ...shadow };
+		assert.equal(merged.PI_CREW_S_STAR_UNIT_PROBE, undefined);
+		assert.equal(merged.PATH, "/usr/bin");
+	} finally {
+		if (prevProbe === undefined) delete process.env.PI_CREW_S_STAR_UNIT_PROBE;
+		else process.env.PI_CREW_S_STAR_UNIT_PROBE = prevProbe;
+	}
+});
+
+// ---------------------------------------------------------------------------
+// (b) canary window pins (unchanged role: the marker feeds the verifier)
+// ---------------------------------------------------------------------------
 
 test("canary window: refcounted — open/open/close keeps the marker, last close removes it", () => {
 	try {
@@ -74,6 +134,11 @@ test("canary window: closing an unopened window is a no-op (depth floor at 0)", 
 	}
 });
 
+// ---------------------------------------------------------------------------
+// (c) detector pins — the canary is now a production TRIPWIRE for the S*
+//     invariant "child env == intended set"; these pin the detector itself.
+// ---------------------------------------------------------------------------
+
 test("verify: /proc-format environ (linux dispatch) — canary entry detected", () => {
 	const fakeProc = { pid: 424242 } as never;
 	const ok = verifyRpcSpawnEnvSplice(fakeProc, {
@@ -85,7 +150,7 @@ test("verify: /proc-format environ (linux dispatch) — canary entry detected", 
 		platform: "linux",
 		reader: () => "PATH=/usr/bin\0PI_CREW_RPC_ENV_SPLICE_CANARY=1\0LC_ALL=C",
 	});
-	assert.equal(leaked, false, "canary entry in child environ → SPAWN CONTRACT DRIFT");
+	assert.equal(leaked, false, "canary entry in child environ → INVARIANT BROKEN");
 });
 
 test("verify: /proc entry must match the KEY exactly (value substrings don't false-positive)", () => {
@@ -108,7 +173,7 @@ test("verify: darwin ps -Eww format — appended KEY=VALUE environment detected"
 		platform: "darwin",
 		reader: () => "/usr/local/bin/pi --mode rpc PI_CREW_RPC_ENV_SPLICE_CANARY=1 TERM=xterm-256color",
 	});
-	assert.equal(leaked, false, "canary in the ps-appended environment → SPAWN CONTRACT DRIFT");
+	assert.equal(leaked, false, "canary in the ps-appended environment → INVARIANT BROKEN");
 });
 
 test("verify: unobservable platform (win32) — explicit signal, never a silent-PASS with zero signal", () => {
@@ -122,77 +187,66 @@ test("verify: unobservable platform (win32) — explicit signal, never a silent-
 test("verify: reader reports unobservable (raced exit) → best-effort pass, no unobservable signal", () => {
 	const fakeProc = { pid: 424242 } as never;
 	const seen: string[] = [];
-	const ok = verifyRpcEnvHelper(
-		fakeProc,
-		() => undefined,
-		(p) => seen.push(p),
-	);
+	const ok = verifyRpcSpawnEnvSplice(fakeProc, { platform: "linux", reader: () => undefined, onUnobservable: (p) => seen.push(p) });
 	assert.equal(ok, true);
 	assert.deepEqual(seen, [], "an unobservable PID is NOT the same as an unobservable PLATFORM");
 });
 
-// The linux dispatch path uses the built-in /proc reader; exercise it via the
-// opts shape it actually takes in production (no explicit reader).
-function verifyRpcEnvHelper(proc: never, reader: () => string | undefined, onUnobservable: (p: string) => void): boolean {
-	return verifyRpcSpawnEnvSplice(proc, { platform: "linux", reader, onUnobservable: onUnobservable as never });
-}
+// ---------------------------------------------------------------------------
+// (d) LIVE exactness (linux): a child spawned with REAL SDK-merge semantics
+//     during an open canary window receives EXACTLY the intended set.
+// ---------------------------------------------------------------------------
 
-test("LIVE drift (linux): a child spawned DURING the open window inherits the canary → verify MUST fail", {
+test("LIVE exactness (linux): SDK-merge spawn during the window → child env is the exact intended set", {
 	skip: process.platform !== "linux",
 }, async () => {
+	const fs = await import("node:fs");
+	const os = await import("node:os");
+	const path = await import("node:path");
+	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-sstar-"));
+	const PROBE = "PI_CREW_S_STAR_LIVE_PROBE";
+	const prev = process.env[PROBE];
+	process.env[PROBE] = "would-leak";
 	openRpcEnvSpliceWindow();
-	let leaked: ReturnType<typeof verifyRpcSpawnEnvSplice> | undefined;
-	let clean: ReturnType<typeof verifyRpcSpawnEnvSplice> | undefined;
+	let child: ReturnType<typeof spawn> | undefined;
 	try {
-		// Simulate the drifted SDK: the spawn happens AFTER start()'s sync
-		// prefix (i.e. during the await window), so the child inherits
-		// process.env AS IT IS NOW — marker included. This is exactly the
-		// ordering the wave-2b code destroyed by deleting the marker early.
-		const child = spawn(process.execPath, ["-e", "process.stdout.write('up'); setInterval(() => {}, 1e6)"], {
-			stdio: ["ignore", "pipe", "ignore"],
+		const intended: Record<string, string | undefined> = { PATH: process.env.PATH, PI_CREW_S_STAR_WANTED: "yes" };
+		const shadow = buildExactEnvShadowOptions(intended);
+		// EXACT SDK semantics: RpcClient spawns with the merged env, possibly
+		// DELAYED (drift) — simulate the worst case by awaiting first.
+		await new Promise((r) => setTimeout(r, 10));
+		child = spawn(
+			process.execPath,
+			["-e", "process.stdout.write(JSON.stringify(Object.keys(process.env).sort())); setInterval(() => {}, 1e6)"],
+			{ stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, ...shadow } },
+		);
+		const keysRaw = await new Promise<string>((resolve) => {
+			child?.stdout?.once("data", (d) => resolve(d.toString()));
+			child?.once("exit", () => resolve(""));
 		});
-		try {
-			await new Promise<void>((resolve) => {
-				child.stdout.once("data", () => resolve());
-				child.once("exit", () => resolve());
-			});
-			leaked = verifyRpcSpawnEnvSplice(child); // real /proc reader
-		} finally {
-			child.kill("SIGKILL");
-		}
-		assert.equal(leaked, false, "drifted spawn during the window MUST be detected (wave-2b ordering was blind here)");
+		const keys = new Set(JSON.parse(keysRaw || "[]") as string[]);
+		assert.equal(keys.has(CANARY), false, "canary marker must NOT reach the child despite the open window + drift");
+		assert.equal(keys.has(PROBE), false, "arbitrary parent-only key must be shadowed away");
+		assert.equal(keys.has("PI_CREW_S_STAR_WANTED"), true, "intended key present");
+		assert.equal(keys.has("PATH"), true, "plumbing key present");
+		// Tripwire agrees: the merged-env child must verify clean.
+		assert.equal(verifyRpcSpawnEnvSplice(child), true, "canary tripwire must verify the exact env as clean");
 	} finally {
-		closeRpcEnvSpliceWindow();
+		child?.kill("SIGKILL");
+		closeAllWindows();
+		if (prev === undefined) delete process.env[PROBE];
+		else process.env[PROBE] = prev;
+		fs.rmSync(tmp, { recursive: true, force: true });
 	}
-	// After the window closes, a child spawned now is CLEAN — the negative
-	// control proving the detection above came from the window, not from some
-	// ambient env pollution.
-	const child2 = spawn(process.execPath, ["-e", "process.stdout.write('up'); setInterval(() => {}, 1e6)"], {
-		stdio: ["ignore", "pipe", "ignore"],
-	});
-	try {
-		await new Promise<void>((resolve) => {
-			child2.stdout.once("data", () => resolve());
-			child2.once("exit", () => resolve());
-		});
-		clean = verifyRpcSpawnEnvSplice(child2);
-	} finally {
-		child2.kill("SIGKILL");
-	}
-	assert.equal(clean, true, "post-window spawn must verify clean");
-	assert.equal(process.env[CANARY], undefined, "window must be fully closed after verification");
 });
 
 // ---------------------------------------------------------------------------
-// WIRING pin (runRpcSession): the window must span client.start()'s await —
-// a client whose spawn lands AFTER start()'s sync prefix (SDK drift) must be
-// killed with the loud splice-failure error. Differential: against the
-// wave-2b ordering (marker deleted right after start() returned) the drifted
-// child inherits a marker-free env, verification passes, and this exact
-// assertion fails (2026-10-20 mutation check).
+// (e) WIRING pin (runRpcSession): SDK drift is INERT under S* — a client
+//     whose spawn lands after start()'s first await still receives the exact
+//     intended env; the run is NOT killed and proceeds to prompt delivery.
 // ---------------------------------------------------------------------------
 
-test("WIRING: drifted (post-await) spawn via runRpcSession → killed with splice-failure error", {
+test("WIRING S*: drifted (post-await) spawn via runRpcSession → env EXACT, NOT killed, run proceeds", {
 	skip: process.platform !== "linux",
 }, async () => {
 	const fs = await import("node:fs");
@@ -200,20 +254,34 @@ test("WIRING: drifted (post-await) spawn via runRpcSession → killed with splic
 	const path = await import("node:path");
 	const { __runRpcSessionWithCtorForTests } = await import("../../../../src/runtime/child-pi/child-pi-rpc.ts");
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-drift-"));
+	const PROBE = "PI_CREW_W8_SHADOW_PROBE";
+	const prevProbe = process.env[PROBE];
+	process.env[PROBE] = "would-leak";
+	const envProbeFile = path.join(tmp, "child-env-keys.json");
 	try {
 		const spawned: Array<import("node:child_process").ChildProcess> = [];
+		let ctorEnv: Record<string, string | undefined> | undefined;
 		class DriftingClient {
 			process: import("node:child_process").ChildProcess | null = null;
-			constructor(_opts: unknown) {}
+			constructor(opts: { env?: Record<string, string | undefined> }) {
+				ctorEnv = opts.env;
+			}
 			async start() {
 				// SDK DRIFT: the spawn happens AFTER an await — outside the
-				// synchronous prefix, with process.env restored (marker still
-				// present under the FIXED window ordering).
+				// synchronous prefix. The client applies REAL SDK merge
+				// semantics: {...process.env, ...options.env}.
 				await new Promise((r) => setTimeout(r, 25));
-				const child = spawn(process.execPath, ["-e", "process.stdout.write('up'); setInterval(() => {}, 1e6)"], {
-					stdio: ["ignore", "pipe", "ignore"],
-					env: { ...process.env },
-				});
+				const child = spawn(
+					process.execPath,
+					[
+						"-e",
+						"process.stdout.write('up'); require('node:fs').writeFileSync(process.env.PI_CREW_ENVPROBE_FILE, JSON.stringify(Object.keys(process.env).sort())); setInterval(() => {}, 1e6)",
+					],
+					{
+						stdio: ["ignore", "pipe", "ignore"],
+						env: { ...process.env, ...(ctorEnv ?? {}), PI_CREW_ENVPROBE_FILE: envProbeFile },
+					},
+				);
 				this.process = child;
 				spawned.push(child);
 			}
@@ -225,7 +293,10 @@ test("WIRING: drifted (post-await) spawn via runRpcSession → killed with splic
 				return "";
 			}
 			async prompt() {
-				throw new Error("wire should never be reached for a killed child");
+				// Reached ONLY when the run was not killed at verification —
+				// the signal that drift was inert. Failing here is the
+				// expected terminal state for this mock.
+				throw new Error("wire reached (drift inert) — mock terminal");
 			}
 			async steer() {
 				return {};
@@ -265,23 +336,40 @@ test("WIRING: drifted (post-await) spawn via runRpcSession → killed with splic
 			},
 			"node",
 		);
-		assert.match(
-			result.error ?? "",
-			/env allowlist splice failed/,
-			`drifted spawn must be killed loudly; got error=${result.error ?? "(none)"} events=${JSON.stringify(events)}`,
+		assert.equal(
+			(result.error ?? "").includes("env allowlist splice failed"),
+			false,
+			`drift must be INERT under S* (no kill); got error=${result.error ?? "(none)"} events=${JSON.stringify(events)}`,
 		);
-		assert.equal(result.exitStatus?.killed, true, "the leaked child must be killed");
+		assert.match(result.error ?? "", /wire reached/, "the run must have proceeded PAST verification to prompt delivery");
+		assert.equal(result.exitStatus?.killed, false, "the drifted child must NOT be killed");
+		// The child writes its env probe asynchronously — poll for the file
+		// (bounded), never a fixed sleep (wave-7 discipline).
+		let probeJson = "";
+		for (let waited = 0; waited < 50 && probeJson === ""; waited++) {
+			try {
+				probeJson = fs.readFileSync(envProbeFile, "utf8");
+			} catch {
+				await new Promise((r) => setTimeout(r, 100));
+			}
+		}
+		assert.notEqual(probeJson, "", "child env probe file must appear (spawned child should have written its env keys)");
+		const keys = new Set(JSON.parse(probeJson) as string[]);
+		assert.equal(keys.has(CANARY), false, "canary must not reach the drifted child");
+		assert.equal(keys.has(PROBE), false, "parent-only PI_CREW_* probe must be shadowed away");
+		assert.equal(keys.has("PATH"), true, "allowlisted plumbing key present");
 		for (const c of spawned) {
-			assert.ok(c.killed || c.exitCode !== null || c.signalCode !== undefined || !c.pid, "spawned child must not survive");
 			try {
 				c.kill("SIGKILL");
 			} catch {
 				/* already dead */
 			}
 		}
-		assert.equal(process.env[CANARY], undefined, "window must close even on the kill path");
+		assert.equal(process.env[CANARY], undefined, "window must close even when the run proceeds");
 	} finally {
 		closeAllWindows();
+		if (prevProbe === undefined) delete process.env[PROBE];
+		else process.env[PROBE] = prevProbe;
 		fs.rmSync(tmp, { recursive: true, force: true });
 	}
 });
