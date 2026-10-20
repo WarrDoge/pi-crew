@@ -234,6 +234,9 @@ export const TEAM_EVENT_TYPES = [
 	"crew.task.retry_attempt",
 	// Dynamic workflow resume
 	"dwf.resumed",
+	// R14-C3 (wave 7): resume dispatch-context drift (modelOverride/team) —
+	// replayed agent results were produced under a different context.
+	"dwf.resume_context_mismatch",
 	// Foreground interrupt
 	"foreground.interrupt_requested",
 	// Goal loop (P0/P1) additional outcomes
