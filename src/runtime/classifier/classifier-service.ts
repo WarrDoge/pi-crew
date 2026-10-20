@@ -26,6 +26,7 @@
 import { getCrewEnvBool, getCrewEnvString } from "../../config/env-vars.ts";
 import type { MetricRegistry } from "../../observability/metric-registry.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
+import { redactSecrets } from "../../utils/redaction.ts";
 import { modelStringFromUnknown } from "../model/model-fallback.ts";
 
 /** Default classifier model (runtime.classifierModel default). */
@@ -294,6 +295,24 @@ interface ClassifyPipelineFallback {
 	errorMessage: string | undefined;
 }
 
+/** R2-L-B8 (wave-8): CHOKE-POINT redaction — every payload crossing to the
+ *  host classifier endpoint is serialized through redactSecrets first. The
+ *  wave-2b fix covered only the ambient-noise gate; the retry-triage consumer
+ *  (child-executor) sent the raw failure summary (≤2000 chars, may carry
+ *  provider keys echoed in stderr) to the same endpoint. Redacting HERE (not
+ *  per-consumer) covers all current and future classify consumers — the
+ *  pre-gate verdict state, retry triage, noise gate (double-redact harmless)
+ *  — and any added later. Serialization failure degrades to the original
+ *  payload: classify is a never-rejects pipeline and redaction must not turn
+ *  a redaction bug into a task failure. */
+function redactClassifyPayload<T>(payload: T): T {
+	try {
+		return JSON.parse(JSON.stringify(redactSecrets(payload))) as T;
+	} catch {
+		return payload;
+	}
+}
+
 async function runClassifyQuestion(input: ClassifyPipelineInput): Promise<ClassifyPipelineOk | ClassifyPipelineFallback> {
 	const registry = asClassifierRegistry(input.modelRegistry);
 	if (!registry || typeof registry.getAvailableOfType !== "function" || typeof registry.classify !== "function") {
@@ -331,10 +350,13 @@ async function runClassifyQuestion(input: ClassifyPipelineInput): Promise<Classi
 	const chosen = available[chosenIndex];
 	const usedModel = normalized[chosenIndex] ?? requested;
 	try {
-		const result = await registry.classify(chosen, {
-			state: input.state,
-			questions: { [input.questionKey]: input.question },
-		});
+		const result = await registry.classify(
+			chosen,
+			redactClassifyPayload({
+				state: input.state,
+				questions: { [input.questionKey]: input.question },
+			}),
+		);
 		const stopReason = typeof result?.stopReason === "string" ? result.stopReason : undefined;
 		const errorMessage = typeof result?.errorMessage === "string" ? result.errorMessage : undefined;
 		if (stopReason !== "stop") {

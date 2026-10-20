@@ -61,6 +61,7 @@
  */
 
 import type { ChildProcess } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getCrewEnv, getCrewEnvBool } from "../../config/env-vars.ts";
@@ -289,27 +290,98 @@ function attachPoolExitHook(poolKey: string, proc: ChildProcess): void {
 /** MINOR-4 marker var — see verifyRpcSpawnEnvSplice (never allowlisted). */
 const RPC_ENV_SPLICE_CANARY = "PI_CREW_RPC_ENV_SPLICE_CANARY";
 
-/**
- * MINOR-4 (wave-2 review): the env-splice contract below assumes RpcClient
- * start() spawns in its SYNCHRONOUS prefix. If a future SDK delays the spawn
- * past its first await, process.env has already been RESTORED and the child
- * silently inherits the FULL parent env — regressing the allowlist/per-task
- * key scoping model. Post-spawn canary: the parent env temporarily carries a
- * marker var that is ABSENT from the allowlisted childEnv; if /proc/<pid>/environ
- * (Linux only — best-effort elsewhere) still shows it AFTER start() resolved
- * (the RPC wire answered, so exec has happened and environ is stable), the
- * splice did not cover the actual spawn → the caller kills the child and
- * fails loudly instead of leaking. Exported for unit tests.
- */
-export function verifyRpcSpawnEnvSplice(proc: ChildProcess | null): boolean {
-	if (!proc?.pid || process.platform !== "linux") return true;
-	let environ: string;
+// ── R2-L-A7 (wave-8): refcounted canary window ───────────────────────────
+// The wave-2b MINOR-4 canary had a DEAD WINDOW: the canary was deleted from
+// the saved parent env synchronously after client.start() returned — BEFORE
+// `await startPromise`. A drifted SDK (the exact failure MINOR-4 guards:
+// spawn moved past start()'s first await) would spawn AFTER the delete, so
+// the child inherited the full parent env WITHOUT the canary — undetectable
+// even on Linux. The window must stay open until post-spawn verification
+// completes. Refcounted so overlapping RPC spawns (broker concurrency) don't
+// close each other's window. Cost: unrelated children spawned mid-window
+// inherit an inert reserved-name marker — acceptable; the name is
+// pi-crew-namespaced and no code reads it.
+let spliceWindowDepth = 0;
+
+/** Open one canary window (sets the marker on the parent env when the first
+ *  overlapping window opens). Paired with exactly one closeRpcEnvSpliceWindow
+ *  on every path — including exceptions — between open and verification. */
+export function openRpcEnvSpliceWindow(): void {
+	if (spliceWindowDepth++ === 0) process.env[RPC_ENV_SPLICE_CANARY] = "1";
+}
+
+/** Close one canary window (deletes the marker when the last closes). */
+export function closeRpcEnvSpliceWindow(): void {
+	if (spliceWindowDepth > 0 && --spliceWindowDepth === 0) delete process.env[RPC_ENV_SPLICE_CANARY];
+}
+
+/** Read the raw environment blob of an arbitrary pid (best-effort). Returns
+ *  undefined when unobservable (raced exit, permissions, no OS API). */
+export type SpliceEnvReader = (pid: number) => string | undefined;
+
+function readProcEnviron(pid: number): string | undefined {
 	try {
-		environ = fs.readFileSync(`/proc/${proc.pid}/environ`, "utf-8");
+		return fs.readFileSync(`/proc/${pid}/environ`, "utf-8");
 	} catch {
-		return true; // unobservable (raced exit, permissions) — best-effort
+		return undefined;
 	}
-	const leaked = environ.split("\0").some((entry) => entry.startsWith(`${RPC_ENV_SPLICE_CANARY}=`));
+}
+
+function readPsEnviron(pid: number): string | undefined {
+	// macOS (BSD ps): `ps -Eww -o command= -p PID` appends the environment
+	// (KEY=VALUE, whitespace-separated) after the command line. We only need
+	// presence of the reserved-name marker, not a full parse.
+	try {
+		return execFileSync("ps", ["-Eww", "-o", "command=", "-p", String(pid)], { timeout: 2000 }).toString();
+	} catch {
+		return undefined;
+	}
+}
+
+let unobservableWarned = false;
+
+/** MINOR-4 / R2-L-A7: post-spawn canary verification. The parent env carries
+ *  {@link RPC_ENV_SPLICE_CANARY} while the window is open (open->close spans
+ *  the spawn); the canary is NEVER in the allowlisted childEnv. If the child
+ *  env shows it, the spawn did not use the spliced env — the child carries
+ *  the FULL parent env (provider keys) — and the caller must kill it.
+ *
+ *  Platform coverage: linux /proc, darwin ps -Eww. win32 has no
+ *  cross-process environ API: instead of a silent PASS, emits a ONE-TIME
+ *  explicit warn (via onUnobservable) so drift on Windows is at least
+ *  visible in diagnostics. `opts` is injectable for unit tests.
+ */
+export function verifyRpcSpawnEnvSplice(
+	proc: ChildProcess | null,
+	opts?: { reader?: SpliceEnvReader; platform?: NodeJS.Platform; onUnobservable?: (platform: NodeJS.Platform) => void },
+): boolean {
+	if (!proc?.pid) return true;
+	const platform = opts?.platform ?? process.platform;
+	const reader = opts?.reader ?? (platform === "linux" ? readProcEnviron : platform === "darwin" ? readPsEnviron : undefined);
+	if (!reader) {
+		// R2-L-A7: never a silent PASS — surface the observability gap once.
+		if (!unobservableWarned) {
+			unobservableWarned = true;
+			logInternalError(
+				"child-pi-rpc.env-splice-canary",
+				new Error(
+					`env-splice canary unobservable on ${platform} (no cross-process environ API) — SDK spawn-contract drift on this platform would go UNDETECTED`,
+				),
+				"warn",
+			);
+		}
+		opts?.onUnobservable?.(platform);
+		return true;
+	}
+	const environ = reader(proc.pid);
+	if (environ === undefined) return true; // unobservable (raced exit, permissions) — best-effort
+	// /proc: NUL-separated entries (exact KEY match). ps: whitespace-separated
+	// after the command line (reserved name ⇒ substring is unambiguous — no
+	// legitimate argv contains PI_CREW_RPC_ENV_SPLICE_CANARY=).
+	const leaked =
+		platform === "linux"
+			? environ.split("\0").some((entry) => entry.startsWith(`${RPC_ENV_SPLICE_CANARY}=`))
+			: environ.includes(`${RPC_ENV_SPLICE_CANARY}=`);
 	return !leaked;
 }
 
@@ -352,6 +424,18 @@ export async function tryChildPiRpcRun(plan: ChildPiRpcRunPlan): Promise<ChildPi
 		: undefined;
 	const Ctor = RpcClient as unknown as new (options: unknown) => RpcClientInstance;
 	return runRpcSession(Ctor, plan, cliPath, pooled);
+}
+
+/** R2-L-A7 (wave 8) TEST SEAM — runRpcSession with an INJECTED RpcClient ctor
+ *  so unit tests can simulate an SDK spawn-contract drift (spawn moved past
+ *  start()'s first await) and pin that the canary window still catches it.
+ *  Production always goes through tryChildPiRpcRun (real RpcClient). */
+export function __runRpcSessionWithCtorForTests(
+	RpcClientCtor: new (options: unknown) => RpcClientInstance,
+	plan: ChildPiRpcRunPlan,
+	cliPath: string,
+): Promise<ChildPiRunResult> {
+	return runRpcSession(RpcClientCtor, plan, cliPath, undefined);
 }
 
 /** Local SEC-1 twin of child-pi.ts redactStderrExcerpt (cycle-free import). */
@@ -401,6 +485,13 @@ async function runRpcSession(
 			}
 		}
 	};
+	// R2-L-A7: window closer is a no-op for pooled reuse (no splice, no window);
+	// fresh spawns install the real closer below. Hoisted so every early-return
+	// path between open and verification can close the window (A5 discipline).
+	let windowClosed = true;
+	let closeWindowOnce: () => void = () => {
+		/* no-op unless a fresh spawn installs the real closer below */
+	};
 	if (!pooled) {
 		// Env-splice: RpcClient spawns with `{...process.env, ...options.env}`
 		// (rpc-client.js start()) — WITHOUT this splice the child would inherit
@@ -409,13 +500,23 @@ async function runRpcSession(
 		// start(), before its first await, so restoring before awaiting keeps
 		// the splice invisible to every other reader of process.env (single
 		// JS thread — no interleaving is possible inside this sync block).
-		// MINOR-4: the canary below pins that assumption — if a future SDK
-		// moves the spawn past its first await, verifyRpcSpawnEnvSplice()
-		// detects the leaked full-parent-env child post-spawn (see below).
+		// MINOR-4 + R2-L-A7 (wave-8): the canary WINDOW now stays open through
+		// `await startPromise` until post-spawn verification — the wave-2b
+		// version deleted the canary synchronously after start() returned, so
+		// the drifted-spawn case it exists to catch inherited a canary-free env
+		// and could NEVER fire (even on Linux). Refcounted: concurrent RPC
+		// spawns share one window; the marker is inert for non-RPC children.
 		const savedEnv = process.env;
 		delete childEnv[RPC_ENV_SPLICE_CANARY]; // belt & braces — never allowlisted
-		savedEnv[RPC_ENV_SPLICE_CANARY] = "1";
+		openRpcEnvSpliceWindow();
 		let startPromise: Promise<void>;
+		windowClosed = false;
+		closeWindowOnce = (): void => {
+			if (!windowClosed) {
+				windowClosed = true;
+				closeRpcEnvSpliceWindow();
+			}
+		};
 		try {
 			process.env = childEnv as unknown as NodeJS.ProcessEnv;
 			try {
@@ -423,12 +524,14 @@ async function runRpcSession(
 			} finally {
 				process.env = savedEnv;
 			}
-		} finally {
-			delete savedEnv[RPC_ENV_SPLICE_CANARY];
+		} catch (error) {
+			closeWindowOnce();
+			throw error;
 		}
 		try {
 			await startPromise;
 		} catch (error) {
+			closeWindowOnce();
 			const stderr = client.getStderr?.() ?? "";
 			const message = `RPC child Pi failed to start: ${error instanceof Error ? error.message : String(error)}. Stderr: ${redactExcerpt(stderr, 500) || "(none)"}`;
 			try {
@@ -470,6 +573,7 @@ async function runRpcSession(
 	// runtime (rpc-client.js field) — hence the structural cast.
 	const child = (client as unknown as { process: ChildProcess | null }).process;
 	if (!child) {
+		closeWindowOnce();
 		cleanupFreshTempDir();
 		return {
 			exitCode: null,
@@ -486,11 +590,15 @@ async function runRpcSession(
 			},
 		};
 	}
-	// MINOR-4: post-spawn canary (start() resolved = the RPC wire answered =
-	// exec happened, so /proc/<pid>/environ is stable). A canary hit means the
-	// sync-spawn assumption broke and the child carries the FULL parent env —
-	// kill it immediately and fail loudly; never register or prompt it.
-	if (!pooled && !verifyRpcSpawnEnvSplice(child)) {
+	// MINOR-4 + R2-L-A7: post-spawn canary (start() resolved = the RPC wire
+	// answered = exec happened, so the child env is stable). A canary hit means
+	// the sync-spawn assumption broke and the child carries the FULL parent
+	// env — kill it immediately and fail loudly; never register or prompt it.
+	// The window closes here on EVERY path past this point: leaked (kill) or
+	// verified-clean.
+	const spliceVerified = pooled || verifyRpcSpawnEnvSplice(child);
+	closeWindowOnce();
+	if (!spliceVerified) {
 		killProcessTree(child.pid, child);
 		const message =
 			"RPC env allowlist splice failed post-spawn verification (child inherited the full parent env — SDK spawn contract drifted); process killed";

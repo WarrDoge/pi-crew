@@ -6,6 +6,20 @@
 
 - **fix(gate): RT24-F1 root-gate config/autonomy read over-block** — `rootGateBlockReason` counted the `args` subcommand carrier as a config patch key, so worker-origin `config {args:"show"}` READS were rejected as "writes user-scope config" (live-caught in the v0.11.24 real-test battery; docblock promised reads open). `args` added to the carrier-key sets for `config` and `autonomy`; unknown junk keys stay write-classified (fail-closed). Pinned: reads with carrier keys open, writes hidden behind the same key still gated (`unset`/patch keys), user config byte-untouched. Live-verified end-to-end (fresh `pi -p`, worker env): read allowed + dumps config; `unset` write gate-blocked verbatim "root-session required".
 
+## [0.11.29] — 8 deferred-LOW audit: A7 env-splice canary REAL fix (+ dead-window bug), B8 choke-point redaction (2nd leak site), mutation-pins
+
+### Security
+- **R2-L-B8, second leak site (choke-point fix)**: the wave-2b redaction covered only the ambient-noise gate; `child-executor` retry-triage still sent the UNREDACTED failure summary (≤2000 chars — may carry provider keys echoed in stderr) to the classifier endpoint when `classifierEnabled`. Redaction now happens in `classifier-service` itself (`redactClassifyPayload` on every `registry.classify` payload), covering ALL current and future classify consumers (retry triage, pre-gate verdict state, noise gate). Pinned + mutation-checked.
+- **R2-L-A7, real fix**: the RPC env-splice canary (guards "SDK spawn drift → worker inherits the FULL parent env / provider keys") had a DEAD WINDOW — the canary marker was deleted from the parent env synchronously after `start()` returned, BEFORE `await startPromise`, so the exact drifted spawn it exists to catch inherited a canary-free env and could never be detected, even on Linux. The marker window is now refcounted (safe under concurrent RPC spawns) and stays open until post-spawn verification completes; a drifted child is killed with a loud `env allowlist splice failed` error. macOS gains a real observer (`ps -Eww`); win32 (no cross-process environ API) now emits an explicit one-time diagnostic instead of a silent PASS. Wiring pin drives a mock client whose spawn lands after `start()`'s first await — mutation-proven against the old ordering.
+
+### Fixed (pins for already-shipped fixes — the LOW record was stale; 7/8 items were already fixed in wave-2b/4/6)
+- **R2-L-A6**: `escalate`'s sender-chosen `to` is restricted to the connection's run/own task (wave-2b) — now pinned (foreign `to` → `bad-params`; own task/runId accepted) and mutation-checked.
+- **R2-L-B1**: a throwing `onYield` in `submit_result` returns an error tool-result instead of the success text (wave-2b) — now pinned and mutation-checked.
+- **R2-L-A4 / B5 / B7 / M3-15**: audited as already fixed + pinned (requestId dedup; cron-scan hoist; generic head/tail pruned-output digest; real-API resilient edit) — record corrected, no code change.
+
+### Tests
+- `env-splice-canary.test.ts` (9: refcount window, /proc + ps formats, exact-key match, win32 signal, LIVE linux drift, runRpcSession wiring drift), `crew-broker-escalate-to-pin.test.ts` (3), `submit-result-error-result.test.ts` (2), classifier-service choke-point pins (+2). 4/4 mutation checks (A6, B1, B8-choke, A7-wiring) — each reverts red, restores green.
+
 ## [0.11.28] — Residual quality wave: prune-anchor silence, 6 flake classes hardened, LOW-tail fixes
 
 ### Fixed

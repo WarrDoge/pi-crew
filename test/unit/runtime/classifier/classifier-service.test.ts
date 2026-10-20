@@ -550,3 +550,60 @@ test("[cls-20] score variant: metric counter + confidence histogram via a real M
 	assert.ok(snapshot.includes("crew.classifier.confidence"), "confidence histogram observed");
 	metricRegistry.dispose();
 });
+
+// ---------------------------------------------------------------------------
+// R2-L-B8 (wave 8): CHOKE-POINT redaction — every payload crossing to the
+// classifier endpoint passes through redactSecrets, covering ALL consumers
+// (ambient-noise gate redacts upstream too; child-executor retryTriage did
+// NOT — the wave-2b fix missed that site; the pre-gate verdict state). The
+// service boundary is the durable fix.
+// ---------------------------------------------------------------------------
+
+test("[B8-wave8] classifyBool redacts planted secrets in state BEFORE registry.classify sees them", async () => {
+	const secret = "sk-ant-api03-FAKE0000deadbeef0000cafebabe00";
+	const registry = fakeRegistry({
+		available: [{ provider: "opencode", id: "jev-1.13-free" }],
+		classifyImpl: async () => ({ answers: { transient: true }, stopReason: "stop" }),
+	});
+	const result = await classifyBool({
+		modelRegistry: registry,
+		classifierModel: "opencode/jev-1.13-free",
+		questionKey: "transient",
+		question: BOOL_QUESTION,
+		state: {
+			failureSummary: `provider call failed with key ${secret} — retry may help`,
+			failedModel: "opencode/gpt-x",
+			exitCode: 1,
+		},
+		fallback: true,
+	});
+	assert.equal(result.fromClassifier, true);
+	assert.equal(registry.calls.length, 1);
+	const wire = JSON.stringify(registry.calls[0]!.request);
+	assert.ok(!wire.includes(secret), `raw secret must NOT reach the classifier wire: ${wire}`);
+	// The redaction marker (or a mutated key form) replaced it — the payload is
+	// still structurally intact.
+	const state = (registry.calls[0]!.request as { state: { failureSummary?: string; failedModel?: string; exitCode?: number } }).state;
+	assert.ok(state, "state object must survive redaction structurally");
+	assert.equal(state.failedModel, "opencode/gpt-x", "non-secret fields pass through unchanged");
+	assert.equal(state.exitCode, 1);
+	assert.ok(!state.failureSummary?.includes(secret), "failureSummary must be redacted, not dropped");
+});
+
+test("[B8-wave8] questions/instructions survive redaction structurally (payload shape preserved)", async () => {
+	const registry = fakeRegistry({
+		available: [{ provider: "opencode", id: "jev-1.13-free" }],
+		classifyImpl: async () => ({ answers: { transient: true }, stopReason: "stop" }),
+	});
+	await classifyBool({
+		modelRegistry: registry,
+		classifierModel: "opencode/jev-1.13-free",
+		questionKey: "transient",
+		question: BOOL_QUESTION,
+		state: { failureSummary: "clean summary" },
+		fallback: true,
+	});
+	const request = registry.calls[0]!.request as { state: Record<string, unknown>; questions: Record<string, unknown> };
+	assert.equal((request.questions.transient as { type?: string }).type, "bool", "question shape unchanged");
+	assert.equal(request.state.failureSummary, "clean summary", "clean values pass through byte-identical");
+});
