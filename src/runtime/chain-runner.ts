@@ -105,6 +105,10 @@ export class ChainRunner {
 	/** Maximum size per handoff entry to prevent memory issues from large artifacts */
 	private static readonly MAX_HANDOFF_ENTRY_SIZE = 5000; // bytes per entry
 
+	/** v0.11.27: `--with-context` full-output cap (default history carries only
+	 * 5000-char summaries; this is the explicit full-output channel, bounded). */
+	private static readonly MAX_WITH_CONTEXT_OUTPUT_CHARS = 20000; // chars
+
 	private taskRunner: ChainTaskRunner;
 	private handoffManager: HandoffManager;
 
@@ -186,8 +190,16 @@ export class ChainRunner {
 		// success predicate cannot report a truncated chain as complete.
 		let brokeEarly = false;
 
-		for (let i = 0; i < spec.steps.length; i++) {
-			const step = spec.steps[i];
+		// v0.11.27 (R14-C1 tail): expand `:N` loop steps into an execution plan —
+		// one entry per ITERATION. Each iteration is its own ChainStepResult
+		// (name#k for k>1) so a failing iteration stays visible; the success
+		// predicate counts planned EXECUTIONS, so a chain that broke inside a
+		// loop cannot pass unexecuted iterations off as done (R14-C5 class).
+		const plan = this.buildExecutionPlan(spec);
+		const plannedExecutions = plan.length;
+
+		for (const entry of plan) {
+			const { step, stepIndex: i, displayName, iterations } = entry;
 			const stepStart = Date.now();
 
 			try {
@@ -198,7 +210,7 @@ export class ChainRunner {
 				const stepContext = this.enrichContextFromHandoffs(accumulatedContext, stepResults);
 
 				// Execute step
-				const result = await this.executeStep(effectiveConfig, stepContext);
+				const result = await this.executeStep(effectiveConfig, stepContext, stepResults);
 
 				// Track tokens
 				if (result.usage?.totalTokens) {
@@ -210,7 +222,7 @@ export class ChainRunner {
 
 				stepResults.push({
 					step: i + 1,
-					name: step.name,
+					name: displayName,
 					outcome: result.outcome,
 					result,
 					handoff,
@@ -243,10 +255,10 @@ export class ChainRunner {
 					await appendEventAsync(eventsPath, {
 						type: "chain.step_completed",
 						runId: "chain",
-						taskId: `step-${i + 1}`,
+						taskId: iterations > 1 ? `step-${i + 1}#${entry.iter}` : `step-${i + 1}`,
 						data: {
 							step: i + 1,
-							name: step.name,
+							name: displayName,
 							outcome: result.outcome,
 							duration: Date.now() - stepStart,
 						},
@@ -257,7 +269,7 @@ export class ChainRunner {
 
 				stepResults.push({
 					step: i + 1,
-					name: step.name,
+					name: displayName,
 					outcome: "failure",
 					duration: Date.now() - stepStart,
 					error: errMsg,
@@ -277,7 +289,7 @@ export class ChainRunner {
 		// for a chain whose remaining steps never ran. An empty spec was vacuously
 		// green for the same reason. Success now requires: at least one step, no
 		// early break, every planned step executed, and every outcome `success`.
-		const allStepsExecuted = stepResults.length === spec.steps.length;
+		const allStepsExecuted = stepResults.length === plannedExecutions;
 		const allOutcomesSuccessful = stepResults.every((s) => s.outcome === "success");
 
 		return {
@@ -393,9 +405,14 @@ export class ChainRunner {
 		// Parse step timeout
 		const timeoutStr = this.extractFlag(step, "timeout");
 		if (timeoutStr) {
-			const timeoutMs = parseInt(timeoutStr, 10);
-			if (!Number.isNaN(timeoutMs) && timeoutMs > 0 && timeoutMs <= 86400000) {
-				parsed.timeout = timeoutMs * 1000; // Convert seconds to ms
+			// v0.11.27 (R14-C2): the flag is SECONDS — the old bound compared the
+			// seconds value against 86400000 (a 1000-day ms bound) before
+			// multiplying, so `--timeout 99999999` was silently accepted. Now
+			// 1..86400 s (1 day), and the value is actually CONSUMED (chain-executor
+			// forwards it as runParams.timeoutMs).
+			const timeoutSec = parseInt(timeoutStr, 10);
+			if (!Number.isNaN(timeoutSec) && timeoutSec > 0 && timeoutSec <= 86400) {
+				parsed.timeout = timeoutSec * 1000;
 			}
 		}
 
@@ -412,7 +429,12 @@ export class ChainRunner {
 	 * DSL features: parallel(...), :loopCount, --with-context flag
 	 */
 	private hasDSLConstructs(chainString: string): boolean {
-		return /\bparallel\s*\(/.test(chainString) || /\w+:\d+\b/.test(chainString) || /--with-context/.test(chainString);
+		// v0.11.27 (probe-caught): `:\d+` no longer requires a leading \w — a
+		// QUOTED goal followed by `:2` (`"polish":2`) must route to the DSL
+		// parser too. Broadening is safe: time-like false positives
+		// ("deploy at 10:30") still throw inside the DSL parser and fall back to
+		// the simple splitter exactly as before.
+		return /\bparallel\s*\(/.test(chainString) || /:\d+\b/.test(chainString) || /--with-context/.test(chainString);
 	}
 
 	/**
@@ -613,7 +635,29 @@ export class ChainRunner {
 	/**
 	 * Execute a single step.
 	 */
-	private async executeStep(config: ChainStep, context: Record<string, unknown>): Promise<TaskResult> {
+	private async executeStep(
+		config: ChainStep,
+		context: Record<string, unknown>,
+		previousResults: ChainStepResult[],
+	): Promise<TaskResult> {
+		// v0.11.27 (R14-C1 tail): DSL `args` append to the goal — positional goal
+		// arguments (`"research" "topic X"` -> goal "research topic X").
+		const dslArgs = Array.isArray(config.context?.args) ? (config.context.args as string[]) : undefined;
+		const baseGoal = config.inlineGoal ?? config.name;
+		const goal = dslArgs && dslArgs.length > 0 ? [baseGoal, ...dslArgs].join(" ") : baseGoal;
+
+		// v0.11.27 (R14-C1 tail): DSL `--with-context` passes the PREVIOUS step's
+		// full worker output (capped) — distinct from the default __chainHistory,
+		// which carries only size-capped handoff summaries.
+		const withContext = config.context?.withContext === true;
+		let chainPrevOutput: string | undefined;
+		if (withContext) {
+			const prev = [...previousResults].reverse().find((r) => r.outcome === "success" && r.result?.outputText);
+			if (prev?.result?.outputText) {
+				chainPrevOutput = prev.result.outputText.slice(0, ChainRunner.MAX_WITH_CONTEXT_OUTPUT_CHARS);
+			}
+		}
+
 		// Pass step config (team/workflow/model) into the packet context so the
 		// concrete ChainTaskRunner can resolve which team/workflow to run. Without
 		// this, a step parsed to a @teamName reference would lose its team because
@@ -622,7 +666,7 @@ export class ChainRunner {
 		const packet: TaskPacket = {
 			taskId: `chain-${Date.now()}-${config.name}`,
 			runId: "chain",
-			goal: config.inlineGoal ?? config.name,
+			goal,
 			summarizeThreshold: 3000,
 			collapseContext: true,
 			context: {
@@ -630,10 +674,51 @@ export class ChainRunner {
 				__chainStepTeam: config.team,
 				__chainStepWorkflow: config.workflow,
 				__chainStepModel: config.model,
+				...(chainPrevOutput !== undefined ? { __chainPrevOutput: chainPrevOutput } : {}),
+				// v0.11.27 (R14-C2): wire the previously-dead `--timeout` flag into
+				// the step run's deadline (ms; consumed by chain-executor as
+				// runParams.timeoutMs -> CORE-8 resolveRunDeadline).
+				...(config.timeout !== undefined ? { __chainStepTimeoutMs: config.timeout } : {}),
 			},
 		};
 
 		return this.taskRunner.runTask(packet);
+	}
+
+	/** v0.11.27: iterations planned for a step — `:N` DSL (parser-clamped 1..10). */
+	private plannedIterations(step: ChainStep): number {
+		const n = step.context?.loopCount;
+		return typeof n === "number" && Number.isInteger(n) && n >= 1 ? Math.min(10, n) : 1;
+	}
+
+	/** v0.11.27: expand steps into per-iteration plan entries. */
+	private buildExecutionPlan(spec: ChainSpec): Array<{
+		step: ChainStep;
+		stepIndex: number;
+		iter: number;
+		iterations: number;
+		displayName: string;
+	}> {
+		const plan: Array<{
+			step: ChainStep;
+			stepIndex: number;
+			iter: number;
+			iterations: number;
+			displayName: string;
+		}> = [];
+		spec.steps.forEach((step, stepIndex) => {
+			const iterations = this.plannedIterations(step);
+			for (let iter = 1; iter <= iterations; iter++) {
+				plan.push({
+					step,
+					stepIndex,
+					iter,
+					iterations,
+					displayName: iter > 1 ? `${step.name}#${iter}` : step.name,
+				});
+			}
+		});
+		return plan;
 	}
 
 	/**

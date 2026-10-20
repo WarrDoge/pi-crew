@@ -690,3 +690,202 @@ test("ChainRunner - parseChain handles trailing arrow", () => {
 
 	assert.strictEqual(spec.steps.length, 3); // Empty step created
 });
+
+// ─── v0.11.27 (R14-C1 tail): `:N` iterations, args, --with-context ────────
+
+test("ChainRunner - v0.11.27: `:3` executes three sequential iterations, each visible", async () => {
+	let call = 0;
+	const names: string[] = [];
+	const mockRunner: ChainTaskRunner = {
+		runTask: async () => {
+			call++;
+			return createTaskResult({ outputText: `out-${call}` });
+		},
+	};
+	const runner = new ChainRunner(mockRunner, createMockHandoffManager());
+
+	const spec = runner.parseChain("warmup -> polish:3");
+	assert.equal(spec.steps[1]?.context?.loopCount, 3, "DSL path maps :3 to context.loopCount");
+
+	const result = await runner.runChain(spec);
+	void names;
+
+	assert.equal(call, 4, "1 warmup + 3 polish iterations");
+	assert.deepStrictEqual(
+		result.steps.map((s) => s.name),
+		["warmup", "polish", "polish#2", "polish#3"],
+		"iterations >1 are suffixed #k so each stays visible",
+	);
+	assert.equal(result.success, true);
+});
+
+test("ChainRunner - v0.11.27: failure inside a loop breaks the chain (no unexecuted-iteration false-green)", async () => {
+	let call = 0;
+	const mockRunner: ChainTaskRunner = {
+		runTask: async () => {
+			call++;
+			return createTaskResult({ outcome: call === 2 ? "failure" : "success" });
+		},
+	};
+	const runner = new ChainRunner(mockRunner, createMockHandoffManager());
+
+	const result = await runner.runChain(runner.parseChain("polish:3"));
+
+	assert.equal(call, 2, "iteration #3 never ran");
+	assert.equal(result.steps.length, 2);
+	assert.equal(result.steps[1]?.name, "polish#2");
+	assert.equal(result.steps[1]?.outcome, "failure");
+	assert.equal(result.success, false, "planned=3 executions, only 2 ran");
+});
+
+test("ChainRunner - v0.11.27: continueOnError runs remaining iterations despite a failure", async () => {
+	let call = 0;
+	const mockRunner: ChainTaskRunner = {
+		runTask: async () => {
+			call++;
+			return createTaskResult({ outcome: call === 2 ? "failure" : "success" });
+		},
+	};
+	const runner = new ChainRunner(mockRunner, createMockHandoffManager());
+
+	const spec = runner.parseChain("polish:3");
+	spec.continueOnError = true;
+	const result = await runner.runChain(spec);
+
+	assert.equal(call, 3, "all iterations ran");
+	assert.equal(result.steps.length, 3);
+	assert.equal(result.success, false, "the failed iteration still fails the chain");
+});
+
+test("ChainRunner - v0.11.27: DSL positional args append to the step goal", async () => {
+	const goals: string[] = [];
+	const mockRunner: ChainTaskRunner = {
+		runTask: async (packet: TaskPacket) => {
+			goals.push(packet.goal);
+			return createTaskResult();
+		},
+	};
+	const runner = new ChainRunner(mockRunner, createMockHandoffManager());
+
+	// --with-context forces the DSL path; the quoted string is a positional arg.
+	await runner.runChain(runner.parseChain('start -> work --with-context "final-report.md"'));
+
+	assert.equal(goals[1], "work final-report.md", "args join the step goal");
+	assert.equal(goals[0], "start");
+});
+
+test("ChainRunner - v0.11.27: --with-context passes the previous step's FULL output", async () => {
+	const captured: Array<Record<string, unknown> | undefined> = [];
+	let call = 0;
+	const mockRunner: ChainTaskRunner = {
+		runTask: async (packet: TaskPacket) => {
+			call++;
+			captured.push(packet.context);
+			return createTaskResult({ outputText: call === 1 ? "FULL-PREV-OUTPUT" : "second" });
+		},
+	};
+	const runner = new ChainRunner(mockRunner, createMockHandoffManager());
+
+	await runner.runChain(runner.parseChain("produce -> consume --with-context"));
+	assert.equal(captured[1]?.__chainPrevOutput, "FULL-PREV-OUTPUT", "full prev output forwarded");
+
+	// Without the flag the key is absent (default path = handoff summaries only).
+	const captured2: Array<Record<string, unknown> | undefined> = [];
+	const mockRunner2: ChainTaskRunner = {
+		runTask: async (packet: TaskPacket) => {
+			captured2.push(packet.context);
+			return createTaskResult({ outputText: "x".repeat(30) });
+		},
+	};
+	const runner2 = new ChainRunner(mockRunner2, createMockHandoffManager());
+	await runner2.runChain(runner2.parseChain("produce -> consume"));
+	assert.equal(captured2[1]?.__chainPrevOutput, undefined, "no flag → no full-output channel");
+});
+
+test("ChainRunner - v0.11.27: --with-context caps the forwarded output at 20000 chars", async () => {
+	const captured: Array<Record<string, unknown> | undefined> = [];
+	let call = 0;
+	const mockRunner: ChainTaskRunner = {
+		runTask: async (packet: TaskPacket) => {
+			call++;
+			captured.push(packet.context);
+			return createTaskResult({ outputText: call === 1 ? "x".repeat(25000) : "y" });
+		},
+	};
+	const runner = new ChainRunner(mockRunner, createMockHandoffManager());
+	await runner.runChain(runner.parseChain("produce -> consume --with-context"));
+	const prevOutput = captured[1]?.__chainPrevOutput;
+	assert.ok(typeof prevOutput === "string");
+	assert.equal(prevOutput.length, 20000);
+});
+
+test("ChainRunner - v0.11.27 (R14-C2): --timeout parses as SECONDS 1..86400 into ms", () => {
+	const runner = new ChainRunner(createMockTaskRunner(), createMockHandoffManager());
+
+	const ok = runner.parseChain("a --timeout 90 -> b");
+	assert.equal(ok.steps[0]?.timeout, 90000, "90 s → 90000 ms");
+
+	const over = runner.parseChain("a --timeout 99999 -> b");
+	assert.equal(over.steps[0]?.timeout, undefined, "over 1 day → dropped, not accepted as 1000-day ms");
+
+	const day = runner.parseChain("a --timeout 86400 -> b");
+	assert.equal(day.steps[0]?.timeout, 86400000, "boundary: exactly 1 day is valid");
+});
+
+test("ChainRunner - v0.11.27 (R14-C2): step timeout reaches the packet context as __chainStepTimeoutMs", async () => {
+	const captured: Array<Record<string, unknown> | undefined> = [];
+	const mockRunner: ChainTaskRunner = {
+		runTask: async (packet: TaskPacket) => {
+			captured.push(packet.context);
+			return createTaskResult();
+		},
+	};
+	const runner = new ChainRunner(mockRunner, createMockHandoffManager());
+	await runner.runChain(runner.parseChain("a --timeout 120 -> b"));
+
+	assert.equal(captured[0]?.__chainStepTimeoutMs, 120000, "consumed by chain-executor as runParams.timeoutMs");
+	assert.equal(captured[1]?.__chainStepTimeoutMs, undefined, "step b has no timeout flag");
+});
+
+test("ChainRunner - v0.11.27 (probe-caught): QUOTED goal + `:2` routes to DSL (not silent fallback)", async () => {
+	let call = 0;
+	const names: string[] = [];
+	const mockRunner: ChainTaskRunner = {
+		runTask: async (packet: TaskPacket) => {
+			call++;
+			names.push(packet.goal);
+			return createTaskResult();
+		},
+	};
+	const runner = new ChainRunner(mockRunner, createMockHandoffManager());
+
+	const spec = runner.parseChain('"Emit APPLE on line one" -> "Repeat it then append DONE":2 --with-context "final"');
+
+	// The constructs must SURVIVE parsing (previously the quoted name made the
+	// DSL parser throw and the simple splitter silently dropped them).
+	assert.equal(spec.steps.length, 2);
+	assert.equal(spec.steps[1]?.context?.loopCount, 2);
+	assert.equal(spec.steps[1]?.context?.withContext, true);
+	assert.deepEqual(spec.steps[1]?.context?.args, ["final"]);
+
+	const result = await runner.runChain(spec);
+	assert.equal(call, 3, "step 1 + TWO iterations of step 2");
+	assert.deepStrictEqual(
+		result.steps.map((s) => s.name),
+		["Emit APPLE on line one", "Repeat it then append DONE", "Repeat it then append DONE#2"],
+	);
+	assert.equal(result.success, true);
+	// args append to the goal on every iteration
+	assert.match(names[1] ?? "", / final$/);
+	assert.match(names[2] ?? "", / final$/);
+});
+
+test("ChainRunner - v0.11.27: time-like false positives still fall back safely", () => {
+	const runner = new ChainRunner(createMockTaskRunner(), createMockHandoffManager());
+	// `:30` matches the broadened gate, but the DSL parser throws on the stray
+	// tokens and the simple splitter keeps the goal INTACT (one literal step).
+	const spec = runner.parseChain("deploy the build at 10:30 sharp");
+	assert.equal(spec.steps.length, 1);
+	assert.ok(typeof spec.steps[0]?.inlineGoal === "string" || typeof spec.steps[0]?.name === "string", "goal text survives the fallback");
+	assert.equal(spec.steps[0]?.context?.loopCount, undefined, "no loop swallowed the goal");
+});

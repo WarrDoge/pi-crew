@@ -235,7 +235,14 @@ export class ChainTeamRunExecutor implements ChainTaskRunner {
 		// 1. Format chain history into the goal — this is how context reaches the worker.
 		//    Mirrors the parentContext pattern in child-pi.ts (parent context + task delimiter).
 		const historyPrefix = formatChainHistory(context);
-		const enrichedGoal = historyPrefix ? `${historyPrefix}\n\n---\n# Current Chain Step\n${packet.goal}` : packet.goal;
+		// v0.11.27 (R14-C1 tail): `--with-context` carries the previous step's FULL
+		// output as __chainPrevOutput (runner-capped); render it as its own block so
+		// the worker sees raw output, not just the size-capped handoff summary.
+		const prevOutput = typeof context.__chainPrevOutput === "string" ? context.__chainPrevOutput.trim() : "";
+		const prevOutputBlock = prevOutput ? `# Previous Step Output (--with-context)\n\n${prevOutput}` : "";
+		const headerParts = [historyPrefix, prevOutputBlock].filter((part) => part.length > 0);
+		const enrichedGoal =
+			headerParts.length > 0 ? `${headerParts.join("\n\n---\n")}\n\n---\n# Current Chain Step\n${packet.goal}` : packet.goal;
 
 		// 2. Resolve team/workflow/model: step config (set by executeStep) → overrides → default.
 		//    BUG-44 (github #44): a workflow override of "chain" is a dispatcher-only marker
@@ -250,6 +257,11 @@ export class ChainTeamRunExecutor implements ChainTaskRunner {
 		// 3. Call handleRun for the heavy lifting. async:false forces each step to
 		//    complete synchronously (overrides asyncByDefault) so the chain is sequential.
 		//    NO `chain` key here — so the run.ts guard does not re-enter chain dispatch.
+		// v0.11.27 (R14-C2): forward the previously-dead `--timeout N` (s) flag.
+		// resolveRunDeadline honors params.timeoutMs (CORE-8 unified deadline:
+		// params > config.limits.maxRunMinutes > 1h default) for foreground runs.
+		const stepTimeoutMs = typeof context.__chainStepTimeoutMs === "number" ? context.__chainStepTimeoutMs : undefined;
+
 		const runParams: TeamToolParamsValue = {
 			action: "run",
 			goal: enrichedGoal,
@@ -257,6 +269,7 @@ export class ChainTeamRunExecutor implements ChainTaskRunner {
 			async: false,
 			...(stepWorkflow ? { workflow: stepWorkflow } : {}),
 			...(stepModel ? { model: stepModel } : {}),
+			...(stepTimeoutMs !== undefined && Number.isFinite(stepTimeoutMs) ? { timeoutMs: stepTimeoutMs } : {}),
 		};
 		const runRes = await this.handleRunRef(runParams, this.ctx);
 

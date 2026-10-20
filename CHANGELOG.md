@@ -6,6 +6,18 @@
 
 - **fix(gate): RT24-F1 root-gate config/autonomy read over-block** — `rootGateBlockReason` counted the `args` subcommand carrier as a config patch key, so worker-origin `config {args:"show"}` READS were rejected as "writes user-scope config" (live-caught in the v0.11.24 real-test battery; docblock promised reads open). `args` added to the carrier-key sets for `config` and `autonomy`; unknown junk keys stay write-classified (fail-closed). Pinned: reads with carrier keys open, writes hidden behind the same key still gated (`unset`/patch keys), user config byte-untouched. Live-verified end-to-end (fresh `pi -p`, worker env): read allowed + dumps config; `unset` write gate-blocked verbatim "root-session required".
 
+## [0.11.27] — Residual backlog: chain DSL constructs now have real consumers (`:N` loops, `--with-context`, positional args) + `--timeout` wired
+
+### Fixed
+- **R14-C1 tail / M3-F (silent no-op DSL features)**: the chain parser accepted `:N`, `--with-context`, and quoted positional args, and the runner dutifully parked them in `step.context` — where nothing ever read them. A user writing `polish:3` got ONE run, silently. All three now have real consumers:
+  - `:N` executes N sequential iterations (chain is sequential by contract). Each iteration is its own `ChainStepResult` (`name#k` for k>1), so a failing iteration stays visible; the R14-C5 success predicate counts planned EXECUTIONS, so a chain that breaks inside a loop cannot pass unexecuted iterations off as done. `:N` is clamped to 1..10 at the parser — clamped, not thrown, because a throw would fall back to the simple splitter and turn `step:99` into ONE literal step named "step:99" (the exact R14-C1 corruption class).
+  - `--with-context` forwards the previous step's FULL worker output (`__chainPrevOutput`, capped 20k chars) — distinct from the default `__chainHistory` channel, which carries only size-capped handoff summaries. Rendered as a `# Previous Step Output (--with-context)` block in the next step's goal.
+  - Quoted positional args append to the step goal: `"research" "topic X"` → goal "research topic X".
+- **R14-C2 (dead `--timeout` flag + unit confusion)**: `--timeout` parsed into `step.timeout` that no consumer ever read, with a seconds value compared against a 1000-day ms bound. Now: parsed as seconds 1..86400 (1 day), forwarded as `runParams.timeoutMs` into the step's run — honored by the CORE-8 unified deadline (params > config `limits.maxRunMinutes` > 1h default) for foreground runs.
+
+### Verified
+- Pins: parser clamp (0→1, 99→10) · 3-iteration loop with visible `#k` results · in-loop failure breaks the chain (planned-execution accounting — mutation-pinned: reverting to `spec.steps.length` accounting turns the loop test RED) · `continueOnError` runs remaining iterations · args→goal · `--with-context` full-output forwarding + 20k cap + absence without flag · timeout seconds→ms + 1-day boundary + `__chainStepTimeoutMs` packet channel · executor renders the prev-output block and forwards `timeoutMs` (absent flag → no key).
+
 ## [0.11.26] — Fix: verifier verdict consumer blocked runs whose verifier returned a prose verdict (live-caught by the post-release real-test battery)
 
 ### Fixed

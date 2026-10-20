@@ -44,7 +44,7 @@ import { handleRun } from "../../../src/extension/team-tool/run.ts";
 import type { PiTeamsToolResult } from "../../../src/extension/tool-result.ts";
 import { textFromToolResult } from "../../../src/extension/tool-result.ts";
 import { ChainRunner, parseChainString } from "../../../src/runtime/chain-runner.ts";
-import { HandoffManager } from "../../../src/runtime/handoff-manager.ts";
+import { HandoffManager, type TaskPacket } from "../../../src/runtime/handoff-manager.ts";
 import { __test__clearManifestCache, loadRunManifestById } from "../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
 
@@ -582,4 +582,76 @@ test("(d)(semantic) step 1's worker output appears in step 2's goal", WIN32_SKIP
 	assert.match(step2Goal, /Previous Steps in This Chain/);
 	assert.match(step2Goal, /Output:/);
 	assert.match(step2Goal, /1, 2, 3/, "step 2 must see step 1's output text");
+});
+
+// ─── v0.11.27 (R14-C1 tail / R14-C2): --with-context render + timeoutMs ──
+
+test("(v0.11.27) __chainPrevOutput renders a Previous Step Output block in the goal", WIN32_SKIP, async () => {
+	__test__clearManifestCache();
+	const cwd = makeTempCwd();
+	const mock = makeMockHandleRun({ cwd, resultText: "step output text" });
+	const ctx: TeamContext = { cwd };
+	const executor = new ChainTeamRunExecutor({ handleRun: mock.handleRun, ctx });
+	const runner = new ChainRunner(executor, new HandoffManager());
+
+	const spec = parseChainString("produce -> consume");
+	// Simulate the runner-side --with-context channel: step 2 gets the prev step's full output.
+	spec.steps[1]!.context = { ...(spec.steps[1]!.context ?? {}), withContext: true };
+	// Feed step 1's full output via a stub task runner wrapping the executor:
+	// easiest is to pre-seed the chain by overriding step 1's runner result —
+	// instead, run step 1 through a wrapper that injects outputText.
+	const wrappedExecutor: typeof executor = {
+		...executor,
+		runTask: async (packet: TaskPacket) => {
+			if (packet.goal === "produce") {
+				const r = await executor.runTask(packet);
+				return { ...r, outputText: "FULL-PREV-OUTPUT-BODY" };
+			}
+			return executor.runTask(packet);
+		},
+	} as unknown as typeof executor;
+	const chainRunner = new ChainRunner(wrappedExecutor, new HandoffManager());
+	await chainRunner.runChain(spec);
+
+	const consumeGoal = mock.receivedGoals[1] ?? "";
+	assert.match(consumeGoal, /Previous Step Output \(--with-context\)/, "dedicated block header");
+	assert.match(consumeGoal, /FULL-PREV-OUTPUT-BODY/, "raw previous output reaches the worker goal");
+	assert.match(consumeGoal, /Current Chain Step/, "current-step marker still present");
+
+	// Without __chainPrevOutput the block header must NOT appear.
+	const goals0 = mock.receivedGoals[0] ?? "";
+	assert.doesNotMatch(goals0, /Previous Step Output/, "step 1 has no prev-output block");
+	try {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	} catch {
+		// best-effort temp cleanup
+	}
+});
+
+test("(v0.11.27 R14-C2) __chainStepTimeoutMs forwards timeoutMs to handleRun params", WIN32_SKIP, async () => {
+	__test__clearManifestCache();
+	const cwd = makeTempCwd();
+	const mock = makeMockHandleRun({ cwd });
+	const ctx: TeamContext = { cwd };
+	const executor = new ChainTeamRunExecutor({ handleRun: mock.handleRun, ctx });
+
+	await executor.runTask({
+		taskId: "t-timeout",
+		runId: "chain",
+		goal: "timed step",
+		context: { __chainStepTimeoutMs: 90000 },
+	});
+	await executor.runTask({
+		taskId: "t-plain",
+		runId: "chain",
+		goal: "plain step",
+	});
+
+	assert.equal(mock.receivedParams[0]?.timeoutMs, 90000, "--timeout 90 → runParams.timeoutMs 90000");
+	assert.equal(mock.receivedParams[1]?.timeoutMs, undefined, "no flag → no timeoutMs key (config/default deadline applies)");
+	try {
+		fs.rmSync(cwd, { recursive: true, force: true });
+	} catch {
+		// best-effort temp cleanup
+	}
 });

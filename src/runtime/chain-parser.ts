@@ -6,6 +6,12 @@
  *   step1:3 -> step2 --with-context -> step3
  *   parallel(a, b, parallel(c, d)) -> e
  *
+ * `:N` loop counts are CLAMPED to 1..10 (v0.11.27): N=0/absent would silently
+ * skip nothing, N>10 would queue unbounded sequential runs. Clamping (not
+ * throwing) is deliberate — a throw here makes chain-runner fall back to the
+ * simple splitter, which turns `step:99` into ONE literal step named "step:99"
+ * (the exact R14-C1 silent-corruption class this parser exists to prevent).
+ *
  * Pattern origin: pi-prompt-template-model chain-parser.ts
  */
 
@@ -193,6 +199,21 @@ class ChainParser {
 			return step;
 		}
 
+		// v0.11.27 (probe-caught): a QUOTED string is a valid step too —
+		// `"polish output":2` is the natural way to combine an inline goal with
+		// DSL modifiers. Previously only bare NAMEs were accepted here, so any
+		// quoted-goal chain with `:N`/`--with-context` threw and chain-runner
+		// silently fell back to the simple splitter — the constructs died for
+		// the MOST COMMON goal syntax. A quoted step keeps its text as `name`
+		// (executeStep uses it as the goal, mirroring the simple path's
+		// inlineGoal semantics).
+		if (this.peek("QUOTED")) {
+			const quoted = this.consume("QUOTED");
+			const quotedStep: ChainStep = { name: quoted.value };
+			this.parseModifiers(quotedStep);
+			return quotedStep;
+		}
+
 		// Normal step name
 		const name = this.consume("NAME").value;
 		const step: ChainStep = { name };
@@ -207,7 +228,9 @@ class ChainParser {
 			if (this.peek("COLON")) {
 				this.consume("COLON");
 				const num = this.consume("NUMBER");
-				step.loopCount = Number.parseInt(num.value, 10);
+				// v0.11.27: clamp 1..10 (see header). Clamp-not-throw: a throw silently
+				// degrades the whole chain to the simple parser (literal step names).
+				step.loopCount = Math.min(10, Math.max(1, Number.parseInt(num.value, 10)));
 			} else if (this.peek("FLAG", "with-context")) {
 				this.consume("FLAG");
 				step.withContext = true;

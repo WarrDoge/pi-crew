@@ -106,3 +106,42 @@ describe("chain-parser: parseChainDSL", () => {
 		assert.deepEqual(result, [{ name: "my-step.v2" }, { name: "other_step" }]);
 	});
 });
+
+// ─── v0.11.27 (R14-C1 tail): loopCount clamp ─────────────────────────────
+
+describe("chain-parser: loopCount clamp (v0.11.27)", () => {
+	it("chain-parser: `:N` loopCount clamped to 1..10 (clamp-not-throw)", () => {
+		// Clamp-not-throw is deliberate: a throw would make chain-runner fall back
+		// to the simple splitter and turn `step:99` into ONE literal step named
+		// "step:99" — the R14-C1 silent-corruption class this parser prevents.
+		const zero = parseChainDSL("step:0")[0];
+		assert.equal(zero?.loopCount, 1, ":0 clamps up to 1 (never silently skip)");
+
+		const five = parseChainDSL("step:5")[0];
+		assert.equal(five?.loopCount, 5, "in-range values pass through unchanged");
+
+		const huge = parseChainDSL("step:99")[0];
+		assert.equal(huge?.loopCount, 10, ":99 clamps down to 10 (bounded sequential runs)");
+	});
+});
+
+describe("chain-parser: quoted step names with modifiers (v0.11.27 probe-caught gap)", () => {
+	it("parses a quoted inline goal with `:2` + --with-context + positional args", () => {
+		const result = parseChainDSL('"polish the output":2 --with-context "final-report.md"');
+		assert.deepEqual(result, [
+			{
+				name: "polish the output",
+				loopCount: 2,
+				withContext: true,
+				args: ["final-report.md"],
+			},
+		]);
+	});
+
+	it("parses a bare quoted goal with modifiers inside parallel()", () => {
+		const result = parseChainDSL('parallel("do a", "do b":3) -> finish');
+		assert.equal(result[0]?.parallel?.length, 2);
+		assert.equal(result[0]?.parallel?.[1]?.loopCount, 3);
+		assert.equal(result[1]?.name, "finish");
+	});
+});
