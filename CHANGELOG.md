@@ -6,6 +6,23 @@
 
 - **fix(gate): RT24-F1 root-gate config/autonomy read over-block** — `rootGateBlockReason` counted the `args` subcommand carrier as a config patch key, so worker-origin `config {args:"show"}` READS were rejected as "writes user-scope config" (live-caught in the v0.11.24 real-test battery; docblock promised reads open). `args` added to the carrier-key sets for `config` and `autonomy`; unknown junk keys stay write-classified (fail-closed). Pinned: reads with carrier keys open, writes hidden behind the same key still gated (`unset`/patch keys), user config byte-untouched. Live-verified end-to-end (fresh `pi -p`, worker env): read allowed + dumps config; `unset` write gate-blocked verbatim "root-session required".
 
+## [0.11.28] — Residual quality wave: prune-anchor silence, 6 flake classes hardened, LOW-tail fixes
+
+### Fixed
+- **Session-start prune noise (C2, live-proven)**: every stale run whose artifacts dir was already age-cleaned printed one `artifact-store.prune-anchor ENOENT … skipping N descriptor(s)` warn per boot. A missing anchor dir means nothing under it can exist to delete — that is success-shaped silence now; every other anchor failure (symlink anchor, non-directory, permissions) keeps the visible warn. Fail-closed behavior unchanged (nothing deleted).
+- **6 load-flake classes hardened** (each previously caused a real red on publish/CI/pre-push): R6-9 embedded-tier usage (poll turn-1 `message_end` instead of a fixed 1.5s sleep — also fixes the blast racing guard arming), stale-ctx-publish (condition polls instead of fixed flushes), round24 in-lock perf bounds + event-log append-lock/inline-guard bounds (adaptive control-fs-op scaling, capped below the deadlock/lock-timeout signatures that fail on their own), recordWaitPolicyRejection (poll the durable append landing), rpc parent-abort (abort after the fixture traces `run-start`, not a fixed 150ms).
+- **R14-C3**: DWF checkpoints now stamp a `dispatchContext {modelOverride, team}` fingerprint; resuming with a different model/team emits `dwf.resume_context_mismatch` instead of silently replaying old-model results (fail-open with visibility).
+- **R14-C4**: scheduler `add()` emits the `added` event with the post-`arm()` job state — a past-dated `once` job no longer announces itself as enabled after being disabled.
+- **R2-L-A1**: `loadRunManifestById` (sync + async) maps a vanished manifest (ENOENT mid-sweep) to `undefined` instead of aborting the caller's whole best-effort recovery sweep.
+- **R2-L-A2**: an unexpected realpath failure while validating `PI_TEAMS_PI_BIN` now says explicitly that the explicit pin was IGNORED and default resolution takes over.
+- **R2-L-B9**: the theme-adapter polling fallback holds only a `WeakRef` to the theme and self-terminates after collection — abandoned subscriptions no longer pin the theme with a permanent 1s poll.
+
+### Changed
+- **R2-L-B10 (documented)**: interval-scheduled jobs re-arm after run completion, so the effective period is `intervalMs + run duration` — deliberate no-overlap design, now recorded at the arm site.
+
+### Closed (no bug)
+- **`manifest.usage = null` (battery 2026-10-19 observation #3)**: false premise — the field does not exist and nothing reads it; `task.usage` is populated on real runs and every token surface (run summary, powerbar, agents pane) is fed correctly. Battery report corrected.
+
 ## [0.11.27] — Residual backlog: chain DSL constructs now have real consumers (`:N` loops, `--with-context`, positional args) + `--timeout` wired
 
 ### Fixed
