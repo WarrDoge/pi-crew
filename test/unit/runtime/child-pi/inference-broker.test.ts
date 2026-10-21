@@ -339,8 +339,12 @@ test("(d1) scoped dir: models.json reroutes anthropic to the broker with $PI_CRE
 		const models = JSON.parse(fs.readFileSync(path.join(snap.scopedAgentDir, "models.json"), "utf8"));
 		assert.equal(models.providers.anthropic.baseUrl, snap.baseUrl);
 		assert.equal(models.providers.anthropic.apiKey, `$${INFERENCE_TOKEN_ENV}`);
-		const mode = fs.statSync(path.join(snap.scopedAgentDir, "models.json")).mode & 0o777;
-		assert.equal(mode, 0o600, "models.json must be owner-only");
+		// POSIX-only contract: Windows fs.statSync().mode is always 0o666
+		// regardless of the requested mode (v0.11.21 CI lesson).
+		if (process.platform !== "win32") {
+			const mode = fs.statSync(path.join(snap.scopedAgentDir, "models.json")).mode & 0o777;
+			assert.equal(mode, 0o600, "models.json must be owner-only");
+		}
 	});
 });
 
