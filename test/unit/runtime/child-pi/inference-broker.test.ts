@@ -26,6 +26,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { buildFinalChildPiSpawnOptions } from "../../../../src/runtime/child-pi/child-pi-spawn.ts";
@@ -426,7 +427,7 @@ test("(f1) flag on + no upstream credential → throws (never silently falls bac
 test("(h1) auth.json api_key resolves when env credentials are absent; key goes upstream; env WINS over auth.json", async () => {
 	// Fixture agent dir with an auth.json credential store (the documented
 	// shape verified against the live SDK store).
-	const agentDir = fs.mkdtempSync(path.join("/tmp", "pi-crew-ib-authjson-"));
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ib-authjson-"));
 	fs.writeFileSync(
 		path.join(agentDir, "auth.json"),
 		JSON.stringify({
@@ -471,7 +472,7 @@ test("(h1) auth.json api_key resolves when env credentials are absent; key goes 
 		await upstream.close();
 	}
 	// env beats auth.json
-	const agentDir2 = fs.mkdtempSync(path.join("/tmp", "pi-crew-ib-authjson-"));
+	const agentDir2 = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ib-authjson-"));
 	fs.writeFileSync(path.join(agentDir2, "auth.json"), JSON.stringify({ anthropic: { type: "api_key", key: "sk-authjson-loser" } }));
 	const upstream2 = await startMockUpstream();
 	const saved2: Record<string, string | undefined> = {};
