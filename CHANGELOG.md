@@ -6,6 +6,18 @@
 
 - **fix(gate): RT24-F1 root-gate config/autonomy read over-block** — `rootGateBlockReason` counted the `args` subcommand carrier as a config patch key, so worker-origin `config {args:"show"}` READS were rejected as "writes user-scope config" (live-caught in the v0.11.24 real-test battery; docblock promised reads open). `args` added to the carrier-key sets for `config` and `autonomy`; unknown junk keys stay write-classified (fail-closed). Pinned: reads with carrier keys open, writes hidden behind the same key still gated (`unset`/patch keys), user config byte-untouched. Live-verified end-to-end (fresh `pi -p`, worker env): read allowed + dumps config; `unset` write gate-blocked verbatim "root-session required".
 
+## [0.11.34] — Broker credentials completion: auth.json parents + OpenAI upstream (multi-provider routing)
+
+### Security / Features
+- **auth.json credential fallback (v0.11.34)**: parents without provider env keys — interactive users who logged in via `/login` — can now use the inference broker. Resolution per provider: env credential FIRST (CI behavior identical to v0.11.33), then the parent's own auth.json file credential (`{"<provider>": {"type": "api_key", "key": ...}}`, shape verified against the live SDK store; read once at broker start; parse failures logged WITHOUT the key and ignored). The worker's scoped agent dir still contains NO auth.json — the worker never sees any stored credential.
+- **OpenAI upstream + multi-provider routing**: the broker now routes by PROVIDER PATH PREFIX — the scoped models.json gives each resolvable provider a prefixed baseUrl (`…/anthropic`, `…/openai`) and the broker forwards the remaining path verbatim to that provider's upstream with the right substituted auth (anthropic → x-api-key; openai → Authorization: Bearer). Built-in model metadata is preserved on both providers (override-only), so `--model openai/<id>` and fallback chains across providers work unmodified. Unknown prefixes get a generic 404 and never touch an upstream.
+- Per-worker usage counting now also understands OpenAI chat-completions usage fields (prompt_tokens/completion_tokens) alongside Anthropic's (input_tokens/output_tokens, incl. message_delta cumulative semantics), so budgets work per worker across providers (usage sums across requests).
+- FAIL-CLOSED error now lists every consulted source (env names + auth.json path) when nothing resolves.
+
+### Tests
+- Battery 15 → 18: auth.json fallback + env-beats-auth.json precedence; multi-provider routing (Bearer vs x-api-key substitution, prefix stripping, unknown-prefix 404, both-provider scoped models.json, cross-provider usage accumulation); LIVE e2e ×2 — REAL `pi -p` through BOTH the anthropic route and the openai route (openai-completions wire), upstreams seeing the real keys, worker env credential-less.
+- 3/3 new mutation checks: auth.json ignored → h1 red; routing collapsed to first-route → b3/i1/g2 red (incl. LIVE); openai usage names dropped → i1 red. Restored green 18/18.
+
 ## [0.11.31] — Inference Broker PoC: workers no longer hold ANY real provider key
 
 ### Security

@@ -125,14 +125,26 @@ function startMockUpstream(opts?: { sse?: string; status?: number; contentType?:
 	});
 }
 
-async function brokerFetch(baseUrl: string, token: string | undefined, body: unknown): Promise<Response> {
+async function brokerFetch(baseUrl: string, token: string | undefined, body: unknown, path = "/anthropic/v1/messages"): Promise<Response> {
 	const headers: Record<string, string> = {
 		"content-type": "application/json",
 		accept: "text/event-stream",
 		"anthropic-version": "2023-06-01",
 	};
 	if (token !== undefined) headers["x-api-key"] = token;
-	return fetch(`${baseUrl}/v1/messages`, { method: "POST", headers, body: JSON.stringify(body) });
+	return fetch(`${baseUrl}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
+}
+
+/** OpenAI chat-completions shaped SSE (the final usage chunk carries totals). */
+function openaiSse(text: string, usage: { prompt: number; completion: number }): string {
+	return [
+		`data: {"id":"chatcmpl-broker","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":${JSON.stringify(text)}}}]}`,
+		"",
+		`data: {"id":"chatcmpl-broker","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":${usage.prompt},"completion_tokens":${usage.completion}}}`,
+		"",
+		"data: [DONE]",
+		"",
+	].join("\n");
 }
 
 /** Broker + mock upstream fixture (tests must call stop()). */
@@ -258,6 +270,7 @@ test("(b3) bearer-token auth style: ANTHROPIC_AUTH_TOKEN upstream uses Authoriza
 		await res.text();
 		assert.equal(upstream.captures[0].headers.authorization, "Bearer oauth-bearer-real");
 		assert.equal(upstream.captures[0].headers["x-api-key"], undefined);
+		assert.equal(upstream.captures[0].url, "/v1/messages", "provider prefix must be stripped before forwarding");
 	} finally {
 		stopInferenceBroker();
 		for (const [key, value] of Object.entries(saved)) {
@@ -337,7 +350,7 @@ test("(d1) scoped dir: models.json reroutes anthropic to the broker with $PI_CRE
 		const files = fs.readdirSync(snap.scopedAgentDir);
 		assert.deepEqual(files, ["models.json"], "scoped dir must contain ONLY models.json");
 		const models = JSON.parse(fs.readFileSync(path.join(snap.scopedAgentDir, "models.json"), "utf8"));
-		assert.equal(models.providers.anthropic.baseUrl, snap.baseUrl);
+		assert.equal(models.providers.anthropic.baseUrl, `${snap.baseUrl}/anthropic`);
 		assert.equal(models.providers.anthropic.apiKey, `$${INFERENCE_TOKEN_ENV}`);
 		// POSIX-only contract: Windows fs.statSync().mode is always 0o666
 		// regardless of the requested mode (v0.11.21 CI lesson).
@@ -408,6 +421,157 @@ test("(f1) flag on + no upstream credential → throws (never silently falls bac
 	}
 });
 
+// ── (h) auth.json credential fallback (v0.11.34) ────────────────────────
+
+test("(h1) auth.json api_key resolves when env credentials are absent; key goes upstream; env WINS over auth.json", async () => {
+	// Fixture agent dir with an auth.json credential store (the documented
+	// shape verified against the live SDK store).
+	const agentDir = fs.mkdtempSync(path.join("/tmp", "pi-crew-ib-authjson-"));
+	fs.writeFileSync(
+		path.join(agentDir, "auth.json"),
+		JSON.stringify({
+			anthropic: { type: "api_key", key: "sk-ant-authjson-key" },
+			openai: { type: "api_key", key: "sk-openai-authjson" },
+		}),
+	);
+	const upstream = await startMockUpstream();
+	const saved: Record<string, string | undefined> = {};
+	for (const key of [
+		INFERENCE_BROKER_ENABLE_ENV,
+		"ANTHROPIC_API_KEY",
+		"ANTHROPIC_AUTH_TOKEN",
+		"OPENAI_API_KEY",
+		"PI_CREW_INFERENCE_UPSTREAM",
+		"PI_CODING_AGENT_DIR",
+	])
+		saved[key] = process.env[key];
+	process.env[INFERENCE_BROKER_ENABLE_ENV] = "1";
+	delete process.env.ANTHROPIC_API_KEY;
+	delete process.env.ANTHROPIC_AUTH_TOKEN;
+	delete process.env.OPENAI_API_KEY;
+	process.env.PI_CREW_INFERENCE_UPSTREAM = `http://127.0.0.1:${upstream.port}`;
+	process.env.PI_CODING_AGENT_DIR = agentDir; // parent reads ITS auth.json from here
+	try {
+		__resetInferenceBrokerForTests();
+		await maybeStartInferenceBroker();
+		const snap = getInferenceBrokerSnapshot();
+		assert.deepEqual(snap.providers.sort(), ["anthropic", "openai"], "both auth.json providers resolve");
+		const token = registerInferenceWorker("authjson-worker");
+		const res = await brokerFetch(snap.baseUrl, token, { model: "x", messages: [] });
+		assert.equal(res.status, 200);
+		await res.text();
+		assert.equal(upstream.captures[0].headers["x-api-key"], "sk-ant-authjson-key", "auth.json key substitutes upstream");
+	} finally {
+		stopInferenceBroker();
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		fs.rmSync(agentDir, { recursive: true, force: true });
+		await upstream.close();
+	}
+	// env beats auth.json
+	const agentDir2 = fs.mkdtempSync(path.join("/tmp", "pi-crew-ib-authjson-"));
+	fs.writeFileSync(path.join(agentDir2, "auth.json"), JSON.stringify({ anthropic: { type: "api_key", key: "sk-authjson-loser" } }));
+	const upstream2 = await startMockUpstream();
+	const saved2: Record<string, string | undefined> = {};
+	for (const key of [INFERENCE_BROKER_ENABLE_ENV, "ANTHROPIC_API_KEY", "PI_CREW_INFERENCE_UPSTREAM", "PI_CODING_AGENT_DIR"])
+		saved2[key] = process.env[key];
+	process.env[INFERENCE_BROKER_ENABLE_ENV] = "1";
+	process.env.ANTHROPIC_API_KEY = "sk-env-winner";
+	process.env.PI_CREW_INFERENCE_UPSTREAM = `http://127.0.0.1:${upstream2.port}`;
+	process.env.PI_CODING_AGENT_DIR = agentDir2;
+	try {
+		__resetInferenceBrokerForTests();
+		await maybeStartInferenceBroker();
+		const snap = getInferenceBrokerSnapshot();
+		const token = registerInferenceWorker("precedence-worker");
+		const res = await brokerFetch(snap.baseUrl, token, { model: "x", messages: [] });
+		await res.text();
+		assert.equal(upstream2.captures[0].headers["x-api-key"], "sk-env-winner", "env credential must beat auth.json");
+	} finally {
+		stopInferenceBroker();
+		for (const [key, value] of Object.entries(saved2)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		fs.rmSync(agentDir2, { recursive: true, force: true });
+		await upstream2.close();
+	}
+});
+
+// ── (i) multi-provider routing + openai usage (v0.11.34) ────────────────
+
+test("(i1) both providers route by path prefix; openai gets Bearer, anthropic gets x-api-key; unknown prefix 404", async () => {
+	const anthropicUp = await startMockUpstream();
+	const openaiUp = await startMockUpstream({
+		sse: openaiSse("OPENAI-OK", { prompt: 40, completion: 9 }),
+		contentType: "text/event-stream",
+	});
+	const saved: Record<string, string | undefined> = {};
+	for (const key of [
+		INFERENCE_BROKER_ENABLE_ENV,
+		"ANTHROPIC_API_KEY",
+		"OPENAI_API_KEY",
+		"PI_CREW_INFERENCE_UPSTREAM_ANTHROPIC",
+		"PI_CREW_INFERENCE_UPSTREAM_OPENAI",
+		"PI_CREW_INFERENCE_UPSTREAM",
+	])
+		saved[key] = process.env[key];
+	process.env[INFERENCE_BROKER_ENABLE_ENV] = "1";
+	process.env.ANTHROPIC_API_KEY = "sk-ant-multi";
+	process.env.OPENAI_API_KEY = "sk-oai-multi";
+	delete process.env.PI_CREW_INFERENCE_UPSTREAM;
+	process.env.PI_CREW_INFERENCE_UPSTREAM_ANTHROPIC = `http://127.0.0.1:${anthropicUp.port}`;
+	process.env.PI_CREW_INFERENCE_UPSTREAM_OPENAI = `http://127.0.0.1:${openaiUp.port}`;
+	try {
+		__resetInferenceBrokerForTests();
+		await maybeStartInferenceBroker();
+		const snap = getInferenceBrokerSnapshot();
+		assert.deepEqual(snap.providers.sort(), ["anthropic", "openai"]);
+		// scoped models.json covers BOTH providers with prefixed baseUrls
+		const models = JSON.parse(fs.readFileSync(path.join(snap.scopedAgentDir ?? "", "models.json"), "utf8"));
+		assert.equal(models.providers.anthropic.baseUrl, `${snap.baseUrl}/anthropic`);
+		assert.equal(models.providers.openai.baseUrl, `${snap.baseUrl}/openai`);
+		assert.equal(models.providers.openai.apiKey, `$${INFERENCE_TOKEN_ENV}`);
+		const token = registerInferenceWorker("multi-worker");
+		// openai route
+		const oai = await fetch(`${snap.baseUrl}/openai/chat/completions`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+			body: "{}",
+		});
+		const oaiBody = await oai.text();
+		assert.equal(oai.status, 200);
+		assert.ok(oaiBody.includes("OPENAI-OK"), "openai SSE relays");
+		assert.equal(openaiUp.captures[0].headers.authorization, "Bearer sk-oai-multi", "openai upstream sees the REAL bearer");
+		assert.equal(openaiUp.captures[0].url, "/chat/completions", "prefix stripped for openai");
+		// anthropic route still works
+		const ant = await brokerFetch(snap.baseUrl, token, { model: "x", messages: [] });
+		await ant.text();
+		assert.equal(anthropicUp.captures[0].headers["x-api-key"], "sk-ant-multi");
+		// unknown prefix → generic 404, no upstream touch
+		const bad = await brokerFetch(snap.baseUrl, token, { model: "x", messages: [] }, "/google/v1:x");
+		assert.equal(bad.status, 404);
+		assert.equal(anthropicUp.captures.length, 1, "unknown route must not reach any upstream");
+		// usage counted from the openai final chunk (prompt/completion names)
+		await new Promise((r) => setTimeout(r, 60));
+		const stats = inferenceBrokerStats()[0];
+		// Usage is per-response and the worker total SUMS across requests:
+		// openai (prompt 40 + completion 9) + anthropic default (input 12 + output 7).
+		assert.equal(stats.inputTokens, 52, "prompt_tokens + later anthropic input accumulate");
+		assert.equal(stats.outputTokens, 16, "completion_tokens + later anthropic output accumulate");
+	} finally {
+		stopInferenceBroker();
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		await anthropicUp.close();
+		await openaiUp.close();
+	}
+});
+
 // ── (g) LIVE e2e — REAL pi binary through the broker (linux) ────────────
 
 test("(g1) LIVE: real `pi -p` completes via scoped dir + broker + mock upstream; upstream saw the real key; worker env had no real key", {
@@ -446,4 +610,78 @@ test("(g1) LIVE: real `pi -p` completes via scoped dir + broker + mock upstream;
 		assert.ok(fn.upstream.captures.length >= 1, "mock upstream must have received the request");
 		assert.equal(fn.upstream.captures[0].headers["x-api-key"], REAL_KEY);
 	});
+});
+
+// ── (g2) LIVE e2e — REAL pi via the OPENAI route (linux) ────────────────
+
+test("(g2) LIVE: real `pi -p` on an openai-completions model through the broker; upstream saw the real bearer; prefix stripped", {
+	skip: process.platform !== "linux",
+}, async () => {
+	const piCmd = getPiSpawnCommand([]);
+	if (!piCmd.command || !fs.existsSync(piCmd.command)) return;
+	const openaiUp = await startMockUpstream({ sse: openaiSse("OPENAI-LIVE-OK", { prompt: 5, completion: 3 }) });
+	const saved: Record<string, string | undefined> = {};
+	for (const key of [
+		INFERENCE_BROKER_ENABLE_ENV,
+		"ANTHROPIC_API_KEY",
+		"OPENAI_API_KEY",
+		"PI_CREW_INFERENCE_UPSTREAM_OPENAI",
+		"PI_CREW_INFERENCE_UPSTREAM",
+		"PI_CREW_INFERENCE_UPSTREAM_ANTHROPIC",
+	])
+		saved[key] = process.env[key];
+	process.env[INFERENCE_BROKER_ENABLE_ENV] = "1";
+	delete process.env.ANTHROPIC_API_KEY;
+	process.env.OPENAI_API_KEY = "sk-oai-live-real";
+	delete process.env.PI_CREW_INFERENCE_UPSTREAM;
+	delete process.env.PI_CREW_INFERENCE_UPSTREAM_ANTHROPIC;
+	process.env.PI_CREW_INFERENCE_UPSTREAM_OPENAI = `http://127.0.0.1:${openaiUp.port}`;
+	try {
+		__resetInferenceBrokerForTests();
+		await maybeStartInferenceBroker();
+		const snap = getInferenceBrokerSnapshot();
+		assert.deepEqual(snap.providers, ["openai"], "only the openai route resolves without anthropic creds");
+		// The scoped dir covers the openai provider; add a TEST MODEL entry with
+		// the openai-completions api so the run uses the /chat/completions wire
+		// (built-in gpt models use the responses api — the route forwards that
+		// verbatim too, but the mock speaks chat-completions).
+		const modelsPath = path.join(snap.scopedAgentDir ?? "", "models.json");
+		const models = JSON.parse(fs.readFileSync(modelsPath, "utf8"));
+		models.providers.openai.models = [{ id: "broker-openai-live", api: "openai-completions" }];
+		fs.writeFileSync(modelsPath, JSON.stringify(models, null, "\t"));
+		const token = registerInferenceWorker("openai-live");
+		const res = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+			const child = spawn(
+				piCmd.command,
+				[...piCmd.args, "--mode", "json", "-p", "Reply with exactly OPENAI-LIVE-OK", "--model", "openai/broker-openai-live"],
+				{
+					env: {
+						PATH: process.env.PATH ?? "/usr/bin",
+						HOME: process.env.HOME ?? "/home",
+						PI_CODING_AGENT_DIR: snap.scopedAgentDir ?? "",
+						[INFERENCE_TOKEN_ENV]: token,
+					},
+					stdio: ["ignore", "pipe", "pipe"],
+				},
+			);
+			let stdout = "";
+			let stderr = "";
+			child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
+			child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+			child.on("exit", (code) => resolve({ code, stdout, stderr }));
+			setTimeout(() => child.kill("SIGKILL"), 90_000).unref?.();
+		});
+		assert.equal(res.code, 0, `pi exited code=${res.code}\nstdout=${res.stdout.slice(0, 800)}\nstderr=${res.stderr.slice(0, 800)}`);
+		assert.ok(res.stdout.includes("OPENAI-LIVE-OK"), "openai reply must relay through the broker");
+		assert.ok(openaiUp.captures.length >= 1, "openai mock upstream received the request");
+		assert.equal(openaiUp.captures[0].headers.authorization, "Bearer sk-oai-live-real");
+		assert.equal(openaiUp.captures[0].url, "/chat/completions");
+	} finally {
+		stopInferenceBroker();
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		await openaiUp.close();
+	}
 });

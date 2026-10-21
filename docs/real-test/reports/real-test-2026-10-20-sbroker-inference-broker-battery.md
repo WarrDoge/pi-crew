@@ -56,3 +56,7 @@ by T7 itself).
 
 ## Verdict
 **GO** for v0.11.31.
+
+## SHIP TRAIL (v0.11.31→v0.11.33)
+- v0.11.31 `8eb3e6c2` — CI RED (Windows POSIX-mode assert — known lesson re-applied) → v0.11.32 `dbf310e5`+`33f127ae` — CI RED (biome unused-import after mutation-restore; unsafe-fix not auto-applied) → v0.11.33 `67486540` (lint fix) + `34ef039b` (dist rebuild — T11j caught the missing rebuild) — CI run 39547565041 GREEN after 2 adjudicated rerun-failed (async-notifier + heartbeat-pulse; owned-process-u15 — all isolated-green, timing flakes unrelated to the broker).
+- npm `+ pi-crew@0.11.33`; dist-tags.latest=0.11.33; release v0.11.33 (Latest).

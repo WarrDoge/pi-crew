@@ -50,6 +50,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Readable, Transform } from "node:stream";
 import { getCrewEnv, getCrewEnvBool, getCrewEnvInt } from "../../config/env-vars.ts";
@@ -67,7 +68,6 @@ export const INFERENCE_BUDGET_ENV = "PI_CREW_INFERENCE_BUDGET_TOKENS";
 /** pi-native agent-dir override (SDK config.js ENV_AGENT_DIR) — set on the child. */
 export const PI_AGENT_DIR_ENV = "PI_CODING_AGENT_DIR";
 
-const DEFAULT_UPSTREAM = "https://api.anthropic.com";
 const MAX_BODY_BYTES = 64 * 1024 * 1024; // generous: image attachments
 const UPSTREAM_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_INFLIGHT_PER_WORKER = 4;
@@ -102,14 +102,21 @@ export interface InferenceBrokerSnapshot {
 	baseUrl: string;
 	port: number;
 	scopedAgentDir: string | undefined;
+	/** Provider names with a resolvable upstream credential (v0.11.34). */
+	providers: string[];
+}
+
+/** One provider's upstream route: base URL + substituted auth header. */
+interface ProviderRoute {
+	name: "anthropic" | "openai";
+	upstream: string;
+	auth: { header: "x-api-key" | "authorization"; value: string };
 }
 
 interface BrokerState {
 	server: http.Server;
 	port: number;
-	upstream: string;
-	/** x-api-key value OR Authorization bearer for the upstream. */
-	upstreamAuth: { header: "x-api-key" | "authorization"; value: string };
+	routes: Map<string, ProviderRoute>; // by path prefix ("/anthropic", "/openai")
 	workers: Map<string, WorkerEntry>; // by token
 	byKey: Map<string, WorkerEntry>; // by workerKey
 	scopedAgentDir: string;
@@ -120,12 +127,66 @@ interface BrokerState {
 // stopped by stopInferenceBroker() (extension teardown / tests).
 let broker: BrokerState | undefined;
 
-function resolveUpstreamAuth(): { header: "x-api-key" | "authorization"; value: string } | undefined {
-	const apiKey = process.env.ANTHROPIC_API_KEY;
-	if (apiKey && apiKey.length > 0) return { header: "x-api-key", value: apiKey };
-	const authToken = process.env.ANTHROPIC_AUTH_TOKEN;
-	if (authToken && authToken.length > 0) return { header: "authorization", value: `Bearer ${authToken}` };
-	return undefined;
+/**
+ * Read the PARENT's auth.json credential store — the documented file shape is
+ * `{ "<provider>": { "type": "api_key", "key": "..." } }` (verified against
+ * the SDK store + a live file). Read ONCE at broker start; the key stays in
+ * memory exactly like an env-sourced key. Parse failures are logged WITHOUT
+ * the key and ignored (env credentials still work).
+ */
+function readAuthJsonCredentials(env: NodeJS.ProcessEnv): Record<string, { type?: string; key?: string }> {
+	const agentDir = env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent");
+	const authPath = path.join(agentDir, "auth.json");
+	try {
+		const raw = fs.readFileSync(authPath, "utf8");
+		const parsed: unknown = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object") return {};
+		return parsed as Record<string, { type?: string; key?: string }>;
+	} catch {
+		return {}; // absent/unreadable/malformed — env credentials remain the path
+	}
+}
+
+/**
+ * Resolve every provider route (v0.11.34 multi-provider). Precedence per
+ * provider: env credential FIRST (CI behavior identical to v0.11.33), then
+ * the parent's auth.json file credential. Returns the routes that resolved
+ * and a human-readable trace of what was consulted (never contains keys).
+ */
+function resolveProviderRoutes(env: NodeJS.ProcessEnv): { routes: ProviderRoute[]; trace: string } {
+	const authJson = readAuthJsonCredentials(env);
+	const genericUpstream = getCrewEnv("PI_CREW_INFERENCE_UPSTREAM", env); // tests: applies to every provider
+	const routes: ProviderRoute[] = [];
+	const consulted: string[] = [];
+
+	const anthropicUpstream = getCrewEnv("PI_CREW_INFERENCE_UPSTREAM_ANTHROPIC", env) || genericUpstream || "https://api.anthropic.com";
+	const anthropicApiKey = env.ANTHROPIC_API_KEY;
+	const anthropicAuthToken = env.ANTHROPIC_AUTH_TOKEN;
+	const anthropicStored = authJson.anthropic;
+	consulted.push("env ANTHROPIC_API_KEY", "env ANTHROPIC_AUTH_TOKEN", "auth.json:anthropic");
+	if (anthropicApiKey && anthropicApiKey.length > 0) {
+		routes.push({ name: "anthropic", upstream: anthropicUpstream, auth: { header: "x-api-key", value: anthropicApiKey } });
+	} else if (anthropicAuthToken && anthropicAuthToken.length > 0) {
+		routes.push({
+			name: "anthropic",
+			upstream: anthropicUpstream,
+			auth: { header: "authorization", value: `Bearer ${anthropicAuthToken}` },
+		});
+	} else if (anthropicStored?.type === "api_key" && typeof anthropicStored.key === "string" && anthropicStored.key.length > 0) {
+		routes.push({ name: "anthropic", upstream: anthropicUpstream, auth: { header: "x-api-key", value: anthropicStored.key } });
+	}
+
+	const openaiUpstream = getCrewEnv("PI_CREW_INFERENCE_UPSTREAM_OPENAI", env) || genericUpstream || "https://api.openai.com/v1";
+	const openaiApiKey = env.OPENAI_API_KEY;
+	const openaiStored = authJson.openai;
+	consulted.push("env OPENAI_API_KEY", "auth.json:openai");
+	if (openaiApiKey && openaiApiKey.length > 0) {
+		routes.push({ name: "openai", upstream: openaiUpstream, auth: { header: "authorization", value: `Bearer ${openaiApiKey}` } });
+	} else if (openaiStored?.type === "api_key" && typeof openaiStored.key === "string" && openaiStored.key.length > 0) {
+		routes.push({ name: "openai", upstream: openaiUpstream, auth: { header: "authorization", value: `Bearer ${openaiStored.key}` } });
+	}
+
+	return { routes, trace: consulted.join(", ") };
 }
 
 /**
@@ -138,18 +199,30 @@ function resolveUpstreamAuth(): { header: "x-api-key" | "authorization"; value: 
  */
 export async function maybeStartInferenceBroker(env: NodeJS.ProcessEnv = process.env): Promise<InferenceBrokerSnapshot> {
 	if (broker)
-		return { active: true, baseUrl: `http://127.0.0.1:${broker.port}`, port: broker.port, scopedAgentDir: broker.scopedAgentDir };
-	if (!getCrewEnvBool(INFERENCE_BROKER_ENABLE_ENV)) return { active: false, baseUrl: "", port: 0, scopedAgentDir: undefined };
+		return {
+			active: true,
+			baseUrl: `http://127.0.0.1:${broker.port}`,
+			port: broker.port,
+			scopedAgentDir: broker.scopedAgentDir,
+			providers: [...broker.routes.values()].map((r) => r.name),
+		};
+	if (!getCrewEnvBool(INFERENCE_BROKER_ENABLE_ENV))
+		return { active: false, baseUrl: "", port: 0, scopedAgentDir: undefined, providers: [] };
 
-	const upstreamAuth = resolveUpstreamAuth();
-	if (!upstreamAuth) {
+	const { routes, trace } = resolveProviderRoutes(env);
+	if (routes.length === 0) {
 		throw new Error(
-			`${INFERENCE_BROKER_ENABLE_ENV}=1 but neither ANTHROPIC_API_KEY nor ANTHROPIC_AUTH_TOKEN is set in the parent environment — the inference broker refuses to start (fail-closed: workers would otherwise receive no usable credential, or worse, fall back to real provider keys). Set the provider env key or unset ${INFERENCE_BROKER_ENABLE_ENV}.`,
+			`${INFERENCE_BROKER_ENABLE_ENV}=1 but no provider credential resolved for the inference broker (consulted: ${trace}) — fail-closed: workers would otherwise receive no usable credential, or worse, fall back to real provider keys. Provide ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY in the parent env, an api_key entry for anthropic/openai in the parent's auth.json, or unset ${INFERENCE_BROKER_ENABLE_ENV}.`,
 		);
 	}
-	const upstream = getCrewEnv("PI_CREW_INFERENCE_UPSTREAM", env) || DEFAULT_UPSTREAM; // tests inject a local mock
-	broker = await createBrokerServer(upstream, upstreamAuth);
-	return { active: true, baseUrl: `http://127.0.0.1:${broker.port}`, port: broker.port, scopedAgentDir: broker.scopedAgentDir };
+	broker = await createBrokerServer(routes);
+	return {
+		active: true,
+		baseUrl: `http://127.0.0.1:${broker.port}`,
+		port: broker.port,
+		scopedAgentDir: broker.scopedAgentDir,
+		providers: [...broker.routes.values()].map((r) => r.name),
+	};
 }
 
 /**
@@ -160,8 +233,15 @@ export async function maybeStartInferenceBroker(env: NodeJS.ProcessEnv = process
  */
 export function requireInferenceBrokerIfEnabled(): InferenceBrokerSnapshot {
 	if (broker)
-		return { active: true, baseUrl: `http://127.0.0.1:${broker.port}`, port: broker.port, scopedAgentDir: broker.scopedAgentDir };
-	if (!getCrewEnvBool(INFERENCE_BROKER_ENABLE_ENV)) return { active: false, baseUrl: "", port: 0, scopedAgentDir: undefined };
+		return {
+			active: true,
+			baseUrl: `http://127.0.0.1:${broker.port}`,
+			port: broker.port,
+			scopedAgentDir: broker.scopedAgentDir,
+			providers: [...broker.routes.values()].map((r) => r.name),
+		};
+	if (!getCrewEnvBool(INFERENCE_BROKER_ENABLE_ENV))
+		return { active: false, baseUrl: "", port: 0, scopedAgentDir: undefined, providers: [] };
 	throw new Error(
 		`${INFERENCE_BROKER_ENABLE_ENV}=1 but the broker is not started — run() must await maybeStartInferenceBroker() before prepareSpawnContext()`,
 	);
@@ -169,19 +249,23 @@ export function requireInferenceBrokerIfEnabled(): InferenceBrokerSnapshot {
 
 /** Read-only view for spawn-option builders. Never starts anything. */
 export function getInferenceBrokerSnapshot(): InferenceBrokerSnapshot {
-	if (!broker) return { active: false, baseUrl: "", port: 0, scopedAgentDir: undefined };
-	return { active: true, baseUrl: `http://127.0.0.1:${broker.port}`, port: broker.port, scopedAgentDir: broker.scopedAgentDir };
+	if (!broker) return { active: false, baseUrl: "", port: 0, scopedAgentDir: undefined, providers: [] };
+	return {
+		active: true,
+		baseUrl: `http://127.0.0.1:${broker.port}`,
+		port: broker.port,
+		scopedAgentDir: broker.scopedAgentDir,
+		providers: [...broker.routes.values()].map((r) => r.name),
+	};
 }
 
-async function createBrokerServer(
-	upstream: string,
-	upstreamAuth: { header: "x-api-key" | "authorization"; value: string },
-): Promise<BrokerState> {
+async function createBrokerServer(routes: ProviderRoute[]): Promise<BrokerState> {
 	const workers = new Map<string, WorkerEntry>();
 	const byKey = new Map<string, WorkerEntry>();
+	const routeMap = new Map<string, ProviderRoute>(routes.map((r) => [`/${r.name}`, r]));
 
 	const server = http.createServer((req, res) => {
-		void handleRequest(req, res, { upstream, upstreamAuth, workers });
+		void handleRequest(req, res, { routes: routeMap, workers });
 	});
 	server.unref(); // never hold the parent's event loop open
 	await new Promise<void>((resolve, reject) => {
@@ -195,9 +279,9 @@ async function createBrokerServer(
 	if (!address || typeof address === "string") throw new Error("inference broker failed to bind a loopback port");
 	const port = address.port;
 
-	const scopedAgentDir = buildScopedAgentDir(port);
+	const scopedAgentDir = buildScopedAgentDir(port, routes);
 
-	return { server, port, upstream, upstreamAuth, workers, byKey, scopedAgentDir };
+	return { server, port, routes: routeMap, workers, byKey, scopedAgentDir };
 }
 
 /**
@@ -206,17 +290,22 @@ async function createBrokerServer(
  * built-in anthropic provider to the broker with per-worker token
  * interpolation at request time. Mode 0o600 file / 0o700 dir.
  */
-function buildScopedAgentDir(port: number): string {
+function buildScopedAgentDir(port: number, routes: ProviderRoute[]): string {
 	const dir = createSafeTempDir(getPiTempBase(), "pi-crew-inference-");
 	fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+	// Every resolvable provider gets a PATH-PREFIXED baseUrl ("/anthropic",
+	// "/openai") so the broker routes deterministically by prefix and forwards
+	// the remaining path verbatim to that provider's upstream.
+	const providers: Record<string, { baseUrl: string; apiKey: string }> = {};
+	for (const route of routes) {
+		providers[route.name] = {
+			baseUrl: `http://127.0.0.1:${port}/${route.name}`,
+			apiKey: `$${INFERENCE_TOKEN_ENV}`,
+		};
+	}
 	const models = {
 		$schema: "https://pi.dev/schemas/models.schema.json",
-		providers: {
-			anthropic: {
-				baseUrl: `http://127.0.0.1:${port}`,
-				apiKey: `$${INFERENCE_TOKEN_ENV}`,
-			},
-		},
+		providers,
 	};
 	const file = path.join(dir, "models.json");
 	fs.writeFileSync(file, `${JSON.stringify(models, null, "\t")}\n`, { mode: 0o600 });
@@ -241,9 +330,26 @@ function deny(res: http.ServerResponse, status: number, message: string): void {
 async function handleRequest(
 	req: http.IncomingMessage,
 	res: http.ServerResponse,
-	ctx: { upstream: string; upstreamAuth: { header: string; value: string }; workers: Map<string, WorkerEntry> },
+	ctx: { routes: Map<string, ProviderRoute>; workers: Map<string, WorkerEntry> },
 ): Promise<void> {
 	try {
+		// (0) Provider routing: the FIRST path segment names the provider
+		// ("/anthropic/v1/messages", "/openai/chat/completions"); the broker
+		// forwards the REMAINING path verbatim to that provider's upstream.
+		const url = req.url ?? "/";
+		let route: ProviderRoute | undefined;
+		let upstreamPath = url;
+		for (const [prefix, candidate] of ctx.routes) {
+			if (url === prefix || url.startsWith(`${prefix}/`)) {
+				route = candidate;
+				upstreamPath = url.slice(prefix.length) || "/";
+				break;
+			}
+		}
+		if (!route) {
+			deny(res, 404, "unknown provider route (expected /anthropic/... or /openai/...)");
+			return;
+		}
 		// (1) Auth — fail-closed, generic errors (never echo tokens).
 		const token = extractToken(req);
 		const worker = token ? ctx.workers.get(token) : undefined;
@@ -278,8 +384,8 @@ async function handleRequest(
 			if (!FORWARD_REQUEST_HEADERS.has(name.toLowerCase())) continue;
 			if (typeof value === "string") headers[name.toLowerCase()] = value;
 		}
-		headers[ctx.upstreamAuth.header] = ctx.upstreamAuth.value;
-		const upstreamRes = await fetch(`${ctx.upstream}${req.url ?? "/v1/messages"}`, {
+		headers[route.auth.header] = route.auth.value;
+		const upstreamRes = await fetch(`${route.upstream}${upstreamPath}`, {
 			// eslint-disable-next-line
 			method: req.method ?? "POST",
 			headers,
@@ -353,9 +459,22 @@ class UsageCounter {
 				// Non-stream JSON body: top-level evt.usage, both absolute.
 				const usage = evt?.message?.usage ?? evt?.usage;
 				if (!usage || typeof usage !== "object") continue;
-				if (typeof usage.input_tokens === "number" && evt.type !== "message_delta")
-					this.input = Math.max(this.input, usage.input_tokens);
-				if (typeof usage.output_tokens === "number") this.output = Math.max(this.output, usage.output_tokens);
+				// Anthropic: input_tokens / output_tokens. OpenAI chat-completions:
+				// prompt_tokens / completion_tokens (final usage chunk, absolute).
+				const inTok =
+					typeof usage.input_tokens === "number"
+						? usage.input_tokens
+						: typeof usage.prompt_tokens === "number"
+							? usage.prompt_tokens
+							: undefined;
+				const outTok =
+					typeof usage.output_tokens === "number"
+						? usage.output_tokens
+						: typeof usage.completion_tokens === "number"
+							? usage.completion_tokens
+							: undefined;
+				if (typeof inTok === "number" && evt.type !== "message_delta") this.input = Math.max(this.input, inTok);
+				if (typeof outTok === "number") this.output = Math.max(this.output, outTok);
 			} catch {
 				// non-JSON line — ignore
 			}

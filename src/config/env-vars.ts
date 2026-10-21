@@ -510,7 +510,15 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 	},
 	PI_CREW_INFERENCE_UPSTREAM: {
 		name: "PI_CREW_INFERENCE_UPSTREAM",
-		doc: "v0.11.31 inference broker upstream override (default https://api.anthropic.com). TESTS ONLY — points the broker at a local mock upstream; production callers must never set it",
+		doc: "v0.11.31 inference broker upstream override applied to EVERY provider (defaults: anthropic https://api.anthropic.com, openai https://api.openai.com/v1). TESTS ONLY — points the broker at a local mock upstream; production callers must never set it",
+	},
+	PI_CREW_INFERENCE_UPSTREAM_ANTHROPIC: {
+		name: "PI_CREW_INFERENCE_UPSTREAM_ANTHROPIC",
+		doc: "v0.11.34 anthropic-only broker upstream override (beats PI_CREW_INFERENCE_UPSTREAM). TESTS ONLY — local mock; production must never set it",
+	},
+	PI_CREW_INFERENCE_UPSTREAM_OPENAI: {
+		name: "PI_CREW_INFERENCE_UPSTREAM_OPENAI",
+		doc: "v0.11.34 openai-only broker upstream override (beats PI_CREW_INFERENCE_UPSTREAM). TESTS ONLY — local mock; production must never set it",
 	},
 	PI_CREW_CLASSIFIER_ENABLED: {
 		name: "PI_CREW_CLASSIFIER_ENABLED",

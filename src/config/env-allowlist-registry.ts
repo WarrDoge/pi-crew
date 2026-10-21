@@ -214,6 +214,8 @@ const CREW_ENV_FORWARDING_DECL: Record<string, CrewEnvForwardDecision> = {
 		kind: "test-only",
 		reason: "v0.11.31 broker upstream override — TESTS ONLY (local mock), production never sets it",
 	},
+	PI_CREW_INFERENCE_UPSTREAM_ANTHROPIC: { kind: "test-only", reason: "v0.11.34 anthropic-only broker upstream override — TESTS ONLY" },
+	PI_CREW_INFERENCE_UPSTREAM_OPENAI: { kind: "test-only", reason: "v0.11.34 openai-only broker upstream override — TESTS ONLY" },
 	PI_CREW_STEERING_FILE: { kind: "child-write", reason: "child-pi-spawn per-run steering JSONL" },
 	PI_CREW_MAX_OUTPUT: { kind: "child-write", reason: "pi-args emits agent.maxTokens into built.env" },
 	PI_CREW_RPC_SECRET: { kind: "child-write", reason: "shared HMAC secret handed to the child at spawn — secret name, never allowlisted" },
