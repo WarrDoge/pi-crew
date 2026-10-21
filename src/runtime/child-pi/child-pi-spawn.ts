@@ -31,7 +31,6 @@ import type { ChildPiRunInput, ChildPiRunResult } from "./child-pi.ts";
 import {
 	getInferenceBrokerSnapshot,
 	INFERENCE_TOKEN_ENV,
-	maybeStartInferenceBroker,
 	PI_AGENT_DIR_ENV,
 	registerInferenceWorker,
 	requireInferenceBrokerIfEnabled,
