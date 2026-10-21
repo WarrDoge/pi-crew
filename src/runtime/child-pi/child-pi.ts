@@ -36,6 +36,7 @@ import { ChildPiSteeringController } from "./child-pi-steering.ts";
 import { ChildPiLineObserver, isFinalAssistantEvent } from "./child-pi-streams.ts";
 // Phase 2.3: the six timer constructs moved to child-pi-timers.ts (pure motion).
 import { createChildPiTimers } from "./child-pi-timers.ts";
+import { maybeStartInferenceBroker } from "./inference-broker.ts";
 import { runMockChildPi } from "./mock-fixtures.ts";
 // W2 (session-file recovery): deterministic worker session flags + crash-path
 // tail-replay of the session JSONL (see session-recovery.ts header).
@@ -777,6 +778,9 @@ export async function runChildPi(input: ChildPiRunInput): Promise<ChildPiRunResu
 	// guard below returns before the argv is ever consumed.
 	const versionedInput: ChildPiRunInput =
 		!input.signal?.aborted && !resolveHermeticWorkers(input.hermeticWorkers) ? { ...input, piVersion: await probePiVersion() } : input;
+	// v0.11.31: start the inference broker (flag-gated, fail-closed) BEFORE the
+	// sync spawn-prep path — http listen needs an event-loop turn.
+	await maybeStartInferenceBroker();
 	const spawnPrep = prepareSpawnContext(brokerSpawn ? { ...versionedInput, brokerSpawn } : versionedInput, effectiveTask, depthEnv);
 	if (spawnPrep.kind === "aborted") return spawnPrep.result;
 	const { spawnSpec, mergedEnv, tempDir, builtEnv, builtArgs } = spawnPrep.ctx;

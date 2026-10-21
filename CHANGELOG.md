@@ -6,6 +6,17 @@
 
 - **fix(gate): RT24-F1 root-gate config/autonomy read over-block** — `rootGateBlockReason` counted the `args` subcommand carrier as a config patch key, so worker-origin `config {args:"show"}` READS were rejected as "writes user-scope config" (live-caught in the v0.11.24 real-test battery; docblock promised reads open). `args` added to the carrier-key sets for `config` and `autonomy`; unknown junk keys stay write-classified (fail-closed). Pinned: reads with carrier keys open, writes hidden behind the same key still gated (`unset`/patch keys), user config byte-untouched. Live-verified end-to-end (fresh `pi -p`, worker env): read allowed + dumps config; `unset` write gate-blocked verbatim "root-session required".
 
+## [0.11.31] — Inference Broker PoC: workers no longer hold ANY real provider key
+
+### Security
+- **S-broker (v0.11.31 PoC, opt-in `PI_CREW_INFERENCE_BROKER=1`)**: the A7 chain's last credential exposure — the REAL provider key a child worker needed to call its LLM — is removed by a loopback inference broker. The parent starts a 127.0.0.1 HTTP broker that substitutes the real upstream credential (ANTHROPIC_API_KEY → x-api-key / ANTHROPIC_AUTH_TOKEN → Bearer) AFTER a request leaves the worker; each child receives only a per-worker 256-bit token (valid solely at this process's broker) plus a scoped agent dir (PI_CODING_AGENT_DIR containing models.json that reroutes the built-in anthropic provider to the broker via `$PI_CREW_INFERENCE_TOKEN` interpolation — no auth.json, no extensions, no skills). No real credential exists in any worker-reachable env surface (S\* already shadows the rest). FAIL-CLOSED: the flag without an upstream credential throws at first spawn — never a silent fallback to real keys. Provider env keys are never injected while the broker is active.
+- Same credential-substitution pattern Docker Sandboxes/OpenShell sell, self-hosted in-process (zero infrastructure); plus per-worker token budget (`PI_CREW_INFERENCE_BUDGET_TOKENS`, counted from streamed Anthropic usage events → 429), per-worker in-flight cap, revoke/revokeAll kill-switch, re-register-replaces-token retry safety, and redacted per-worker stats.
+- Honest boundary (documented in-module): the broker protects the REUSABLE CREDENTIAL channel only — host-file access and general egress still need an OS boundary; auth.json-credential parents and non-anthropic upstreams are follow-ups.
+
+### Tests
+- `inference-broker.test.ts` (15): auth fail-closed ×3; substitution (real key upstream, token never forwarded, byte-accurate SSE relay, framing-header stripping, usage counting incl. message_start nesting + message_delta cumulative semantics, bearer style) ×3; per-worker (unique tokens, revoke isolation, retry replace, budget 429, revokeAll) ×4; scoped-dir content/modes; WIRING (broker on → agent-dir+token, NEVER provider keys; broker off → legacy scoped allowlist regression pin); ensure fail-closed; LIVE e2e — a REAL `pi -p` run completes through scoped dir + broker + mock upstream with NO ANTHROPIC_API_KEY in the worker env, upstream receives the real key.
+- 4/4 mutation checks: skip-auth → 4 red; forward-client-auth → 3 red (incl. LIVE); budget-off → 1 red; provider-keys-still-injected → 1 red. Registry snapshot pin updated (+4 keys); lazy-import budget 532 → 533 (broker is a sync spawn-path dependency, not deferrable).
+
 ## [0.11.30] — S\*: undefined-shadow exact-env — the RPC env-splice swap is DELETED; SDK drift is structurally inert
 
 ### Security

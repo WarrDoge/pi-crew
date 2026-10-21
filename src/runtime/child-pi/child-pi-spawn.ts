@@ -28,6 +28,14 @@ import { buildPiWorkerArgs, createSafeTempDir, getPiTempBase } from "../model/pi
 import { getPiSpawnCommand } from "../pi-spawn.ts";
 import { findLatestScratchpadSnapshot } from "../scratchpad/snapshot-lookup.ts";
 import type { ChildPiRunInput, ChildPiRunResult } from "./child-pi.ts";
+import {
+	getInferenceBrokerSnapshot,
+	INFERENCE_TOKEN_ENV,
+	maybeStartInferenceBroker,
+	PI_AGENT_DIR_ENV,
+	registerInferenceWorker,
+	requireInferenceBrokerIfEnabled,
+} from "./inference-broker.ts";
 
 // ── Env allowlist (base set always passed to children) ──────────────────
 // Provider API keys are injected dynamically via buildScopedAllowList() only
@@ -102,7 +110,13 @@ export function buildChildPiSpawnOptions(
 	// provider does not spawn keyless. When no model is given, only
 	// BASE_ALLOWLIST system vars pass through — no provider keys leak.
 	const scopeModels: (string | undefined)[] = modelChain && modelChain.length > 0 ? modelChain : model !== undefined ? [model] : [];
-	const allowList = scopeModels.length > 0 ? buildScopedAllowList(BASE_ALLOWLIST, scopeModels) : BASE_ALLOWLIST;
+	// v0.11.31 inference broker: when active, the child's ONLY credential is
+	// its per-worker broker token — provider env keys are NEVER injected (they
+	// would defeat the broker by handing the worker the real reusable key
+	// again). The broker snapshot is read-only module state (no side effects —
+	// the broker is started by prepareSpawnContext, never here).
+	const inferenceBrokerActive = getInferenceBrokerSnapshot().active;
+	const allowList = !inferenceBrokerActive && scopeModels.length > 0 ? buildScopedAllowList(BASE_ALLOWLIST, scopeModels) : BASE_ALLOWLIST;
 	// R6-8: warn when the scoped models resolve to ZERO provider env keys AND at
 	// least one is a truly-bare id (no "provider/" prefix) — env-key auth + bare
 	// id means the child worker will very likely fail authentication (observed as
@@ -244,6 +258,15 @@ export function buildFinalChildPiSpawnOptions(
 	//     process would never see steering file, kind, role, or broker creds.
 	//     Safe because step (a) just proved builtEnv holds no secret keys.
 	spawnOptions.env = { ...spawnOptions.env, ...builtEnv };
+	// (c′) v0.11.31 inference broker: pi's NATIVE agent-dir override is NOT a
+	//     control-namespace key, so it never travels through built.env (step (a)
+	//     would reject it) — it is mapped here, at the spawn-options layer, from
+	//     the broker snapshot when a per-worker token is present. The scoped dir
+	//     contains ONLY models.json (no auth.json, no extensions, no skills).
+	const inferenceSnapshot = getInferenceBrokerSnapshot();
+	if (inferenceSnapshot.active && builtEnv[INFERENCE_TOKEN_ENV]) {
+		spawnOptions.env[PI_AGENT_DIR_ENV] = inferenceSnapshot.scopedAgentDir ?? "";
+	}
 	// (d) Return the composed SpawnOptions for spawn(...).
 	return spawnOptions;
 }
@@ -265,6 +288,8 @@ export interface SpawnContext {
 	tempDir: string | undefined;
 	/** The per-call built.env (control vars only) — for security canary assertions. */
 	builtEnv: Record<string, string | undefined>;
+	/** v0.11.31: inference-broker worker key that owns this spawn's token (cleanup/revoke bookkeeping). */
+	inferenceWorkerKey?: string;
 }
 
 /**
@@ -308,6 +333,21 @@ export function prepareSpawnContext(
 		// child env gets parentDepth+1 = the true grandchild depth.
 		env: depthEnv,
 	});
+	// v0.11.31 inference broker (opt-in PI_CREW_INFERENCE_BROKER=1): the broker
+	// must already be running (child-pi.ts run() awaits maybeStartInferenceBroker()
+	// first — http listen needs an event-loop turn, so the SYNC spawn path can
+	// only require, never start). Issue this worker's token. Control-namespace
+	// key → passes assertOnlyControlEnvKeys. FAIL-CLOSED: flag on without a
+	// started broker or an upstream credential throws here (never silently
+	// spawn keyless / real-key workers). Worker key: the task id when present
+	// (retries REPLACE the old token — registerInferenceWorker semantics), else
+	// a per-spawn unique.
+	const inferenceSnapshot = requireInferenceBrokerIfEnabled();
+	let inferenceWorkerKey: string | undefined;
+	if (inferenceSnapshot.active) {
+		inferenceWorkerKey = input.agentId ? `inference:${input.agentId}` : `inference:spawn:${process.pid}:${Date.now().toString(36)}`;
+		built.env[INFERENCE_TOKEN_ENV] = registerInferenceWorker(inferenceWorkerKey);
+	}
 	// Pass steering file path to child for real-time steer injection
 	if (input.steeringFile) built.env.PI_CREW_STEERING_FILE = input.steeringFile;
 	// I5: run/task identity is threaded ALWAYS (not broker-gated) so the worker's
@@ -433,6 +473,7 @@ export function prepareSpawnContext(
 			mergedEnv: { ...process.env, ...built.env },
 			tempDir: built.tempDir,
 			builtEnv: built.env,
+			inferenceWorkerKey,
 		},
 	};
 }

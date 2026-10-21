@@ -85,6 +85,10 @@ const SRC_READ_NAMES: readonly string[] = [
 	"PI_CREW_WORKER_TRANSPORT",
 	"PI_CREW_CLASSIFIER_ENABLED",
 	"PI_CREW_CLASSIFIER_MODEL",
+	"PI_CREW_INFERENCE_BROKER", // v0.11.31 loopback inference broker toggle (parent-only)
+	"PI_CREW_INFERENCE_TOKEN", // v0.11.31 per-worker broker token (child-write secret)
+	"PI_CREW_INFERENCE_BUDGET_TOKENS", // v0.11.31 per-worker token budget
+	"PI_CREW_INFERENCE_UPSTREAM", // v0.11.31 broker upstream override (tests only)
 	"PI_CREW_RUN_LOCK_SOCKET", // U21 run-lock dual-guard toggle (locks.ts acquireRunLockGuarded)
 	"PI_CREW_VERIFY_DETERMINISM", // U13-ADJ layer-3 determinism rerun toggle (verify-gate.ts resolveVerifyDeterminismEnabled)
 	"PI_CREW_RPC_DIALOG_ANSWER",

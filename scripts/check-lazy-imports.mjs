@@ -138,12 +138,16 @@ const BUDGETS = {
 		// the run/wait hot path, not deferrable) + the M3-5 delegate family's two
 		// new modules (runtime/broker/delegate/delegate-abort.ts,
 		// delegate-finalize.ts) which are statically reached from crew-broker.ts.
+		// v0.11.31 (2026-10-20): 532 → 533 — runtime/child-pi/inference-broker.ts
+		// (loopback inference broker; statically imported by child-pi-spawn.ts,
+		// which needs its SYNC snapshot/require/register calls on the spawn path —
+		// not deferrable; the async listen start lives in child-pi.ts run()).
 		// Count measured with the R18-1 depth-1 + R18-3 `.js`-suffix fixes in place,
 		// so the graph is now complete (those two fixes add no file by themselves:
 		// no `.js`-suffixed relative import exists in the tree today). RE-MEASURE at
 		// wave land — this number is a moving target while parallel tasks land src
 		// modules (the wave's rebuild step is the natural point to reconcile it).
-		maxFiles: 532,
+		maxFiles: 533,
 		forbid: ["test/", "scripts/", "docs/", "dist/"],
 	},
 };

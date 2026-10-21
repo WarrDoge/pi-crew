@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { stopInferenceBroker } from "../runtime/child-pi/inference-broker.ts";
 import { cleanupAllTrackedTempDirs } from "../runtime/model/pi-args.ts";
 import { isSessionSwitchInFlight } from "../ui/inline-panel/view-session-store.ts";
 import { logInternalError } from "../utils/internal-error.ts";
@@ -88,6 +89,16 @@ export function registerCleanupHandler(pi: ExtensionAPI, opts?: { disposeTermina
 			if (isSessionSwitchInFlight()) return;
 			// Kill all child-pi processes
 			await cleanupChildProcesses();
+
+			// v0.11.31: stop the loopback inference broker — revokes every
+			// worker token (kill-switch) and removes the scoped agent dir BEFORE
+			// generic temp cleanup (which would also catch it — this is the
+			// explicit, token-revoking path).
+			try {
+				stopInferenceBroker();
+			} catch (error) {
+				logInternalError("crew-cleanup.inference-broker", error);
+			}
 
 			// Cleanup temp directories
 			await cleanupTempDirectories();

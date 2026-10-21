@@ -494,6 +494,24 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		name: "PI_CREW_WORKER_TRANSPORT",
 		doc: "W7 EXPERIMENTAL worker transport override: 'rpc' selects the prototype RPC frame-client (src/runtime/rpc/) at the run-worker seam (wired e2728f68; D1/DR2 also plumbs config runtime.workerTransport to the same seam — env WINS over config when set, invalid env fails safe to stdio); anything else/unset → config value, default stdio child-pi path (rpc-worker.ts resolveWorkerTransport)",
 	},
+	PI_CREW_INFERENCE_BROKER: {
+		name: "PI_CREW_INFERENCE_BROKER",
+		parser: "boolean",
+		doc: "v0.11.31 (S-broker PoC) opt-in loopback inference broker: '1' starts a 127.0.0.1 HTTP broker in the parent; child workers get ONLY a per-worker token (PI_CREW_INFERENCE_TOKEN) + a scoped agent dir (PI_CODING_AGENT_DIR containing models.json that reroutes the built-in anthropic provider to the broker) instead of any real provider key. Real key (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN from the PARENT env only) is substituted after requests leave the worker. FAIL-CLOSED: flag set without an upstream credential throws at first spawn (inference-broker.ts). PoC: anthropic upstream only, env-credential users only (auth.json users unsupported yet)",
+	},
+	PI_CREW_INFERENCE_TOKEN: {
+		name: "PI_CREW_INFERENCE_TOKEN",
+		doc: "v0.11.31 child-side per-worker inference broker token (256-bit random, heap-only on the parent, injected via built.env by prepareSpawnContext when the broker is active; interpolated into models.json apiKey as $PI_CREW_INFERENCE_TOKEN by the child at request time). NEVER user-set; workerKey-scoped — re-registering a task id replaces (kills) the old token",
+	},
+	PI_CREW_INFERENCE_BUDGET_TOKENS: {
+		name: "PI_CREW_INFERENCE_BUDGET_TOKENS",
+		parser: "int",
+		doc: "v0.11.31 per-worker inference token budget counted from streamed Anthropic usage events; 0/unset = unlimited. Requests past the budget get 429 (inference-broker.ts registerInferenceWorker)",
+	},
+	PI_CREW_INFERENCE_UPSTREAM: {
+		name: "PI_CREW_INFERENCE_UPSTREAM",
+		doc: "v0.11.31 inference broker upstream override (default https://api.anthropic.com). TESTS ONLY — points the broker at a local mock upstream; production callers must never set it",
+	},
 	PI_CREW_CLASSIFIER_ENABLED: {
 		name: "PI_CREW_CLASSIFIER_ENABLED",
 		parser: "boolean",

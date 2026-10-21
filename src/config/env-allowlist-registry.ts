@@ -198,6 +198,22 @@ const CREW_ENV_FORWARDING_DECL: Record<string, CrewEnvForwardDecision> = {
 		reason: "per-task compound broker token via built.env/pipe (F4) — secret, never allowlisted",
 	},
 	PI_CREW_BROKER_TASK_ID: { kind: "child-write", reason: "child-pi-spawn broker handshake" },
+	PI_CREW_INFERENCE_BROKER: {
+		kind: "gap",
+		reason: "v0.11.31 inference broker toggle — resolved in the PARENT only (ensureInferenceBroker); deliberately never forwarded to children (a child re-starting its own broker would be nonsensical)",
+	},
+	PI_CREW_INFERENCE_TOKEN: {
+		kind: "child-write",
+		reason: "v0.11.31 per-worker inference broker token via built.env — secret, never allowlisted",
+	},
+	PI_CREW_INFERENCE_BUDGET_TOKENS: {
+		kind: "gap",
+		reason: "v0.11.31 per-worker budget read by the parent broker at token issuance (registerInferenceWorker)",
+	},
+	PI_CREW_INFERENCE_UPSTREAM: {
+		kind: "test-only",
+		reason: "v0.11.31 broker upstream override — TESTS ONLY (local mock), production never sets it",
+	},
 	PI_CREW_STEERING_FILE: { kind: "child-write", reason: "child-pi-spawn per-run steering JSONL" },
 	PI_CREW_MAX_OUTPUT: { kind: "child-write", reason: "pi-args emits agent.maxTokens into built.env" },
 	PI_CREW_RPC_SECRET: { kind: "child-write", reason: "shared HMAC secret handed to the child at spawn — secret name, never allowlisted" },
