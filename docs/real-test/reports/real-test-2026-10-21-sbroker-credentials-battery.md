@@ -30,3 +30,12 @@ Base v0.11.33 (`34ef039b`) → target v0.11.34 (ONE version bump per user constr
 
 ## Verdict
 **GO** for v0.11.34.
+
+## SHIP TRAIL
+- v0.11.34 `b487bb15` — CI RED on the windows matrix: h1 fixture used the POSIX-only
+  `/tmp` literal (mkdtemp '\tmp\...' ENOENT). Fixed via os.tmpdir().
+- v0.11.35 `0211ca92` — CI run 39642771521 GREEN after 2 adjudicated rerun-failed
+  (async-notifier + F3 delegate-grandchild-model + u15 — all isolated-green timing
+  flakes on the windows matrix; u15 is the known v0.11.28 class).
+- npm `+ pi-crew@0.11.35`; dist-tags.latest=0.11.35; release v0.11.35 (Latest).
+- v0.11.34 tag intentionally NOT published (red CI — publish protocol).
