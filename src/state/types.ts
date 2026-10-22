@@ -591,6 +591,8 @@ export interface ModelAttemptState {
 	success: boolean;
 	exitCode?: number | null;
 	error?: string;
+	/** W10-7: per-attempt usage mirrored from ModelAttemptSummary. */
+	usage?: UsageState;
 }
 
 export interface ModelRoutingState {
@@ -663,6 +665,16 @@ export interface TeamTaskState {
 	modelAttempts?: ModelAttemptState[];
 	modelRouting?: ModelRoutingState;
 	usage?: UsageState;
+	/** W10-7 (v0.11.38): usage reconciliation — sum of ALL attempts' cost
+	 *  (incl. failed fallbacks) vs the final run's cost. Present only when the
+	 *  gap exceeds 5% AND more than one attempt carried usage — observability
+	 *  only, never a task failure. */
+	usageReconcile?: {
+		attemptTotalCostUsd: number;
+		finalRunCostUsd: number;
+		deltaPct: number;
+		attemptsWithUsage: number;
+	};
 	jsonEvents?: number;
 	agentProgress?: CrewAgentProgress;
 	error?: string;

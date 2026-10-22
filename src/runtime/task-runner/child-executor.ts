@@ -1193,6 +1193,9 @@ export async function runChildProcessTask(ctx: TaskExecutionContext): Promise<Ta
 			success: !error,
 			exitCode,
 			error,
+			// W10-7: capture THIS attempt's usage before the loop can move on —
+			// failed attempts' tokens otherwise vanish from every persisted record.
+			...(parsedOutput?.usage ? { usage: parsedOutput.usage } : {}),
 		};
 		modelAttempts.push(attempt);
 		task = {

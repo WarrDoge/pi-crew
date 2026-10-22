@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getCrewEnv } from "../../config/env-vars.ts";
 import { errors } from "../../errors.ts";
+import type { UsageState } from "../../state/types.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
 import { fuzzyResolveModelId } from "./model-resolver.ts";
 import { checkModelScope } from "./model-scope.ts";
@@ -19,6 +20,10 @@ export interface ModelAttemptSummary {
 	success: boolean;
 	exitCode?: number | null;
 	error?: string;
+	/** W10-7 (v0.11.38): THIS attempt's own usage (from its parsed output) —
+	 *  failed-fallback attempts burned real tokens that task.usage (the FINAL
+	 *  run's usage) never shows; post-execution reconciles the two. */
+	usage?: UsageState;
 }
 
 export interface ModelLike {

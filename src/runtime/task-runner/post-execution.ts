@@ -27,6 +27,7 @@ import type {
 	TeamRunManifest,
 	TeamTaskState,
 	TeamTaskStatus,
+	UsageState,
 	VerificationEvidence,
 } from "../../state/types.ts";
 import { captureWorktreeDiffAsync, captureWorktreeDiffStatAsync } from "../../worktree/worktree-manager.ts";
@@ -142,6 +143,37 @@ const VERIFIER_VERDICT_LINE = /^[\s*_>#`=-]*(PASS|FAIL)[\s*_`]*(?=[:.\u2014\u201
 /** W10-5: the critic/oracle decision-drift guardian marker (see
  *  agents/critic.md + agents/oracle.md "Decision-drift guardian" sections). */
 const DRIFT_BLOCK_MARKER = /DRIFT-BLOCK\b/i;
+
+/**
+ * W10-7 (v0.11.38, pi-subagents lesson #14 — usage reconciliation): compare
+ * the SUM of every model attempt's own cost (failed fallback attempts burn
+ * real tokens too, but task.usage carries only the FINAL run's numbers)
+ * against the final cost. Returns a usageReconcile note ONLY when the gap
+ * exceeds 5% AND at least two attempts reported usage — a single attempt is
+ * trivially self-consistent. Observability only: never fails the task.
+ */
+export function reconcileUsage(
+	attempts: ModelAttemptSummary[] | undefined,
+	finalUsage: UsageState | undefined,
+): { usageReconcile: NonNullable<TeamTaskState["usageReconcile"]> } | undefined {
+	if (!attempts || attempts.length < 2) return undefined;
+	const costs = attempts.map((a) => (typeof a.usage?.cost === "number" && Number.isFinite(a.usage.cost) ? a.usage.cost : undefined));
+	const withUsage = costs.filter((c): c is number => c !== undefined);
+	if (withUsage.length < 2) return undefined;
+	const attemptTotal = withUsage.reduce((sum, c) => sum + c, 0);
+	const finalCost = typeof finalUsage?.cost === "number" && Number.isFinite(finalUsage.cost) ? finalUsage.cost : 0;
+	if (attemptTotal <= 0) return undefined;
+	const deltaPct = Math.abs(attemptTotal - finalCost) / attemptTotal;
+	if (deltaPct <= 0.05) return undefined;
+	return {
+		usageReconcile: {
+			attemptTotalCostUsd: Number(attemptTotal.toFixed(6)),
+			finalRunCostUsd: finalCost,
+			deltaPct: Number((deltaPct * 100).toFixed(1)),
+			attemptsWithUsage: withUsage.length,
+		},
+	};
+}
 
 /**
  * M3-2 (R47-3/V4, fix-wave 6): read the verifier verdict out of the
@@ -737,6 +769,10 @@ export async function finalizeTaskResult(ctx: TaskExecutionContext, execResult: 
 		exitCode,
 		modelAttempts,
 		usage: parsedOutput?.usage,
+		// W10-7 (v0.11.38): reconcile per-attempt costs (failed fallbacks burn
+		// real tokens that the final run's usage never shows) against the final
+		// cost — observability note only, >5% gap with >1 usage-carrying attempt.
+		...(reconcileUsage(modelAttempts, parsedOutput?.usage) ?? {}),
 		jsonEvents: parsedOutput?.jsonEvents,
 		agentProgress:
 			error && task.agentProgress?.currentTool
