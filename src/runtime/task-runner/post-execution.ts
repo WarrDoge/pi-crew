@@ -39,6 +39,7 @@ import { createWorkerHeartbeat, touchWorkerHeartbeat } from "../heartbeat/worker
 import type { ModelAttemptSummary } from "../model/model-fallback.ts";
 import { isStderrOnlyResult, type OutputValidationResult, validateWorkerOutput } from "../output/output-validator.ts";
 import type { ParsedPiJsonOutput } from "../output/pi-json-output.ts";
+import { permissionForRole } from "../role-permission.ts";
 import { writeTaskSharedOutput } from "../task-output-context.ts";
 import { evaluateCompletionMutationGuard } from "../verification/completion-guard.ts";
 import { createVerificationEvidence } from "../verification/green-contract.ts";
@@ -143,6 +144,34 @@ const VERIFIER_VERDICT_LINE = /^[\s*_>#`=-]*(PASS|FAIL)[\s*_`]*(?=[:.\u2014\u201
 /** W10-5: the critic/oracle decision-drift guardian marker (see
  *  agents/critic.md + agents/oracle.md "Decision-drift guardian" sections). */
 const DRIFT_BLOCK_MARKER = /DRIFT-BLOCK\b/i;
+
+/**
+ * W10-8 (pi-subagents lesson #4): bounded `git status --porcelain` probe for
+ * READ-ONLY lanes — any entry (modified OR untracked) is an unexpected
+ * mutation. Returns undefined when the tree is clean or git fails (fail-open:
+ * a broken probe must not break task finalization). Note-only, never a fail.
+ */
+export async function detectReadLaneMutation(worktreePath: string): Promise<NonNullable<TeamTaskState["unexpectedMutation"]> | undefined> {
+	try {
+		const { execFile } = await import("node:child_process");
+		const out: string = await new Promise((resolve, reject) => {
+			execFile("git", ["status", "--porcelain"], { cwd: worktreePath, encoding: "utf-8", timeout: 10_000 }, (err, stdout) =>
+				err ? reject(err) : resolve(stdout),
+			);
+		});
+		const entries = out
+			.split("\n")
+			.map((l) => l.trim())
+			.filter((l) => l.length > 0);
+		if (entries.length === 0) return undefined;
+		return {
+			filesChanged: entries.length,
+			sample: entries.slice(0, 20).map((e) => e.slice(0, 200)),
+		};
+	} catch {
+		return undefined;
+	}
+}
 
 /**
  * W10-7 (v0.11.38, pi-subagents lesson #14 — usage reconciliation): compare
@@ -367,6 +396,7 @@ export async function finalizeTaskResult(ctx: TaskExecutionContext, execResult: 
 				producer: task.id,
 			})
 		: undefined;
+
 	const diffStatArtifact = workspace.worktreePath
 		? writeArtifact(manifest.artifactsRoot, {
 				kind: "metadata",
@@ -375,6 +405,14 @@ export async function finalizeTaskResult(ctx: TaskExecutionContext, execResult: 
 				producer: task.id,
 			})
 		: undefined;
+	// W10-8 (v0.11.38, pi-subagents lesson #4 — staged-files guard): a READ-ONLY
+	// lane that dirtied its worktree is a contract violation worth surfacing —
+	// note only (the diff artifact above is the evidence; the leader decides).
+	// `git diff` alone misses UNTRACKED files, hence status --porcelain.
+	const readLaneMutation =
+		workspace.worktreePath && permissionForRole(task.role) === "read_only"
+			? await detectReadLaneMutation(workspace.worktreePath)
+			: undefined;
 
 	// Capture unified patches from edit tool results
 	const patchArtifact = parsedOutput?.patches?.length
@@ -773,6 +811,7 @@ export async function finalizeTaskResult(ctx: TaskExecutionContext, execResult: 
 		// real tokens that the final run's usage never shows) against the final
 		// cost — observability note only, >5% gap with >1 usage-carrying attempt.
 		...(reconcileUsage(modelAttempts, parsedOutput?.usage) ?? {}),
+		...(readLaneMutation ? { unexpectedMutation: readLaneMutation } : {}),
 		jsonEvents: parsedOutput?.jsonEvents,
 		agentProgress:
 			error && task.agentProgress?.currentTool

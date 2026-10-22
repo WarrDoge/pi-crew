@@ -675,6 +675,13 @@ export interface TeamTaskState {
 		deltaPct: number;
 		attemptsWithUsage: number;
 	};
+	/** W10-8 (v0.11.38): a READ-ONLY lane dirtied its worktree (modified or
+	 *  untracked files). Note-only — evidence lives in the task's diff
+	 *  artifact; the leader decides whether it invalidates the result. */
+	unexpectedMutation?: {
+		filesChanged: number;
+		sample: string[];
+	};
 	jsonEvents?: number;
 	agentProgress?: CrewAgentProgress;
 	error?: string;
