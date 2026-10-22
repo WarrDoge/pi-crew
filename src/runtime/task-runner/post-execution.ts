@@ -139,6 +139,10 @@ export type VerifierVerdict = "pass" | "fail" | "none";
  */
 const VERIFIER_VERDICT_LINE = /^[\s*_>#`=-]*(PASS|FAIL)[\s*_`]*(?=[:.\u2014\u2013-]|$|\()/i;
 
+/** W10-5: the critic/oracle decision-drift guardian marker (see
+ *  agents/critic.md + agents/oracle.md "Decision-drift guardian" sections). */
+const DRIFT_BLOCK_MARKER = /DRIFT-BLOCK\b/i;
+
 /**
  * M3-2 (R47-3/V4, fix-wave 6): read the verifier verdict out of the
  * authoritative result sources.
@@ -173,7 +177,18 @@ export function extractVerifierVerdict(...sources: Array<string | undefined>): V
 			if (match[1]?.toUpperCase() === "FAIL") return "fail";
 			sawPass = true;
 		}
-		if (sawPass) return "pass";
+		if (sawPass) {
+			// W10-5 (v0.11.38, pi-subagents lesson #20 — oracle/drift-guardian): a
+			// verdict that flags a decision-drift contradiction (the `DRIFT-BLOCK:`
+			// marker the critic/oracle prompts mandate) is SELF-CONTRADICTORY as a
+			// pass — the worker saw a contradiction with an inherited decision and
+			// approved anyway. Degrade to "none" (not verified): the existing
+			// self-attested downgrade path then demands human/leader review instead
+			// of a green. FAIL still wins above — a flagged drift alongside FAIL is
+			// already the honest verdict.
+			if (DRIFT_BLOCK_MARKER.test(source)) return "none";
+			return "pass";
+		}
 	}
 	return "none";
 }
