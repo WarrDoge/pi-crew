@@ -176,6 +176,7 @@ const REGISTRY_SNAPSHOT: readonly string[] = [
 	// U13 deterministic verify_gate pre-gate + timeout
 	"PI_CREW_STATE_BACKEND",
 	"PI_CREW_VERIFY_GATE",
+	"PI_CREW_VERIFY_GATE_MEMO",
 	"PI_CREW_VERIFY_GATE_TIMEOUT_MS",
 	"PI_CREW_TEST_REAL_MODEL",
 	"PI_CREW_TOOLING_429_NOTE",
