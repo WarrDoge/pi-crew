@@ -100,9 +100,12 @@ function memoHitOutcome(key: string, checks: VerifyGateCheck[]): VerifyGateOutco
 }
 
 /** Lookup a recorded PASS for this exact (tree, checks, node) triple.
- *  Returns undefined on miss / disabled / unkeyable cwd. */
+ *  Returns undefined on miss / disabled / unkeyable cwd. Typed-JSON gates
+ *  (W10-9, check.output==="json") NEVER hit the memo — structured-output
+ *  consumers read fresh structuredOutput every run. */
 export function lookupVerifyGateMemo(cwd: string, checks: VerifyGateCheck[]): VerifyGateOutcome | undefined {
 	if (checks.length === 0) return undefined;
+	if (checks.some((c) => c.output === "json")) return undefined;
 	const key = computeVerifyGateMemoKey(cwd, checks);
 	if (!key) return undefined;
 	const hit = memoStore.get(key);
@@ -113,6 +116,7 @@ export function lookupVerifyGateMemo(cwd: string, checks: VerifyGateCheck[]): Ve
  *  Memo-hit outcomes must not re-record (they carry skipped checks). */
 export function recordVerifyGateMemo(cwd: string, checks: VerifyGateCheck[], outcome: VerifyGateOutcome): boolean {
 	if (checks.length === 0) return false;
+	if (checks.some((c) => c.output === "json")) return false;
 	if (outcome.verdict !== "PASS" || !outcome.allPassed) return false;
 	const ranReal = outcome.checks.some((c) => !c.skipped);
 	if (!ranReal) return false;

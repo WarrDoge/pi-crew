@@ -86,6 +86,15 @@ export interface VerifyGateCheck {
 	command: string;
 	/** Stop the gate on the first failure of this check (default true). */
 	critical?: boolean;
+	/** W10-9 (v0.11.38, pi-subagents lesson #2): TYPED gate — stdout must be
+	 *  valid JSON matching `schema` (minimal subset below). Invalid JSON or a
+	 *  schema mismatch FAILS the check even at exit 0. Typed gates NEVER
+	 *  memoize (verify-gate-memo.ts guard): a structured-output consumer reads
+	 *  fresh structuredOutput every run. */
+	output?: "json";
+	/** Minimal JSON-schema subset: {type, required?, properties?, items?,
+	 *  enum?} — nested one level deep is the intended use (gate summaries). */
+	schema?: Record<string, unknown>;
 }
 
 /** Result of one executed check. */
@@ -99,6 +108,10 @@ export interface VerifyGateCheckResult {
 	outputTail: string;
 	skipped?: boolean;
 	error?: string;
+	/** W10-9: parsed JSON stdout of a typed gate (present only when the JSON
+	 *  was valid — invalid stdout fails and carries the reason in `error`). */
+	structuredOutput?: unknown;
+	output?: "json";
 }
 
 /** Overall gate verdict. */
@@ -265,6 +278,52 @@ export function evaluateVerifyGateResults(checks: VerifyGateCheckResult[]): Veri
 	};
 }
 
+/**
+ * W10-9: minimal JSON-schema subset validator — {type, required, properties,
+ * items, enum}, nested arbitrarily. Returns undefined on success or the first
+ * mismatch reason. Deliberately tiny (no new dependency); unsupported schema
+ * constructs are IGNORED (permissive), never crash.
+ */
+export function validateJsonLite(value: unknown, schema: unknown, at = "$"): string | undefined {
+	if (!schema || typeof schema !== "object" || Array.isArray(schema)) return undefined;
+	const s = schema as Record<string, unknown>;
+	if (typeof s.type === "string") {
+		const t = s.type;
+		const ok =
+			(t === "object" && !!value && typeof value === "object" && !Array.isArray(value)) ||
+			(t === "array" && Array.isArray(value)) ||
+			(t === "string" && typeof value === "string") ||
+			(t === "number" && typeof value === "number" && Number.isFinite(value)) ||
+			(t === "boolean" && typeof value === "boolean") ||
+			(t === "null" && value === null);
+		if (!ok) return `${at}: expected type ${t}`;
+	}
+	if (Array.isArray(s.enum) && !s.enum.some((e) => JSON.stringify(e) === JSON.stringify(value))) {
+		return `${at}: not in enum`;
+	}
+	if (value && typeof value === "object" && !Array.isArray(value)) {
+		const rec = value as Record<string, unknown>;
+		for (const key of Array.isArray(s.required) ? (s.required as string[]) : []) {
+			if (!(key in rec)) return `${at}: missing required "${key}"`;
+		}
+		if (s.properties && typeof s.properties === "object") {
+			for (const [k, sub] of Object.entries(s.properties as Record<string, unknown>)) {
+				if (k in rec) {
+					const err = validateJsonLite(rec[k], sub, `${at}.${k}`);
+					if (err) return err;
+				}
+			}
+		}
+	}
+	if (Array.isArray(value) && s.items !== undefined) {
+		for (let i = 0; i < value.length; i++) {
+			const err = validateJsonLite(value[i], s.items, `${at}[${i}]`);
+			if (err) return err;
+		}
+	}
+	return undefined;
+}
+
 /** Run the gate checks sequentially through the injected executor.
  *  Mirrors runPhaseGates semantics: stop on first critical failure; abort
  *  signal between checks marks the rest skipped. NEVER rejects. */
@@ -298,14 +357,33 @@ export async function runVerifyGate(
 			// blowup must degrade the CHECK, not the host.
 			execResult = { exitCode: null, output: "", error: error instanceof Error ? error.message : String(error) };
 		}
+		// W10-9: typed gate — validate stdout JSON against the schema; an
+		// exit-0 command with invalid/mismatching JSON is a FAIL (the consumer
+		// reads structuredOutput; silence must never count as data).
+		let typedError: string | undefined;
+		let structured: unknown;
+		if (check.output === "json") {
+			try {
+				structured = JSON.parse(execResult.output ?? "");
+			} catch {
+				typedError = "typed gate: stdout is not valid JSON";
+			}
+			if (structured !== undefined && check.schema) {
+				const mismatch = validateJsonLite(structured, check.schema);
+				if (mismatch) typedError = `typed gate: schema mismatch — ${mismatch}`;
+			}
+		}
 		results.push({
 			name: check.name,
 			command: check.command,
 			exitCode: execResult.exitCode,
-			passed: execResult.exitCode === 0,
+			passed: execResult.exitCode === 0 && !typedError,
 			durationMs: Date.now() - start,
 			outputTail: tailOutput(execResult.output ?? ""),
 			...(execResult.error ? { error: execResult.error } : {}),
+			...(typedError ? { error: typedError } : {}),
+			...(check.output === "json" ? { output: "json" } : {}),
+			...(structured !== undefined && !typedError ? { structuredOutput: structured } : {}),
 		});
 		// Stop on critical failure (default critical) — mirrors runPhaseGates.
 		if (execResult.exitCode !== 0 && check.critical !== false) break;
