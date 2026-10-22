@@ -6,6 +6,22 @@
 
 - **fix(gate): RT24-F1 root-gate config/autonomy read over-block** — `rootGateBlockReason` counted the `args` subcommand carrier as a config patch key, so worker-origin `config {args:"show"}` READS were rejected as "writes user-scope config" (live-caught in the v0.11.24 real-test battery; docblock promised reads open). `args` added to the carrier-key sets for `config` and `autonomy`; unknown junk keys stay write-classified (fail-closed). Pinned: reads with carrier keys open, writes hidden behind the same key still gated (`unset`/patch keys), user config byte-untouched. Live-verified end-to-end (fresh `pi -p`, worker env): read allowed + dumps config; `unset` write gate-blocked verbatim "root-session required".
 
+## [0.11.36] — Wave 9: exit-revoke wiring + bwrap OS boundary (Linux opt-in) + google provider route
+
+### Security
+- **Exit-revoke (v0.11.36)**: the `runChildPi` wrapper now revokes the task's inference-broker token in a `finally` — normal exit, crash, abort-before-spawn, even thrown errors. No live token outlives its run; retries re-register a fresh token (register-replace semantics make the ordering safe). Anonymous (agentId-less) spawns keep per-spawn unique keys that die at broker stop. Pinned by an aborted-before-spawn wiring test: registration happens BEFORE the B5 abort check, so the orphan would be observable in `inferenceBrokerStats()` without the revoke.
+- **OS boundary — `PI_CREW_SANDBOX=bwrap` (Linux opt-in)**: headless child-pi workers run inside a bubblewrap namespace. The worker sees ONLY the project cwd (rw), the scoped inference agent dir, explicitly handed-in temp/scratch paths (ro), the inter-pi broker socket (rw — connect needs write), toolchain mounts (node bin dir, pi bundle dir + node_modules ancestors, --extension/--skill resources up to their package root — ALL read-only), and the OS runtime (/usr,/etc ro + tmpfs /tmp,/run + HOME=/tmp). `~/.pi` (auth.json!), `~/.ssh` and every other host path are simply NOT MOUNTED — a forgotten path fails closed as ENOENT inside, never silently reaching the host. Fail-closed on EVERY misconfiguration: unsupported value, non-Linux, missing bwrap binary, net=off+broker (a new netns has no loopback route — broker-token workers would be keyless AND netless). TUI surface panes and the rpc transport are SKIPPED while the sandbox is on — a sandboxed request can never land in an unsandboxed pane. `PI_CREW_SANDBOX_NET=off` additionally unshares the network stack entirely (full egress isolation); the default `share` profile honestly leaves egress open (host-file boundary only).
+- **google provider route**: the broker now routes `/google/*` to the native google-generative-ai upstream (default `https://generativelanguage.googleapis.com/v1beta`, per-provider override `PI_CREW_INFERENCE_UPSTREAM_GOOGLE`), substituting the real credential into `x-goog-api-key` (never Bearer/x-api-key on that wire). Credential precedence: GOOGLE_API_KEY > GEMINI_API_KEY > auth.json:google. Usage counting understands `usageMetadata` (promptTokenCount → input; candidatesTokenCount + thoughtsTokenCount → output, cumulative per stream). Built-in google models (gemini-*) ride the override-only scoped models.json with zero metadata mirroring.
+
+### Fixes
+- Lazy budget 533 → 534 (sandbox.ts is a static import — the spawn path is sync).
+
+### Tests
+- Sandbox battery 9 (NEW): config fail-closed ×3, availability fail-closed, argv pure ×3 (mount ORDER: tmpfs /tmp precedes binds under /tmp; toolchain ro), REAL bwrap smoke ×2 (host ~/.pi invisible while the file demonstrably exists outside + cwd writable; net=off → even loopback unreachable).
+- Broker battery 18 → 21: google substitution/routing/usage/precedence + revoke helper semantics. Revoke WIRING test (NEW): no orphan token after an aborted runChildPi.
+- 4/4 mutation checks: wrapper-revoke removed → wiring red; bwrap-missing fail-open → red; net=off+broker guard dropped → red; google usage names dropped → red.
+- LIVE production-path e2e: a REAL `pi` completing inside bwrap through runChildPi + broker (upstream saw the substituted key; worker env credential-less; stats empty after the run).
+
 ## [0.11.34] — Broker credentials completion: auth.json parents + OpenAI upstream (multi-provider routing)
 
 ### Security / Features

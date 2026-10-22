@@ -36,11 +36,13 @@ import {
 	INFERENCE_BROKER_ENABLE_ENV,
 	INFERENCE_TOKEN_ENV,
 	inferenceBrokerStats,
+	inferenceWorkerKeyForAgent,
 	maybeStartInferenceBroker,
 	PI_AGENT_DIR_ENV,
 	registerInferenceWorker,
 	revokeAllInferenceWorkers,
 	revokeInferenceWorker,
+	revokeInferenceWorkerForAgent,
 	stopInferenceBroker,
 } from "../../../../src/runtime/child-pi/inference-broker.ts";
 import { getPiSpawnCommand } from "../../../../src/runtime/pi-spawn.ts";
@@ -684,5 +686,172 @@ test("(g2) LIVE: real `pi -p` on an openai-completions model through the broker;
 			else process.env[key] = value;
 		}
 		await openaiUp.close();
+	}
+});
+
+// ── (j) v0.11.36 google provider route (native google-generative-ai wire) ──
+
+/** Google native SSE shape: cumulative usageMetadata on stream chunks. */
+function googleSse(text: string, usage: { prompt: number; candidates: number; thoughts: number }): string {
+	return [
+		`data: {"candidates":[{"content":{"parts":[{"text":${JSON.stringify(text)}}],"role":"model"}}],"usageMetadata":{"promptTokenCount":${usage.prompt},"candidatesTokenCount":1,"thoughtsTokenCount":1}}`,
+		"",
+		`data: {"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":${usage.prompt},"candidatesTokenCount":${usage.candidates},"thoughtsTokenCount":${usage.thoughts},"totalTokenCount":${usage.prompt + usage.candidates + usage.thoughts}}}`,
+		"",
+		"",
+	].join("\n");
+}
+
+async function googleBrokerFetch(baseUrl: string, token: string, path: string): Promise<Response> {
+	// The pi google-generative-ai client carries apiKey as x-goog-api-key.
+	return fetch(`${baseUrl}${path}`, {
+		method: "POST",
+		headers: { "content-type": "application/json", accept: "text/event-stream", "x-goog-api-key": token },
+		body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "hi" }] }] }),
+	});
+}
+
+test("(j1) google route: x-goog-api-key substitution, /v1beta path forwarding, usageMetadata counting, models.json suffix", async () => {
+	const upstream = await startMockUpstream({ sse: googleSse("GOOG-OK", { prompt: 40, candidates: 9, thoughts: 3 }) });
+	const saved: Record<string, string | undefined> = {};
+	for (const key of [
+		INFERENCE_BROKER_ENABLE_ENV,
+		"ANTHROPIC_API_KEY",
+		"OPENAI_API_KEY",
+		"GOOGLE_API_KEY",
+		"GEMINI_API_KEY",
+		"PI_CREW_INFERENCE_UPSTREAM",
+		"PI_CREW_INFERENCE_UPSTREAM_GOOGLE",
+	])
+		saved[key] = process.env[key];
+	process.env[INFERENCE_BROKER_ENABLE_ENV] = "1";
+	process.env.ANTHROPIC_API_KEY = REAL_KEY; // second provider — proves routing isolation
+	process.env.GOOGLE_API_KEY = "goog-real-key-123";
+	process.env.PI_CREW_INFERENCE_UPSTREAM_GOOGLE = `http://127.0.0.1:${upstream.port}`;
+	delete process.env.PI_CREW_INFERENCE_UPSTREAM;
+	try {
+		__resetInferenceBrokerForTests();
+		await maybeStartInferenceBroker();
+		const snap = getInferenceBrokerSnapshot();
+		assert.ok(snap.providers.includes("google"), "google route resolves from GOOGLE_API_KEY");
+		assert.ok(snap.scopedAgentDir, "scoped agent dir exists");
+		const models = JSON.parse(fs.readFileSync(path.join(snap.scopedAgentDir!, "models.json"), "utf8"));
+		assert.equal(
+			models.providers.google.baseUrl,
+			`http://127.0.0.1:${snap.port}/google`,
+			"google baseUrl is the BARE /google prefix (the /v1beta lives in the upstream default, not duplicated here)",
+		);
+		const token = registerInferenceWorker("google-worker");
+		const res = await googleBrokerFetch(snap.baseUrl, token, "/google/models/gemini-2.5-pro:streamGenerateContent?alt=sse");
+		assert.equal(res.status, 200);
+		await res.text();
+		const cap = upstream.captures[0];
+		assert.equal(
+			cap.url,
+			"/models/gemini-2.5-pro:streamGenerateContent?alt=sse",
+			"the /google prefix is stripped; the rest (incl. query) forwards verbatim",
+		);
+		assert.equal(cap.headers["x-goog-api-key"], "goog-real-key-123", "REAL google key substitutes upstream");
+		assert.equal(cap.headers.authorization, undefined, "no Bearer on the google wire");
+		assert.equal(cap.headers["x-api-key"], undefined, "no anthropic x-api-key on the google wire");
+		assert.notEqual(cap.headers["x-goog-api-key"], token, "worker token never reaches the upstream");
+		const stats = inferenceBrokerStats().find((s) => s.workerKey === "google-worker");
+		assert.equal(stats?.inputTokens, 40, "usageMetadata.promptTokenCount counted as input");
+		assert.equal(stats?.outputTokens, 12, "candidatesTokenCount(9) + thoughtsTokenCount(3) counted as output");
+	} finally {
+		stopInferenceBroker();
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		await upstream.close();
+	}
+});
+
+test("(j2) google credential precedence: GOOGLE_API_KEY > GEMINI_API_KEY > auth.json:google", async () => {
+	const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ib-authjson-"));
+	fs.writeFileSync(path.join(agentDir, "auth.json"), JSON.stringify({ google: { type: "api_key", key: "goog-authjson-loser" } }));
+	const upstream = await startMockUpstream();
+	const saved: Record<string, string | undefined> = {};
+	for (const key of [
+		INFERENCE_BROKER_ENABLE_ENV,
+		"GOOGLE_API_KEY",
+		"GEMINI_API_KEY",
+		"PI_CREW_INFERENCE_UPSTREAM",
+		"PI_CREW_INFERENCE_UPSTREAM_GOOGLE",
+		"PI_CODING_AGENT_DIR",
+	])
+		saved[key] = process.env[key];
+	delete process.env.PI_CREW_INFERENCE_UPSTREAM;
+	process.env[INFERENCE_BROKER_ENABLE_ENV] = "1";
+	process.env.PI_CREW_INFERENCE_UPSTREAM_GOOGLE = `http://127.0.0.1:${upstream.port}`;
+	process.env.PI_CODING_AGENT_DIR = agentDir;
+	try {
+		// auth.json alone resolves
+		__resetInferenceBrokerForTests();
+		delete process.env.GOOGLE_API_KEY;
+		delete process.env.GEMINI_API_KEY;
+		await maybeStartInferenceBroker();
+		assert.ok(getInferenceBrokerSnapshot().providers.includes("google"), "auth.json:google resolves");
+		stopInferenceBroker();
+		// GEMINI_API_KEY beats auth.json
+		__resetInferenceBrokerForTests();
+		process.env.GEMINI_API_KEY = "goog-gemini-env";
+		await maybeStartInferenceBroker();
+		let token = registerInferenceWorker("g-prec-1");
+		let res = await googleBrokerFetch(getInferenceBrokerSnapshot().baseUrl, token, "/google/models/x:streamGenerateContent");
+		await res.text();
+		assert.equal(upstream.captures.at(-1)?.headers["x-goog-api-key"], "goog-gemini-env", "GEMINI_API_KEY beats auth.json");
+		stopInferenceBroker();
+		// GOOGLE_API_KEY beats both
+		__resetInferenceBrokerForTests();
+		process.env.GOOGLE_API_KEY = "goog-primary-env";
+		await maybeStartInferenceBroker();
+		token = registerInferenceWorker("g-prec-2");
+		res = await googleBrokerFetch(getInferenceBrokerSnapshot().baseUrl, token, "/google/models/x:streamGenerateContent");
+		await res.text();
+		assert.equal(upstream.captures.at(-1)?.headers["x-goog-api-key"], "goog-primary-env", "GOOGLE_API_KEY wins");
+	} finally {
+		stopInferenceBroker();
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		fs.rmSync(agentDir, { recursive: true, force: true });
+		await upstream.close();
+	}
+});
+
+// ── (k) v0.11.36 exit-revoke helpers ────────────────────────────────────
+
+test("(k1) inferenceWorkerKeyForAgent + revokeInferenceWorkerForAgent: token dies on the next request; broker-off and agentId-less are no-ops", async () => {
+	assert.equal(inferenceWorkerKeyForAgent("t-42"), "inference:t-42", "deterministic key shared with the spawn side");
+	assert.equal(revokeInferenceWorkerForAgent(undefined), false, "agentId-less spawn: no-op (unique key, dies at broker stop)");
+	assert.equal(revokeInferenceWorkerForAgent("t-42"), false, "broker off: no-op, never throws");
+	const upstream = await startMockUpstream();
+	const saved: Record<string, string | undefined> = {};
+	for (const key of [INFERENCE_BROKER_ENABLE_ENV, "ANTHROPIC_API_KEY", "PI_CREW_INFERENCE_UPSTREAM"]) saved[key] = process.env[key];
+	process.env[INFERENCE_BROKER_ENABLE_ENV] = "1";
+	process.env.ANTHROPIC_API_KEY = REAL_KEY;
+	process.env.PI_CREW_INFERENCE_UPSTREAM = `http://127.0.0.1:${upstream.port}`;
+	try {
+		__resetInferenceBrokerForTests();
+		await maybeStartInferenceBroker();
+		const snap = getInferenceBrokerSnapshot();
+		const token = registerInferenceWorker(inferenceWorkerKeyForAgent("t-42"));
+		let res = await brokerFetch(snap.baseUrl, token, { model: "x", messages: [] });
+		assert.equal(res.status, 200);
+		await res.text();
+		assert.equal(revokeInferenceWorkerForAgent("t-42"), true, "active worker revoked");
+		res = await brokerFetch(snap.baseUrl, token, { model: "x", messages: [] });
+		assert.equal(res.status, 401, "revoked token dies on the NEXT request");
+		assert.equal(revokeInferenceWorkerForAgent("t-42"), false, "second revoke of the same key: already gone");
+	} finally {
+		stopInferenceBroker();
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		await upstream.close();
 	}
 });

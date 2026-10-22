@@ -36,8 +36,9 @@ import { ChildPiSteeringController } from "./child-pi-steering.ts";
 import { ChildPiLineObserver, isFinalAssistantEvent } from "./child-pi-streams.ts";
 // Phase 2.3: the six timer constructs moved to child-pi-timers.ts (pure motion).
 import { createChildPiTimers } from "./child-pi-timers.ts";
-import { maybeStartInferenceBroker } from "./inference-broker.ts";
+import { getInferenceBrokerSnapshot, maybeStartInferenceBroker, revokeInferenceWorkerForAgent } from "./inference-broker.ts";
 import { runMockChildPi } from "./mock-fixtures.ts";
+import { applySandboxToSpawnSpec, assertSandboxAvailable, resolveSandboxConfig, type SandboxConfig } from "./sandbox.ts";
 // W2 (session-file recovery): deterministic worker session flags + crash-path
 // tail-replay of the session JSONL (see session-recovery.ts header).
 import {
@@ -703,6 +704,21 @@ async function trySurfaceBranch(
 export const __test__trySurfaceBranch = trySurfaceBranch;
 
 export async function runChildPi(input: ChildPiRunInput): Promise<ChildPiRunResult> {
+	// v0.11.36 exit-revoke WRAPPER: whatever the inner run does — normal exit,
+	// crash, B5 pre-spawn abort, surface/rpc branch, even a thrown error — the
+	// task's inference token dies with the run. prepareSpawnContext registers
+	// `inference:<agentId>` BEFORE its B5 abort check, so an aborted run that
+	// never spawned still leaves a token behind unless revoked HERE. Retries
+	// are safe: they call runChildPi again and re-register a FRESH token
+	// (register-replace semantics) after this revoke already ran.
+	try {
+		return await runChildPiInner(input);
+	} finally {
+		revokeInferenceWorkerForAgent(input.agentId);
+	}
+}
+
+async function runChildPiInner(input: ChildPiRunInput): Promise<ChildPiRunResult> {
 	// Phase 1 (live-session parity): prepend parent context when inheritContext is true.
 	// This mirrors the effectivePrompt logic in live-session-runtime.ts so that
 	// child-process workers receive the same inherited-context treatment.
@@ -781,6 +797,14 @@ export async function runChildPi(input: ChildPiRunInput): Promise<ChildPiRunResu
 	// v0.11.31: start the inference broker (flag-gated, fail-closed) BEFORE the
 	// sync spawn-prep path — http listen needs an event-loop turn.
 	await maybeStartInferenceBroker();
+	// v0.11.36 OS boundary (bwrap, Linux opt-in): resolve + VALIDATE + probe
+	// BEFORE any spawn. Every misconfiguration throws here (fail-closed — a
+	// sandbox that cannot start must never degrade to an unsandboxed spawn).
+	const sandbox: SandboxConfig = resolveSandboxConfig(process.env, {
+		platform: process.platform,
+		brokerActive: getInferenceBrokerSnapshot().active,
+	});
+	assertSandboxAvailable(sandbox);
 	const spawnPrep = prepareSpawnContext(brokerSpawn ? { ...versionedInput, brokerSpawn } : versionedInput, effectiveTask, depthEnv);
 	if (spawnPrep.kind === "aborted") return spawnPrep.result;
 	const { spawnSpec, mergedEnv, tempDir, builtEnv, builtArgs } = spawnPrep.ctx;
@@ -805,7 +829,10 @@ export async function runChildPi(input: ChildPiRunInput): Promise<ChildPiRunResu
 	// MuxSurface A1 (spec §13.1): attempt booting the worker in a mux pane BEFORE
 	// spawning a stdio pipe. Returns a finished result in surface mode (pane exit
 	// awaited) or null → fall through to the classic headless spawn below.
-	const surfaceResult = await trySurfaceBranch(input, depthEnv, builtArgs, mergedEnv, builtEnv, tempDir);
+	// v0.11.36: TUI panes are NOT sandboxed (pass 1) — when the sandbox is on
+	// the branch is SKIPPED so a sandboxed request can never land in an
+	// unsandboxed pane (fail-closed branch selection).
+	const surfaceResult = sandbox.enabled ? null : await trySurfaceBranch(input, depthEnv, builtArgs, mergedEnv, builtEnv, tempDir);
 	if (surfaceResult) return surfaceResult;
 	// U14 (child-pi protocol v2 — upgrade-spec 2026-10-09): `--mode rpc`
 	// transport, opt-in via PI_CREW_CHILD_PI_MODE=rpc (json remains the
@@ -814,7 +841,7 @@ export async function runChildPi(input: ChildPiRunInput): Promise<ChildPiRunResu
 	// json branch below stays the fail-safe path. Surface TUI panes are
 	// unaffected — trySurfaceBranch consumed builtArgs above and never
 	// reaches this point in surface mode.
-	if (resolveChildPiRpcMode()) {
+	if (!sandbox.enabled && resolveChildPiRpcMode()) {
 		const rpcResult = await tryChildPiRpcRun({ input, effectiveTask, ctx: spawnPrep.ctx, workerSession, sessionRecoveryEnabled });
 		if (rpcResult) return rpcResult;
 	}
@@ -824,7 +851,38 @@ export async function runChildPi(input: ChildPiRunInput): Promise<ChildPiRunResu
 			// owned by buildFinalChildPiSpawnOptions (see child-pi-spawn.ts, BLOCKER 2 / S5).
 			// R6-8: modelChain threads the candidate chain for provider-key scoping.
 			const spawnOptions = buildFinalChildPiSpawnOptions(input.cwd, mergedEnv, builtEnv, input.model, input.modelChain);
-			const child = spawn(spawnSpec.command, spawnSpec.args, spawnOptions);
+			// v0.11.36 OS boundary: when the sandbox is on, the headless spawn is
+			// wrapped in bwrap. Mounts: cwd RW (the worker edits the project), the
+			// scoped inference agent dir RW (pi writes session state under it), and
+			// the parent-side paths this run handed the worker via env/argv
+			// (task.md tempDir, scratchpad snapshot/restore, steering file) READ-ONLY
+			// plus the inter-pi broker socket RW (connect() needs write perm). A
+			// forgotten path fails CLOSED inside the namespace (ENOENT) — it never
+			// silently reaches the host.
+			let spawnCommand = spawnSpec.command;
+			let spawnArgs = spawnSpec.args;
+			if (sandbox.enabled) {
+				const inferenceSnap = getInferenceBrokerSnapshot();
+				const wrapped = applySandboxToSpawnSpec(
+					{ command: spawnSpec.command, args: spawnSpec.args },
+					{
+						cwd: input.cwd,
+						net: sandbox.net,
+						agentDir: inferenceSnap.active ? inferenceSnap.scopedAgentDir : undefined,
+						roBindPaths: [
+							tempDir,
+							builtEnv.PI_CREW_SCRATCHPAD_SNAPSHOT,
+							builtEnv.PI_CREW_SCRATCHPAD_RESTORE,
+							builtEnv.PI_CREW_STEERING_FILE,
+						].filter((p): p is string => typeof p === "string" && p.length > 0),
+						rwBindPaths: [input.brokerSpawn?.socketPath].filter((p): p is string => typeof p === "string" && p.length > 0),
+					},
+				);
+				spawnCommand = wrapped.command;
+				spawnArgs = wrapped.args;
+				spawnOptions.env = { ...spawnOptions.env, ...wrapped.envOverrides };
+			}
+			const child = spawn(spawnCommand, spawnArgs, spawnOptions);
 			if (child.pid) {
 				registerActiveChild(child.pid, child);
 				input.onSpawn?.(child.pid);

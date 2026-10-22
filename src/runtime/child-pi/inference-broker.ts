@@ -106,11 +106,15 @@ export interface InferenceBrokerSnapshot {
 	providers: string[];
 }
 
-/** One provider's upstream route: base URL + substituted auth header. */
+/** One provider's upstream route: base URL + substituted auth header. The
+ * upstream DEFAULT carries the provider's version path (openai …/v1, google
+ * …/v1beta) exactly like the built-in models' baseUrls do — the scoped
+ * models.json replaces the WHOLE baseUrl with a bare /<provider> prefix, so
+ * the version path must never be duplicated on the broker side. */
 interface ProviderRoute {
-	name: "anthropic" | "openai";
+	name: "anthropic" | "openai" | "google";
 	upstream: string;
-	auth: { header: "x-api-key" | "authorization"; value: string };
+	auth: { header: "x-api-key" | "authorization" | "x-goog-api-key"; value: string };
 }
 
 interface BrokerState {
@@ -186,6 +190,28 @@ function resolveProviderRoutes(env: NodeJS.ProcessEnv): { routes: ProviderRoute[
 		routes.push({ name: "openai", upstream: openaiUpstream, auth: { header: "authorization", value: `Bearer ${openaiStored.key}` } });
 	}
 
+	// v0.11.36 google (native google-generative-ai wire): the built-in google
+	// provider speaks `x-goog-api-key` and paths under /v1beta (verified against
+	// the pi catalog: ids like "gemini-2.5-pro", baseUrl ...
+	// /v1beta). Credential precedence mirrors the others: env FIRST
+	// (GOOGLE_API_KEY, then GEMINI_API_KEY — both conventional), then auth.json:google.
+	const googleUpstream = getCrewEnv("PI_CREW_INFERENCE_UPSTREAM_GOOGLE", env) || genericUpstream || "https://generativelanguage.googleapis.com/v1beta";
+	const googleApiKey = env.GOOGLE_API_KEY;
+	const geminiApiKey = env.GEMINI_API_KEY;
+	const googleStored = authJson.google;
+	consulted.push("env GOOGLE_API_KEY", "env GEMINI_API_KEY", "auth.json:google");
+	const googleCredential =
+		googleApiKey && googleApiKey.length > 0
+			? googleApiKey
+			: geminiApiKey && geminiApiKey.length > 0
+				? geminiApiKey
+				: googleStored?.type === "api_key" && typeof googleStored.key === "string" && googleStored.key.length > 0
+					? googleStored.key
+					: undefined;
+	if (googleCredential) {
+		routes.push({ name: "google", upstream: googleUpstream, auth: { header: "x-goog-api-key", value: googleCredential } });
+	}
+
 	return { routes, trace: consulted.join(", ") };
 }
 
@@ -212,7 +238,7 @@ export async function maybeStartInferenceBroker(env: NodeJS.ProcessEnv = process
 	const { routes, trace } = resolveProviderRoutes(env);
 	if (routes.length === 0) {
 		throw new Error(
-			`${INFERENCE_BROKER_ENABLE_ENV}=1 but no provider credential resolved for the inference broker (consulted: ${trace}) — fail-closed: workers would otherwise receive no usable credential, or worse, fall back to real provider keys. Provide ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY in the parent env, an api_key entry for anthropic/openai in the parent's auth.json, or unset ${INFERENCE_BROKER_ENABLE_ENV}.`,
+			`${INFERENCE_BROKER_ENABLE_ENV}=1 but no provider credential resolved for the inference broker (consulted: ${trace}) — fail-closed: workers would otherwise receive no usable credential, or worse, fall back to real provider keys. Provide ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN / OPENAI_API_KEY / GOOGLE_API_KEY / GEMINI_API_KEY in the parent env, an api_key entry for anthropic/openai/google in the parent's auth.json, or unset ${INFERENCE_BROKER_ENABLE_ENV}.`,
 		);
 	}
 	broker = await createBrokerServer(routes);
@@ -312,10 +338,12 @@ function buildScopedAgentDir(port: number, routes: ProviderRoute[]): string {
 	return dir;
 }
 
-/** Extract the caller token from x-api-key or Authorization: Bearer. */
+/** Extract the caller token from x-api-key, x-goog-api-key, or Authorization: Bearer. */
 function extractToken(req: http.IncomingMessage): string | undefined {
 	const apiKey = req.headers["x-api-key"];
 	if (typeof apiKey === "string" && apiKey.length > 0) return apiKey;
+	const googKey = req.headers["x-goog-api-key"];
+	if (typeof googKey === "string" && googKey.length > 0) return googKey;
 	const auth = req.headers.authorization;
 	if (typeof auth === "string" && auth.startsWith("Bearer ")) return auth.slice("Bearer ".length);
 	return undefined;
@@ -347,7 +375,7 @@ async function handleRequest(
 			}
 		}
 		if (!route) {
-			deny(res, 404, "unknown provider route (expected /anthropic/... or /openai/...)");
+			deny(res, 404, "unknown provider route (expected /anthropic/..., /openai/..., or /google/...)");
 			return;
 		}
 		// (1) Auth — fail-closed, generic errors (never echo tokens).
@@ -458,9 +486,23 @@ class UsageCounter {
 				// SSE message_delta: evt.usage.output_tokens is CUMULATIVE (take max).
 				// Non-stream JSON body: top-level evt.usage, both absolute.
 				const usage = evt?.message?.usage ?? evt?.usage;
+				// Google native (google-generative-ai): usageMetadata with
+				// promptTokenCount / candidatesTokenCount (+ thoughtsTokenCount) —
+				// CUMULATIVE per stream, so max() below lands on the final totals.
+				const meta = evt?.usageMetadata;
+				if (meta && typeof meta === "object") {
+					const prompt = typeof meta.promptTokenCount === "number" ? meta.promptTokenCount : 0;
+					const candidates = typeof meta.candidatesTokenCount === "number" ? meta.candidatesTokenCount : 0;
+					const thoughts = typeof meta.thoughtsTokenCount === "number" ? meta.thoughtsTokenCount : 0;
+					this.input = Math.max(this.input, prompt);
+					this.output = Math.max(this.output, candidates + thoughts);
+				}
 				if (!usage || typeof usage !== "object") continue;
 				// Anthropic: input_tokens / output_tokens. OpenAI chat-completions:
 				// prompt_tokens / completion_tokens (final usage chunk, absolute).
+				// Google native (google-generative-ai): usageMetadata with
+				// promptTokenCount / candidatesTokenCount (+ thoughtsTokenCount) —
+				// CUMULATIVE per stream, so max() below lands on the final totals.
 				const inTok =
 					typeof usage.input_tokens === "number"
 						? usage.input_tokens
@@ -501,6 +543,28 @@ export function registerInferenceWorker(workerKey: string): string {
 	broker.workers.set(token, entry);
 	broker.byKey.set(workerKey, entry);
 	return token;
+}
+
+/** Deterministic worker key for a task-owned worker — SHARED by the spawn side (prepareSpawnContext) and the exit-revoke wrapper (runChildPi finally). */
+export function inferenceWorkerKeyForAgent(agentId: string): string {
+	return `inference:${agentId}`;
+}
+
+/**
+ * Non-throwing exit hook (v0.11.36): revoke a task worker's inference token
+ * when its runChildPi call settles — normal exit, crash, or abort. Anonymous
+ * (agentId-less) spawns use per-spawn unique keys that only the spawn path
+ * knows; their tokens die at register-replacement or broker stop. Broker off
+ * → no-op. NEVER throws (must not mask a worker result).
+ */
+export function revokeInferenceWorkerForAgent(agentId: string | undefined): boolean {
+	if (!agentId) return false;
+	try {
+		if (!getInferenceBrokerSnapshot().active) return false;
+		return revokeInferenceWorker(inferenceWorkerKeyForAgent(agentId));
+	} catch {
+		return false;
+	}
 }
 
 /** Kill-switch for one worker: its token dies on the NEXT request. */

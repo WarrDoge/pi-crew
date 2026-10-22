@@ -520,6 +520,18 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		name: "PI_CREW_INFERENCE_UPSTREAM_OPENAI",
 		doc: "v0.11.34 openai-only broker upstream override (beats PI_CREW_INFERENCE_UPSTREAM). TESTS ONLY — local mock; production must never set it",
 	},
+	PI_CREW_INFERENCE_UPSTREAM_GOOGLE: {
+		name: "PI_CREW_INFERENCE_UPSTREAM_GOOGLE",
+		doc: "v0.11.36 google-only broker upstream override (beats PI_CREW_INFERENCE_UPSTREAM; default https://generativelanguage.googleapis.com, native google-generative-ai wire, x-goog-api-key auth). TESTS ONLY — local mock; production must never set it",
+	},
+	PI_CREW_SANDBOX: {
+		name: "PI_CREW_SANDBOX",
+		doc: "v0.11.36 OS-boundary sandbox, Linux opt-in: 'bwrap' wraps every headless child-pi worker in bubblewrap — the worker sees ONLY the project cwd (rw), the scoped inference agent dir, explicitly handed-in temp/scratch paths, and read-only OS runtime; ~/.pi (auth.json!), ~/.ssh and every other host path are NOT MOUNTED (fail-closed: forgotten paths yield ENOENT inside, never host access). Fail-closed knob: unsupported value / non-Linux / missing bwrap binary / net=off+broker all THROW before any spawn (never silently unsandboxed). Pass-1 boundary: TUI surface panes and the rpc transport are SKIPPED while on (fail-closed branch selection); PI_CREW_SANDBOX_NET=share keeps host networking — egress is NOT isolated unless net=off. Sandbox+broker-off = workers have no credentials at all (by isolation) — pair with PI_CREW_INFERENCE_BROKER=1 for sandboxed inference (sandbox.ts)",
+	},
+	PI_CREW_SANDBOX_NET: {
+		name: "PI_CREW_SANDBOX_NET",
+		doc: "v0.11.36 sandbox network profile: 'share' (default — host networking, loopback inference broker reachable, egress NOT isolated) or 'off' (unshare the net stack entirely: no egress, no loopback — REJECTED while the inference broker is active because broker-token workers would be keyless AND netless) (sandbox.ts)",
+	},
 	PI_CREW_CLASSIFIER_ENABLED: {
 		name: "PI_CREW_CLASSIFIER_ENABLED",
 		parser: "boolean",

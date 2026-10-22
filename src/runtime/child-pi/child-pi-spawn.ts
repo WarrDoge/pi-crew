@@ -31,6 +31,7 @@ import type { ChildPiRunInput, ChildPiRunResult } from "./child-pi.ts";
 import {
 	getInferenceBrokerSnapshot,
 	INFERENCE_TOKEN_ENV,
+	inferenceWorkerKeyForAgent,
 	PI_AGENT_DIR_ENV,
 	registerInferenceWorker,
 	requireInferenceBrokerIfEnabled,
@@ -344,7 +345,12 @@ export function prepareSpawnContext(
 	const inferenceSnapshot = requireInferenceBrokerIfEnabled();
 	let inferenceWorkerKey: string | undefined;
 	if (inferenceSnapshot.active) {
-		inferenceWorkerKey = input.agentId ? `inference:${input.agentId}` : `inference:spawn:${process.pid}:${Date.now().toString(36)}`;
+		// v0.11.36: the agentId derivation is SHARED with the exit-revoke wrapper
+		// (runChildPi finally) via inferenceWorkerKeyForAgent — both sides must
+		// compute the SAME key or revoke-on-exit silently misses.
+		inferenceWorkerKey = input.agentId
+			? inferenceWorkerKeyForAgent(input.agentId)
+			: `inference:spawn:${process.pid}:${Date.now().toString(36)}`;
 		built.env[INFERENCE_TOKEN_ENV] = registerInferenceWorker(inferenceWorkerKey);
 	}
 	// Pass steering file path to child for real-time steer injection

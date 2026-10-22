@@ -147,7 +147,10 @@ const BUDGETS = {
 		// no `.js`-suffixed relative import exists in the tree today). RE-MEASURE at
 		// wave land — this number is a moving target while parallel tasks land src
 		// modules (the wave's rebuild step is the natural point to reconcile it).
-		maxFiles: 533,
+		// v0.11.36: 533 → 534 — runtime/child-pi/sandbox.ts (bwrap argv builder,
+		// fail-closed config + binary probe; statically imported from child-pi.ts
+		// — the spawn path is sync and cannot lazy-import the wrapper).
+		maxFiles: 534,
 		forbid: ["test/", "scripts/", "docs/", "dist/"],
 	},
 };
