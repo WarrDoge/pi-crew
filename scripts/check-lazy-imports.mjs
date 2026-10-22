@@ -150,7 +150,9 @@ const BUDGETS = {
 		// v0.11.36: 533 → 534 — runtime/child-pi/sandbox.ts (bwrap argv builder,
 		// fail-closed config + binary probe; statically imported from child-pi.ts
 		// — the spawn path is sync and cannot lazy-import the wrapper).
-		maxFiles: 534,
+		// v0.11.38 W10-8: 534 → 535 — runtime/role-permission.ts (read-only lane
+		// classification for the same-tree guard; tiny pure module, static is right).
+		maxFiles: 535,
 		forbid: ["test/", "scripts/", "docs/", "dist/"],
 	},
 };

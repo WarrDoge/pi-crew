@@ -25,7 +25,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-
+import { runVerifierGatePreGate } from "../../../../src/runtime/verification/verify-gate.ts";
 import {
 	computeVerifyGateMemoKey,
 	lookupVerifyGateMemo,
@@ -33,7 +33,6 @@ import {
 	resetVerifyGateMemoStoreForTests,
 	resolveVerifyGateMemoEnabled,
 } from "../../../../src/runtime/verification/verify-gate-memo.ts";
-import { runVerifierGatePreGate } from "../../../../src/runtime/verification/verify-gate.ts";
 
 const CHECKS = [
 	{ name: "typecheck", command: "npm run --silent typecheck", critical: true },

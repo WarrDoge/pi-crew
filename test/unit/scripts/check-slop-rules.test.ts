@@ -62,7 +62,9 @@ describe("W10-4 check-slop-rules scanner", () => {
 		assert.equal(hit(line, ["src"], "no-double-cast").length, 0);
 		const str = 'const s = "b as unknown as C";\n';
 		assert.equal(hit(str, ["src"], "no-double-cast").length, 0);
-		const tmpl = "const t = `${b as any}`;\n";
+		// template literal with an interpolation (biome noTemplateCurlyInString
+		// fires on ${} spelled inside a plain string — build it via concat)
+		const tmpl = "const t = `" + "$" + "{b as any}`;\n";
 		assert.equal(hit(tmpl, ["src"], "no-double-cast").length, 0);
 	});
 

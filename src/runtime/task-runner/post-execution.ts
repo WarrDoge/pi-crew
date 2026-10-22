@@ -153,6 +153,9 @@ const DRIFT_BLOCK_MARKER = /DRIFT-BLOCK\b/i;
  */
 export async function detectReadLaneMutation(worktreePath: string): Promise<NonNullable<TeamTaskState["unexpectedMutation"]> | undefined> {
 	try {
+		// W10-8 one-shot git probe per read-only task — child_process is
+		// already in the platform; dynamic keeps it off the static import graph.
+		// LAZY: see above
 		const { execFile } = await import("node:child_process");
 		const out: string = await new Promise((resolve, reject) => {
 			execFile("git", ["status", "--porcelain"], { cwd: worktreePath, encoding: "utf-8", timeout: 10_000 }, (err, stdout) =>
