@@ -37,6 +37,13 @@ import {
 	requireInferenceBrokerIfEnabled,
 } from "./inference-broker.ts";
 
+// v0.11.38 W10-1 (pi-subagents lesson #10): pi platform env that selects
+// short-lived prompt-cache retention for single-run worker processes
+// (long-retention cache writes carry a higher per-write surcharge — wasted on
+// a worker that exits after one task). Surface panes and RPC warm sessions do
+// NOT set this (their sessions persist and benefit from long-lived cache).
+export const PI_CACHE_RETENTION_ENV = "PI_CACHE_RETENTION";
+
 // ── Env allowlist (base set always passed to children) ──────────────────
 // Provider API keys are injected dynamically via buildScopedAllowList() only
 // when a model is assigned to the task (per-task key scoping).
@@ -246,6 +253,7 @@ export function buildFinalChildPiSpawnOptions(
 	builtEnv: Record<string, string | undefined>,
 	model?: string,
 	modelChain?: (string | undefined)[],
+	workerCacheSplit?: boolean,
 ): SpawnOptions {
 	// (a) Canary: builtEnv must contain ONLY PI_CREW_*/PI_TEAMS_* keys.
 	assertOnlyControlEnvKeys(builtEnv);
@@ -266,6 +274,14 @@ export function buildFinalChildPiSpawnOptions(
 	const inferenceSnapshot = getInferenceBrokerSnapshot();
 	if (inferenceSnapshot.active && builtEnv[INFERENCE_TOKEN_ENV]) {
 		spawnOptions.env[PI_AGENT_DIR_ENV] = inferenceSnapshot.scopedAgentDir ?? "";
+	}
+	// (c″) v0.11.38 W10-1 (pi-subagents lesson #10): cache TTL split. Worker
+	// processes are single-run and short-lived — pi's default prompt-cache
+	// retention is long (higher per-write surcharge). Only the headless worker
+	// branch opts in; surface panes and RPC warm sessions keep the parent's
+	// default (they persist and benefit from long-lived cache).
+	if (workerCacheSplit) {
+		spawnOptions.env[PI_CACHE_RETENTION_ENV] = "short";
 	}
 	// (d) Return the composed SpawnOptions for spawn(...).
 	return spawnOptions;

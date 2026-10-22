@@ -850,7 +850,9 @@ async function runChildPiInner(input: ChildPiRunInput): Promise<ChildPiRunResult
 			// Compose the final SpawnOptions: canary + filter + spread are now
 			// owned by buildFinalChildPiSpawnOptions (see child-pi-spawn.ts, BLOCKER 2 / S5).
 			// R6-8: modelChain threads the candidate chain for provider-key scoping.
-			const spawnOptions = buildFinalChildPiSpawnOptions(input.cwd, mergedEnv, builtEnv, input.model, input.modelChain);
+			// v0.11.38 W10-1: workerCacheSplit — headless single-run workers opt into
+			// short prompt-cache retention (see PI_CACHE_RETENTION_ENV).
+			const spawnOptions = buildFinalChildPiSpawnOptions(input.cwd, mergedEnv, builtEnv, input.model, input.modelChain, true);
 			// v0.11.36 OS boundary: when the sandbox is on, the headless spawn is
 			// wrapped in bwrap. Mounts: cwd RW (the worker edits the project), the
 			// scoped inference agent dir RW (pi writes session state under it), and
