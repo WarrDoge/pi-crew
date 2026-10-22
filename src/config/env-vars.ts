@@ -557,6 +557,11 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		parser: "boolean",
 		doc: "U13-ADJ (upgrade 2026-10-13, PHASE 4) layer-3 determinism rerun, DEFAULT OFF: '1' reruns the most critical default check (usually test:critical) once after a GREEN gate; disagreement (flaky) or a rerun executor failure downgrades the verdict to INCONCLUSIVE (never FAILED, never a task failure) with a 'deterministic-check: flaky <name>' note. Flag off keeps the gate bit-for-bit pre-U13-ADJ (runtime/verification/verify-gate.ts resolveVerifyDeterminismEnabled)",
 	},
+	PI_CREW_VERIFY_GATE_MEMO: {
+		name: "PI_CREW_VERIFY_GATE_MEMO",
+		parser: "boolean",
+		doc: "W10-2 (v0.11.38) memoized green verify-gate, DEFAULT ON: a PASS verdict is recorded keyed by the workspace tree OID (git write-tree) + check list + node version; a re-gate on a bit-identical tree is served from the memo without re-running typecheck/test:critical. FAILED/INCONCLUSIVE never memoize; non-git cwd disables the memo for that tree (fail-open). '0' restores pre-W10-2 behavior (runtime/verification/verify-gate-memo.ts)",
+	},
 	PI_CREW_RPC_DIALOG_ANSWER: {
 		name: "PI_CREW_RPC_DIALOG_ANSWER",
 		doc: "W7 EXPERIMENTAL dialog auto-answer policy for RPC-mode extension_ui_request dialogs (select/confirm/input/editor): 'cancel' (default) answers {cancelled:true} — universal safe answer; 'block' leaves the server promise pending (debug). Auto-confirm deliberately NOT implemented (security); invalid → 'cancel' (rpc-worker.ts resolveDialogAnswerPolicy)",

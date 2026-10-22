@@ -75,6 +75,7 @@ import { executeCommand } from "./verification-gates.ts";
 // index.bundle value-import graph (goal.ts/goal-wrap.ts/goal-loop-runner.ts
 // import it), so this adds no bundle-graph file (check-lazy-imports budget).
 import { compareSnapshot, snapshotManifests } from "./verification-integrity.ts";
+import { lookupVerifyGateMemo, recordVerifyGateMemo, resolveVerifyGateMemoEnabled } from "./verify-gate-memo.ts";
 
 /** One deterministic check to run. Mirrors the phase-gate shape
  *  (verification-gates.ts) but kept local so the tool schema can reuse it. */
@@ -582,6 +583,43 @@ export async function runVerifierGatePreGate(input: VerifierGatePreGateInput): P
 	// nothing here reads the worker-mutable task cwd. Zero resolvable checks
 	// ⇒ INCONCLUSIVE ⇒ escalate (fail-closed on absence, pre-R47-1 doctrine).
 	const checks = input.checks ?? input.hostSpec?.checks ?? [];
+	// ── W10-2 (v0.11.38): memoized green gate by workspace tree-hash ──────
+	// Lookup BEFORE any command runs. A hit proves the FULL tree + check list
+	// + node version are bit-identical to the tree that produced a recorded
+	// PASS (tree equality subsumes the manifest bookends) — re-running
+	// deterministic checks on an unchanged tree buys nothing. Miss / disabled
+	// / non-git cwd ⇒ ordinary full gate below (fail-open).
+	if (resolveVerifyGateMemoEnabled()) {
+		const memoHit = lookupVerifyGateMemo(input.cwd, checks);
+		if (memoHit) {
+			const decision = resolveVerifierSpawnDecision(memoHit);
+			incMetric(input.metricRegistry, "crew.verification.verify_gate_runs_total", "Deterministic verify_gate executions by verdict", {
+				verdict: memoHit.verdict,
+			});
+			incMetric(
+				input.metricRegistry,
+				"crew.verification.verify_gate_memo_hits_total",
+				"W10-2 memoized PASS verdicts served without re-running checks",
+				{},
+			);
+			if (decision.skipVerifier) {
+				incMetric(
+					input.metricRegistry,
+					"crew.verification.verifier_spawns_skipped_total",
+					"LLM verifier spawns saved by the U13 deterministic pre-gate",
+					{ reason: decision.reason },
+				);
+			} else {
+				incMetric(
+					input.metricRegistry,
+					"crew.verification.verifier_spawns_total",
+					"LLM verifier spawns that still ran, labeled by the deciding layer",
+					{ reason: decision.reason },
+				);
+			}
+			return { outcome: memoHit, decision, promptContext: "" };
+		}
+	}
 	const exec = createSubprocessVerifyGateExecutor();
 	let outcome = await runVerifyGate(checks, exec, {
 		cwd: input.cwd,
@@ -644,6 +682,16 @@ export async function runVerifierGatePreGate(input: VerifierGatePreGateInput): P
 	// `input.classifier` stays on the interface (deprecated) because the dispatch
 	// call site in task-runner.ts passes it; removing the field is a follow-up
 	// that must land with that call site.
+	// ── W10-2: record the green verdict for same-tree memoization (AFTER the
+	// post-bookend — a drift-downgraded INCONCLUSIVE must never memoize).
+	if (outcome.verdict === "PASS" && recordVerifyGateMemo(input.cwd, checks, outcome)) {
+		incMetric(
+			input.metricRegistry,
+			"crew.verification.verify_gate_memo_records_total",
+			"W10-2 PASS verdicts recorded for same-tree memoization",
+			{},
+		);
+	}
 	const preGate: VerifierPreGateResult | undefined = undefined;
 	const decision = resolveVerifierSpawnDecision(outcome, preGate);
 	incMetric(input.metricRegistry, "crew.verification.verify_gate_runs_total", "Deterministic verify_gate executions by verdict", {
