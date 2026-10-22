@@ -135,3 +135,19 @@ attempt X of 3 (Y attempts remaining)
 An attempt is one delegation decision (choose agent/team → dispatch → collect). Re-attempt when the delegation target fails or returns unusable output.
 
 Re-attempts only when the previous attempt materially changes the decision or risk. Do NOT spend a re-attempt on mechanical changes or already-resolved findings. When exhausted, escalate to the user with options (accept risk / change scope / exceptional budget).
+
+## Budget-boundary policy (W10-6, pi-subagents lesson #16)
+
+Two load-bearing rules when a worker hits a budget or time boundary:
+
+1. **Budgets block read-tools, NOT mutation-tools.** When a worker is near
+   its token/tool budget, the safe de-escalation is to stop EXPLORING (reads,
+   greps, finds) and conclude from what it already has — never to keep
+   spending while a half-finished mutation sits on disk. A worker out of
+   budget mid-edit must report the partial state, not "roll on".
+2. **An elapsed timeout is NOT a mutation-safe boundary.** Wall-clock expiry
+   can fire between two filesystem writes — whatever cleanup you planned
+   assumes a consistent tree it does not have. On timeout: stop issuing new
+   mutations, capture the current state as evidence, and let the leader
+   adjudicate. Never auto-revert (the revert itself is a mutation racing the
+   timeout).
