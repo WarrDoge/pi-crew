@@ -13,6 +13,14 @@ export type MailboxMessageStatus = "queued" | "delivered" | "acknowledged";
 export type MailboxMessageKind = "message" | "notify" | "steer" | "follow-up" | "response" | "group_join";
 export type MailboxMessagePriority = "urgent" | "normal" | "low";
 export type MailboxDeliveryMode = "interrupt" | "next_turn";
+/**
+ * W10-3 (2026-10-22, lesson #22 — intercom typed reason): why the sender is
+ * contacting the supervisor/peer channel. Optional + backward-compatible —
+ * pre-W10-3 rows simply carry no `reason`; an out-of-enum value parses as
+ * `undefined` (dropped field, NOT a repair-worthy error — same graceful
+ * semantics as `kind`/`priority`).
+ */
+export type MailboxReason = "need_decision" | "progress_update" | "interview_request";
 
 // ============================================================================
 // Phase 1.3: post-append observer (single notification point)
@@ -81,6 +89,10 @@ export interface MailboxMessage {
 	requestId?: string;
 	acknowledgedAt?: string;
 	data?: Record<string, unknown>;
+	/** W10-3 (2026-10-22, lesson #22): typed supervisor-contact reason
+	 *  ({@link MailboxReason}). Optional — old messages without it parse
+	 *  unchanged. */
+	reason?: MailboxReason;
 	/** ID of the original message this is a reply to. */
 	replyTo?: string;
 	/** Task ID sending the reply. */
@@ -292,6 +304,10 @@ function isDeliveryMode(value: unknown): value is MailboxDeliveryMode {
 	return value === "interrupt" || value === "next_turn";
 }
 
+function isReason(value: unknown): value is MailboxReason {
+	return value === "need_decision" || value === "progress_update" || value === "interview_request";
+}
+
 function parseMailboxMessage(raw: unknown, expectedDirection: MailboxDirection): MailboxMessage | undefined {
 	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
 	const obj = raw as Record<string, unknown>;
@@ -322,6 +338,7 @@ function parseMailboxMessage(raw: unknown, expectedDirection: MailboxDirection):
 		priority: isPriority(obj.priority) ? obj.priority : undefined,
 		deliveryMode: isDeliveryMode(obj.deliveryMode) ? obj.deliveryMode : undefined,
 		taskId: typeof obj.taskId === "string" ? obj.taskId : undefined,
+		reason: isReason(obj.reason) ? obj.reason : undefined,
 		questionId: typeof obj.questionId === "string" ? obj.questionId : undefined,
 		requestId: typeof obj.requestId === "string" ? obj.requestId : undefined,
 		acknowledgedAt: typeof obj.acknowledgedAt === "string" ? obj.acknowledgedAt : undefined,
@@ -805,6 +822,7 @@ function buildMailboxMessage(manifest: TeamRunManifest, message: MailboxAppendIn
 		priority: message.priority,
 		deliveryMode: message.deliveryMode,
 		taskId: message.taskId,
+		reason: message.reason,
 		questionId: message.questionId,
 		// U5: every send carries a requestId — explicit (idempotent senders)
 		// or auto-stamped uuid (one per row; still unique per send).
@@ -1184,6 +1202,56 @@ export function findMailboxMessageByRequestId(
 
 export function readMailboxMessage(manifest: TeamRunManifest, messageId: string): MailboxMessage | undefined {
 	return readMailbox(manifest).find((message) => message.id === messageId);
+}
+
+/** Verdict of the W10-3 strict replyTo origin check (lesson #22, A→B→C). */
+export type ReplyToRequesterOrigin =
+	| { verdict: "no-reply-to" }
+	| { verdict: "match"; replyTo: string; requester: string }
+	| { verdict: "origin-not-found"; replyTo: string }
+	| { verdict: "mismatch"; replyTo: string; originalFrom: string; responseTo: string };
+
+/**
+ * W10-3 (2026-10-22, lesson #22): strict replyTo routing predicate.
+ *
+ * Gap (verified 2-way): `replyTo` was parse/serialize-only — NOTHING validated
+ * that a response tagged with a `replyTo` was resolving a request opened by
+ * the SAME requester the response is addressed to. With parallel lanes asking
+ * concurrently, a reply meant for B (replyTo → a request B opened) could
+ * resolve C's waiting park (A→B→C confusion) when its questionId happened to
+ * tag C.
+ *
+ * Rule: when a response carries `replyTo`, the ORIGINAL message that id points
+ * at (searched across global + every task mailbox, live + archives — the same
+ * scan space `updateMailboxMessageReply` uses) must have been opened by
+ * (`from` ===) the requester the response is addressed to (`to`). Verdicts:
+ *  - "no-reply-to"        — untagged legacy responses: nothing to verify.
+ *  - "match"              — right pair (original.from === response.to).
+ *  - "origin-not-found"   — the replyTo id cannot be resolved (rotated out,
+ *                          garbage, cross-run): unverifiable — callers keep
+ *                          the exact-questionId correlation as the primary
+ *                          defense and only log (fail-open, no availability
+ *                          regression on stale ids).
+ *  - "mismatch"           — A→B→C: original found but opened by a DIFFERENT
+ *                          requester ⇒ callers MUST NOT resolve the waiting
+ *                          task with this response (log + skip).
+ *
+ * Pure read-only; throws never (a mailbox read failure surfaces as
+ * "origin-not-found" so the caller's own error handling decides).
+ */
+export function checkReplyToRequesterOrigin(manifest: TeamRunManifest, response: MailboxMessage): ReplyToRequesterOrigin {
+	const replyTo = response.replyTo;
+	if (replyTo === undefined) return { verdict: "no-reply-to" };
+	let original: MailboxMessage | undefined;
+	try {
+		original = readAllMailboxMessages(manifest).find((message) => message.id === replyTo);
+	} catch {
+		// Unreadable mailbox during the lookup — unverifiable, same as not found.
+		return { verdict: "origin-not-found", replyTo };
+	}
+	if (!original) return { verdict: "origin-not-found", replyTo };
+	if (original.from === response.to) return { verdict: "match", replyTo, requester: original.from };
+	return { verdict: "mismatch", replyTo, originalFrom: original.from, responseTo: response.to };
 }
 
 export function acknowledgeMailboxMessage(manifest: TeamRunManifest, messageId: string): MailboxDeliveryState {
