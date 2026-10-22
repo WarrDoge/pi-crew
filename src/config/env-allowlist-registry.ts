@@ -217,8 +217,14 @@ const CREW_ENV_FORWARDING_DECL: Record<string, CrewEnvForwardDecision> = {
 	PI_CREW_INFERENCE_UPSTREAM_ANTHROPIC: { kind: "test-only", reason: "v0.11.34 anthropic-only broker upstream override — TESTS ONLY" },
 	PI_CREW_INFERENCE_UPSTREAM_OPENAI: { kind: "test-only", reason: "v0.11.34 openai-only broker upstream override — TESTS ONLY" },
 	PI_CREW_INFERENCE_UPSTREAM_GOOGLE: { kind: "test-only", reason: "v0.11.36 google-only broker upstream override — TESTS ONLY" },
-	PI_CREW_SANDBOX: { kind: "gap", reason: "v0.11.36 OS-boundary knob read in the PARENT spawn path only (bwrap wrap decision) — deliberately never forwarded to children" },
-	PI_CREW_SANDBOX_NET: { kind: "gap", reason: "v0.11.36 sandbox network profile (share|off) read in the PARENT spawn path only — deliberately never forwarded to children" },
+	PI_CREW_SANDBOX: {
+		kind: "gap",
+		reason: "v0.11.36 OS-boundary knob read in the PARENT spawn path only (bwrap wrap decision) — deliberately never forwarded to children",
+	},
+	PI_CREW_SANDBOX_NET: {
+		kind: "gap",
+		reason: "v0.11.36 sandbox network profile (share|off) read in the PARENT spawn path only — deliberately never forwarded to children",
+	},
 	PI_CREW_STEERING_FILE: { kind: "child-write", reason: "child-pi-spawn per-run steering JSONL" },
 	PI_CREW_MAX_OUTPUT: { kind: "child-write", reason: "pi-args emits agent.maxTokens into built.env" },
 	PI_CREW_RPC_SECRET: { kind: "child-write", reason: "shared HMAC secret handed to the child at spawn — secret name, never allowlisted" },

@@ -195,7 +195,8 @@ function resolveProviderRoutes(env: NodeJS.ProcessEnv): { routes: ProviderRoute[
 	// the pi catalog: ids like "gemini-2.5-pro", baseUrl ...
 	// /v1beta). Credential precedence mirrors the others: env FIRST
 	// (GOOGLE_API_KEY, then GEMINI_API_KEY — both conventional), then auth.json:google.
-	const googleUpstream = getCrewEnv("PI_CREW_INFERENCE_UPSTREAM_GOOGLE", env) || genericUpstream || "https://generativelanguage.googleapis.com/v1beta";
+	const googleUpstream =
+		getCrewEnv("PI_CREW_INFERENCE_UPSTREAM_GOOGLE", env) || genericUpstream || "https://generativelanguage.googleapis.com/v1beta";
 	const googleApiKey = env.GOOGLE_API_KEY;
 	const geminiApiKey = env.GEMINI_API_KEY;
 	const googleStored = authJson.google;

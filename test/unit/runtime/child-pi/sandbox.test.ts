@@ -114,13 +114,16 @@ test("(c1) argv shape: unshare-all, share-net iff net=share, ro OS runtime, tmpf
 });
 
 test("(c2) mount ORDER: --tmpfs /tmp precedes any bind under /tmp (scoped agent dir, scratch paths)", () => {
-	const wrapped = applySandboxToSpawnSpec({ command: "x", args: [] }, {
-		cwd: "/proj",
-		net: "share",
-		agentDir: "/tmp/pi-crew-inference-abc",
-		roBindPaths: ["/tmp/taskdir", "/tmp/scratch.snapshot.json"],
-		rwBindPaths: ["/tmp/crew.sock"],
-	});
+	const wrapped = applySandboxToSpawnSpec(
+		{ command: "x", args: [] },
+		{
+			cwd: "/proj",
+			net: "share",
+			agentDir: "/tmp/pi-crew-inference-abc",
+			roBindPaths: ["/tmp/taskdir", "/tmp/scratch.snapshot.json"],
+			rwBindPaths: ["/tmp/crew.sock"],
+		},
+	);
 	const tmpfs = wrapped.args.indexOf("--tmpfs");
 	assert.ok(tmpfs >= 0 && wrapped.args[tmpfs + 1] === "/tmp");
 	// The flag IMMEDIATELY BEFORE a bound path names its mount kind.
@@ -148,7 +151,10 @@ test("(d1) REAL bwrap: host home invisible, cwd writable, OS runtime readable", 
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-sbx-"));
 	try {
 		const wrapped = applySandboxToSpawnSpec(
-			{ command: process.execPath, args: ["-e", "require('fs').readFileSync(require('path').join(require('os').homedir(),'.pi','agent','auth.json'))"] },
+			{
+				command: process.execPath,
+				args: ["-e", "require('fs').readFileSync(require('path').join(require('os').homedir(),'.pi','agent','auth.json'))"],
+			},
 			{ cwd, net: "share" },
 		);
 		const out = spawnSync(wrapped.command, [...wrapped.args], {
@@ -192,10 +198,7 @@ test("(d2) REAL bwrap net=off: loopback is unreachable inside the namespace", { 
 		const wrapped = applySandboxToSpawnSpec(
 			{
 				command: process.execPath,
-				args: [
-					"-e",
-					`fetch('http://127.0.0.1:${port}/').then(()=>process.exit(0)).catch(()=>process.exit(3))`,
-				],
+				args: ["-e", `fetch('http://127.0.0.1:${port}/').then(()=>process.exit(0)).catch(()=>process.exit(3))`],
 			},
 			{ cwd, net: "off" },
 		);
