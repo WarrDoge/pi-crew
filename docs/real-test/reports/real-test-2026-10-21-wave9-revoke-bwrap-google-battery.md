@@ -41,3 +41,13 @@ Base v0.11.35 (`04639e2c`) → target v0.11.36 (one version).
 
 ## Verdict
 **GO** for v0.11.36.
+
+## SHIP TRAIL
+- v0.11.36 `08f029e9` — CI RED on the FORMAT gate (biome format diffs in 4 wave-9
+  files). Local `npm run lint` does NOT run `format:check` — new pre-push lesson:
+  run BOTH before pushing.
+- v0.11.37 `a4e15280` — CI run 39714639415 GREEN after 1 adjudicated rerun-failed
+  (team-runner-merge streaming-dispatch DAG on windows/Node24 — isolated green x2,
+  known timing-flake class; not a wave-9 file).
+- npm `+ pi-crew@0.11.37`; dist-tags.latest=0.11.37; release v0.11.37 (Latest).
+- v0.11.36 tag NOT published (red CI).
