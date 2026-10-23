@@ -12,6 +12,7 @@
  * 3. Cleans up after itself when the run completes or the session ends.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getCrewEnv } from "../config/env-vars.ts";
 import { loadRunManifestById } from "../state/stores/state-store.ts";
 import { readCrewAgents } from "./crew-agent-records.ts";
 import { isActiveRunStatus, isLikelyOrphanedActiveRun } from "./process-status.ts";
@@ -31,6 +32,69 @@ const DEFAULT_MAX_MONITOR_MS = 7_200_000; // 2 hours
 
 /** Active watchdog timers — keyed by runId for cleanup. */
 const activeWatchdogs = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * WD-DEDUP (2026-10-23): hung-alert dedup state, keyed by runId at module
+ * scope so a *new* watchdog instance (or a re-armed one after stop/start)
+ * cannot re-alert for a run the user already heard about. Bounded FIFO —
+ * the oldest entry is evicted once the cap is reached, so long-lived
+ * sessions cannot leak memory on this map.
+ */
+interface HungAlertRecord {
+	/** A "run … appears hung" alert has already been emitted for this runId. */
+	alerted: boolean;
+	/** The one-time re-verify-skip debug log has already been emitted. */
+	skipLogged: boolean;
+}
+const HUNG_ALERT_RECORDS_CAP = 256;
+const hungAlertRecords = new Map<string, HungAlertRecord>();
+
+function hungAlertAlreadySent(runId: string): boolean {
+	return hungAlertRecords.get(runId)?.alerted === true;
+}
+
+/** Insert/update a record, evicting the oldest entry when the cap is hit. */
+function updateHungAlertRecord(runId: string, patch: Partial<HungAlertRecord>): void {
+	if (!hungAlertRecords.has(runId) && hungAlertRecords.size >= HUNG_ALERT_RECORDS_CAP) {
+		const oldest = hungAlertRecords.keys().next().value;
+		if (oldest !== undefined) hungAlertRecords.delete(oldest);
+	}
+	const prev = hungAlertRecords.get(runId) ?? { alerted: false, skipLogged: false };
+	hungAlertRecords.set(runId, { ...prev, ...patch });
+}
+
+/** Debug log gated behind PI_CREW_DEBUG (same convention as background-runner). */
+function debugLog(message: string): void {
+	if (getCrewEnv("PI_CREW_DEBUG")) console.log(message);
+}
+
+/**
+ * Pre-emit state re-verify loader. Injectable for tests to simulate the run
+ * going terminal between the cycle's initial read and the emit point.
+ */
+type ReverifyLoader = typeof loadRunManifestById;
+let reverifyLoader: ReverifyLoader = loadRunManifestById;
+
+/** @internal Test seam — reset module-level hung-alert dedup state. */
+export function resetHungAlertDedupForTests(): void {
+	hungAlertRecords.clear();
+	reverifyLoader = loadRunManifestById;
+}
+
+/** @internal Test seam — snapshot of the dedup map size (cap/leak assertions). */
+export function hungAlertDedupSizeForTests(): number {
+	return hungAlertRecords.size;
+}
+
+/** @internal Test seam — force-mark a runId as already alerted (cap assertions). */
+export function markHungAlertForTests(runId: string): void {
+	updateHungAlertRecord(runId, { alerted: true });
+}
+
+/** @internal Test seam — replace the pre-emit re-verify loader (null = real). */
+export function setReverifyLoaderForTests(loader: ReverifyLoader | null): void {
+	reverifyLoader = loader ?? loadRunManifestById;
+}
 
 /** Stop a specific watchdog by runId. */
 export function stopWatchdog(runId: string): void {
@@ -111,23 +175,45 @@ export function startForegroundWatchdog(opts: WatchdogOptions): void {
 			const agents = readCrewAgents(manifest);
 			const now = Date.now();
 			if (isLikelyOrphanedActiveRun(manifest, agents, now)) {
-				const detail = `status=${manifest.status}, updatedAt=${manifest.updatedAt}, agents=${agents.length}`;
-				consecutiveHungNotices += 1;
-				try {
-					if (consecutiveHungNotices <= HUNG_NOTICE_CAP) {
-						pi.sendUserMessage(
-							`pi-crew watchdog: run ${runId} appears hung (${detail}). Consider running team action='cancel' runId='${runId}' or team action='doctor'.`,
-							{ deliverAs: "followUp" },
-						);
-					} else if (consecutiveHungNotices === HUNG_NOTICE_CAP + 1) {
-						// One-time handoff, then silence — still monitoring, no more drips.
-						pi.sendUserMessage(
-							`pi-crew watchdog: run ${runId} is still hung after ${consecutiveHungNotices} checks — going quiet now. Intervene via team action='cancel' runId='${runId}', team action='doctor', or leave it; a completion notice will still fire.`,
-							{ deliverAs: "followUp" },
-						);
+				// WD-DEDUP (2026-10-23): re-verify the run state right before any
+				// emit. A check armed by an older poll cycle can race the run
+				// reaching a terminal status — alerting "appears hung" for a run
+				// that already finished is exactly the repeated-alert pain.
+				// Terminal (or vanished) at re-verify → skip the emit entirely;
+				// the next cycle's terminal branch delivers the completion notice.
+				const reverified = reverifyLoader(cwd, runId);
+				if (!reverified || !isActiveRunStatus(reverified.manifest.status)) {
+					const reason = reverified ? `status=${reverified.manifest.status}` : "manifest gone";
+					if (!hungAlertRecords.get(runId)?.skipLogged) {
+						updateHungAlertRecord(runId, { skipLogged: true });
+						debugLog(`[foreground-watchdog] skip hung alert for ${runId}: re-verify saw ${reason}`);
 					}
-				} catch {
-					/* non-critical */
+					// Fall through to the shared schedule — keep monitoring; the next
+					// cycle hits the terminal branch (completion notice) or !loaded.
+				} else {
+					const detail = `status=${manifest.status}, updatedAt=${manifest.updatedAt}, agents=${agents.length}`;
+					consecutiveHungNotices += 1;
+					try {
+						if (consecutiveHungNotices <= HUNG_NOTICE_CAP) {
+							// WD-DEDUP: alert-once per runId at module scope — even a
+							// fresh watchdog instance must not re-alert the same run.
+							if (!hungAlertAlreadySent(runId)) {
+								pi.sendUserMessage(
+									`pi-crew watchdog: run ${runId} appears hung (${detail}). Consider running team action='cancel' runId='${runId}' or team action='doctor'.`,
+									{ deliverAs: "followUp" },
+								);
+								updateHungAlertRecord(runId, { alerted: true });
+							}
+						} else if (consecutiveHungNotices === HUNG_NOTICE_CAP + 1) {
+							// One-time handoff, then silence — still monitoring, no more drips.
+							pi.sendUserMessage(
+								`pi-crew watchdog: run ${runId} is still hung after ${consecutiveHungNotices} checks — going quiet now. Intervene via team action='cancel' runId='${runId}', team action='doctor', or leave it; a completion notice will still fire.`,
+								{ deliverAs: "followUp" },
+							);
+						}
+					} catch {
+						/* non-critical */
+					}
 				}
 				// Keep monitoring (ARCH-5: silently past the cap — no more notices).
 			} else {

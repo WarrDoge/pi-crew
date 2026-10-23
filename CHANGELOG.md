@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed — watchdog hung-alert dedup (WD-DEDUP, live-caught 2026-10-23)
+
+- **fix(watchdog): repeated "appears hung" alerts for a run already terminal** — live pain 2026-10-23 (run team_20261023030033…): the foreground watchdog re-alerted "appears hung" for a run that had already completed, because (1) nothing deduped the notice across cycles/instances (the ARCH-5 notice cap of 2 still allowed one repeat, and a re-armed watchdog instance started the counter fresh) and (2) a check armed by an older poll cycle emitted without re-verifying the run state at emit time. Fix in `src/runtime/foreground-watchdog.ts`: **(a) alert-once per runId** — a module-level bounded FIFO map (cap 256, oldest entry evicted — no unbounded growth) suppresses every later "appears hung" emit for the same runId, even from a fresh watchdog instance; **(b) pre-emit re-verify** — the run state is reloaded immediately before any emit; a terminal (or vanished) run skips the emit entirely (one-time `PI_CREW_DEBUG` debug log) and keeps monitoring, so the next cycle's terminal branch still delivers the single completion notice as before. The ARCH-5 going-quiet handoff stays one-shot. Pinned by 4 new tests: alert-once (incl. restart immunity), re-verify skip at emit time, natural terminal transition after first alert, bounded-cap eviction.
+
 ### Wave 10 — pi-subagents lessons port (verified 26-item matrix, 2026-10-22)
 
 All ten actionable items from the pi-subagents deep research (5 tiers: architecture → perf → prompt/meta → docs/intercom/missions → live measurement). Two lessons were CLOSED by evidence instead of ported: spawn/parallel performance (live measurement §10-11: pi-crew process-per-worker 0.57–0.76s beats pisub in-process 0.83s solo / 3.27s fan-out per child — nothing to port) and declaration-pinning (not applicable: pi-crew is process-per-worker, the platform owns tool declarations).

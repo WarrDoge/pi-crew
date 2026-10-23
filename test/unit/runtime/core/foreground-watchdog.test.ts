@@ -22,7 +22,14 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { saveCrewAgents } from "../../../../src/runtime/crew-agent-records.ts";
 import type { CrewAgentRecord } from "../../../../src/runtime/crew-agent-runtime.ts";
-import { startForegroundWatchdog, stopWatchdog } from "../../../../src/runtime/foreground-watchdog.ts";
+import {
+	hungAlertDedupSizeForTests,
+	markHungAlertForTests,
+	resetHungAlertDedupForTests,
+	setReverifyLoaderForTests,
+	startForegroundWatchdog,
+	stopWatchdog,
+} from "../../../../src/runtime/foreground-watchdog.ts";
 import { createRunManifest, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
 
@@ -232,6 +239,122 @@ test("startForegroundWatchdog: stops silently when the run manifest is gone (no 
 		assert.equal(pi.messages.length, 0, "missing manifest → no notification and no throw");
 	} finally {
 		stopWatchdog(runId);
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-DEDUP: a persistently hung run alerts 'appears hung' exactly once — even across watchdog restarts", async () => {
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	const pi = makePi();
+	resetHungAlertDedupForTests();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await waitFor(() => pi.messages.some((m) => m.text.includes("appears hung")), 2000);
+
+		// Let MANY more hung cycles fire — old behavior re-alerted (notice cap 2).
+		await sleep(150);
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			1,
+			"alert-once per runId: exactly one 'appears hung' notice",
+		);
+
+		// A fresh watchdog instance for the same run must not re-alert either —
+		// the dedup lives at module scope, not per instance.
+		stopWatchdog(runId);
+		const pi2 = makePi();
+		startForegroundWatchdog({ pi: pi2 as never, cwd, runId, checkIntervalMs: 5 });
+		await sleep(150);
+		assert.equal(
+			pi2.messages.filter((m) => m.text.includes("appears hung")).length,
+			0,
+			"fresh watchdog instance does not re-alert the same runId",
+		);
+	} finally {
+		stopWatchdog(runId);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-DEDUP: run that went terminal before the emit point never alerts (re-verify skips emit)", async () => {
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	const pi = makePi();
+	resetHungAlertDedupForTests();
+	// Simulate the real incident: the cycle still reads a stale hung manifest,
+	// but by emit time the run has already reached a terminal status.
+	setReverifyLoaderForTests(() => ({ manifest: { ...manifest, status: "completed" }, tasks: [] }));
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await sleep(150); // many hung cycles, each re-verified terminal → skip
+		assert.equal(pi.messages.filter((m) => m.text.includes("appears hung")).length, 0, "no hung alert for a run terminal at emit time");
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("going quiet")).length,
+			0,
+			"no going-quiet drip either — emit skipped entirely",
+		);
+	} finally {
+		stopWatchdog(runId);
+		setReverifyLoaderForTests(null);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-DEDUP: run completing after the first alert yields one completion notice and no repeat hung alerts", async () => {
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	const pi = makePi();
+	resetHungAlertDedupForTests();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await waitFor(() => pi.messages.some((m) => m.text.includes("appears hung")), 2000);
+
+		// Run reaches a terminal status between cycles.
+		saveRunManifest({ ...manifest, status: "completed" });
+		await waitFor(() => pi.messages.some((m) => m.text.includes("run completed")), 2000);
+		await sleep(80);
+
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			1,
+			"no repeat hung alert after the run went terminal",
+		);
+		assert.equal(pi.messages.filter((m) => m.text.includes("run completed")).length, 1, "exactly one completion notice");
+	} finally {
+		stopWatchdog(runId);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-DEDUP: hung-alert dedup map is bounded — oldest evicted at cap, no leak", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	const pi = makePi();
+	try {
+		// Overflow the cap with synthetic runIds — size must stop growing.
+		for (let i = 0; i < 1000; i++) markHungAlertForTests(`synthetic-run-${i}`);
+		const boundedSize = hungAlertDedupSizeForTests();
+		assert.ok(boundedSize > 0 && boundedSize < 1000, `map is bounded (size=${boundedSize}), not 1000`);
+		for (let i = 1000; i < 1500; i++) markHungAlertForTests(`synthetic-run-${i}`);
+		assert.equal(hungAlertDedupSizeForTests(), boundedSize, "size stays capped after further inserts — no unbounded growth");
+
+		// The eviction means a never-alerted runId can still alert exactly once.
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await waitFor(() => pi.messages.some((m) => m.text.includes("appears hung")), 2000);
+		await sleep(80);
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			1,
+			"fresh (evicted-oldest) runId still alerts exactly once",
+		);
+	} finally {
+		stopWatchdog(runId);
+		resetHungAlertDedupForTests();
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}
 });
