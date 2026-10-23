@@ -749,40 +749,53 @@ function logReplyToRoutingOnce(key: string, code: string, error: Error, detail: 
  *  additionally gated by checkReplyToRequesterOrigin (strict replyTo routing):
  *  when the replyTo original was opened by a DIFFERENT requester than the one
  *  this response is addressed to (A→B→C), the response is NOT the answer —
- *  log + return undefined so the park stays unresolved (deadline still
- *  applies; the task continues with best judgment). Unverifiable origins
- *  (rotated-out/stale replyTo ids) keep the exact-questionId correlation as
- *  the primary defense — warn once, fail-open. */
-function findAskResponse(manifest: TeamRunManifest, questionId: string): MailboxMessage | undefined {
+ *  log + skip it — the park stays unresolved (deadline still applies; the
+ *  task continues with best judgment). Unverifiable origins (rotated-out/
+ *  stale replyTo ids) keep the exact-questionId correlation as the primary
+ *  defense — warn once, fail-open.
+ *
+ *  W10-3 hardening (review of cherry-picked a356ae9): ALL (kind, questionId)
+ *  candidates are considered, not just the FIRST — a mismatched candidate is
+ *  skipped and the iteration continues, so a VALID answer the leader re-sent
+ *  with the same questionId after a misroute still resolves the park (the old
+ *  `.find()` + bail-out shadowed it until the deadline). Each candidate is
+ *  also anchored to the parked task (`to === taskId`): a reply pair that is
+ *  coherent for ANOTHER task must never resolve this park even when its row
+ *  happens to tag this questionId. */
+function findAskResponse(manifest: TeamRunManifest, questionId: string, taskId: string): MailboxMessage | undefined {
 	try {
-		const candidate = readAllMailboxMessages(manifest).find((m) => m.kind === "response" && m.questionId === questionId);
-		if (candidate === undefined) return undefined;
-		if (candidate.replyTo !== undefined) {
-			const origin = checkReplyToRequesterOrigin(manifest, candidate);
-			const logKey = `${manifest.runId}:${questionId}:${candidate.replyTo}`;
-			if (origin.verdict === "mismatch") {
-				logReplyToRoutingOnce(
-					logKey,
-					"prompt-runtime.ask-replyto-origin-mismatch",
-					new Error(
-						`response '${candidate.id}' (to='${candidate.to}') replies to '${origin.replyTo}' opened by '${origin.originalFrom}' — wrong requester; park NOT resolved`,
-					),
-					`questionId=${questionId}`,
-				);
-				return undefined;
+		const candidates = readAllMailboxMessages(manifest).filter(
+			(m) => m.kind === "response" && m.questionId === questionId && m.to === taskId,
+		);
+		for (const candidate of candidates) {
+			if (candidate.replyTo !== undefined) {
+				const origin = checkReplyToRequesterOrigin(manifest, candidate);
+				const logKey = `${manifest.runId}:${questionId}:${candidate.replyTo}`;
+				if (origin.verdict === "mismatch") {
+					logReplyToRoutingOnce(
+						logKey,
+						"prompt-runtime.ask-replyto-origin-mismatch",
+						new Error(
+							`response '${candidate.id}' (to='${candidate.to}') replies to '${origin.replyTo}' opened by '${origin.originalFrom}' — wrong requester; candidate skipped, a later valid answer with the same questionId can still resolve`,
+						),
+						`questionId=${questionId}`,
+					);
+					continue;
+				}
+				if (origin.verdict === "origin-not-found") {
+					logReplyToRoutingOnce(
+						logKey,
+						"prompt-runtime.ask-replyto-origin-unknown",
+						new Error(
+							`response '${candidate.id}' carries replyTo '${origin.replyTo}' with no resolvable original — origin unverifiable, questionId correlation stands`,
+						),
+						`questionId=${questionId}`,
+					);
+				}
 			}
-			if (origin.verdict === "origin-not-found") {
-				logReplyToRoutingOnce(
-					logKey,
-					"prompt-runtime.ask-replyto-origin-unknown",
-					new Error(
-						`response '${candidate.id}' carries replyTo '${origin.replyTo}' with no resolvable original — origin unverifiable, questionId correlation stands`,
-					),
-					`questionId=${questionId}`,
-				);
-			}
+			return candidate;
 		}
-		return candidate;
+		return undefined;
 	} catch (error) {
 		logInternalError(
 			"prompt-runtime.ask-mailbox-read",
@@ -951,7 +964,7 @@ export function createAskTool(deps: AskToolDeps = {}): AskToolDefinition {
 						terminal = "aborted";
 						break;
 					}
-					answer = findAskResponse(manifest, questionId);
+					answer = findAskResponse(manifest, questionId, taskId);
 					if (answer) {
 						terminal = "answered";
 						break;

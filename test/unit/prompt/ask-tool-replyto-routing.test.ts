@@ -15,6 +15,13 @@
  *      resolves normally (answered, fenced answer).
  *  (c) legacy rows (no reason, no replyTo) keep resolving — no crash, no
  *      behavior change for pre-W10-3 streams.
+ *  (d) W10-3 hardening (review of cherry-picked a356ae9): a MISROUTED
+ *      response followed by a VALID re-sent answer with the SAME questionId
+ *      resolves the park — the mismatched candidate is skipped, not fatal
+ *      (the old `.find()` + bail-out shadowed the valid answer till deadline).
+ *  (e) taskId anchor: a reply pair that is COHERENT for another task (B) but
+ *      whose row tags this questionId does NOT resolve this park — the
+ *      candidate filter requires `to === taskId`.
  */
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -196,6 +203,96 @@ describe("ask tool strict replyTo routing (W10-3)", () => {
 			const result = await runAsk(tool, { question: "legacy stream question" });
 			assert.equal(result.details.status, "answered");
 			assert.ok(resultText(result).includes("legacy answer"));
+		} finally {
+			state.cleanup();
+		}
+	});
+
+	it("(d) misroute first + valid re-sent answer with the SAME questionId later → resolved", async () => {
+		const state = makeTempAskState();
+		try {
+			const { surface, calls } = makeMockBrokerClient(10_000);
+			// B (a different lane) opened a request to the leader.
+			const bRequest = await appendMailboxMessageAsync(state.manifest, {
+				direction: "outbox",
+				from: "task-B",
+				to: "leader",
+				body: "B's question",
+				kind: "message",
+			});
+			// 1st response (MISROUTE): addressed to C but replying to B's request.
+			await appendMailboxMessageAsync(state.manifest, {
+				direction: "inbox",
+				from: "leader",
+				to: state.taskId,
+				taskId: state.taskId,
+				body: "misrouted answer that belongs to B",
+				kind: "response",
+				questionId: "33333333-3333-4333-8333-333333333333",
+				replyTo: bRequest.id,
+			});
+			// 2nd response (leader re-send after the misroute): SAME questionId,
+			// addressed to the parked task, no replyTo — the valid answer.
+			await appendMailboxMessageAsync(state.manifest, {
+				direction: "inbox",
+				from: "leader",
+				to: state.taskId,
+				taskId: state.taskId,
+				body: "legit re-sent answer for C",
+				kind: "response",
+				questionId: "33333333-3333-4333-8333-333333333333",
+			});
+			const tool = createAskTool({ env: state.env, makeBrokerClient: () => surface });
+			const result = await runAsk(tool, { question: "C's question" });
+			// The misrouted candidate is skipped; the later valid answer resolves.
+			assert.equal(result.details.status, "answered");
+			const text = resultText(result);
+			assert.ok(!text.includes("misrouted answer that belongs to B"), "the misrouted answer must never surface");
+			assert.ok(text.includes("legit re-sent answer for C"), "the re-sent valid answer must resolve the park");
+			const resolves = calls.filter((c) => c.method === "wait.resolve");
+			assert.equal(resolves.length, 1);
+			const resolveParams = resolves[0]?.params as { outcome?: string } | undefined;
+			assert.equal(resolveParams?.outcome, "answered");
+		} finally {
+			state.cleanup();
+		}
+	});
+
+	it("(e) coherent pair for ANOTHER task (to=task-B) tagging this questionId → not resolved", async () => {
+		const state = makeTempAskState();
+		try {
+			const { surface, calls } = makeMockBrokerClient(700);
+			// B opened a request; the leader answered B coherently (replyTo → B's
+			// request, to=task-B). replyTo↔to coherence HOLDS — but the row tags C's
+			// parked questionId, so only the taskId anchor keeps it off C's park.
+			const bRequest = await appendMailboxMessageAsync(state.manifest, {
+				direction: "outbox",
+				from: "task-B",
+				to: "leader",
+				body: "B's question",
+				kind: "message",
+			});
+			await appendMailboxMessageAsync(state.manifest, {
+				direction: "inbox",
+				from: "leader",
+				to: "task-B",
+				taskId: "task-B",
+				body: "B's own answer",
+				kind: "response",
+				questionId: "33333333-3333-4333-8333-333333333333",
+				replyTo: bRequest.id,
+				reason: "need_decision",
+			});
+			const tool = createAskTool({ env: state.env, makeBrokerClient: () => surface });
+			const result = await runAsk(tool, { question: "C's question", timeoutSec: 1 });
+			// No candidate anchored to task-C → the park waits out the deadline.
+			assert.equal(result.details.status, "timed-out");
+			const text = resultText(result);
+			assert.ok(!text.includes("B's own answer"), "another task's coherent answer must never surface");
+			const resolves = calls.filter((c) => c.method === "wait.resolve");
+			assert.equal(resolves.length, 1);
+			const resolveParams = resolves[0]?.params as { outcome?: string } | undefined;
+			assert.equal(resolveParams?.outcome, "timed-out");
 		} finally {
 			state.cleanup();
 		}
