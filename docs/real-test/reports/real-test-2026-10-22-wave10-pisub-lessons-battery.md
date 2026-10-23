@@ -30,3 +30,15 @@ Full gates: unit 9876 pass (1 snapshot fail → fixed `766c02fb`), integration 1
 ## Verdict
 
 **PASS — đủ điều kiện ship v0.11.38 chờ leader duyệt** (theo protocol: version → push --follow-tags → 3-OS CI xanh → publish → release).
+
+## Addendum — battery re-run theo updated decision table (commit 93373708)
+
+| Mục | Lệnh | Kết quả |
+|---|---|---|
+| Row slop-rules (gate) | `node scripts/check-slop-rules.mjs` | exit 0 — `baseline 41, current 41 (burn-down ok)` |
+| Row slop-rules (suites) | `check-slop-rules(.test|-cli.test).ts` | exit 0 — 6/6 pass (2 suites) |
+| Row verify-gate mở rộng | `verify-gate-memo.test.ts` + `typed-gate.test.ts` | exit 0 — 17/17 pass (pins 8/10/7) + live probe in ra `verify-gate-memo: HIT — workspace tree 19c145003989 …` (re-gate cùng cây, checks skipped) |
+| Dated entry (ask-routing) | `ask-tool-replyto-routing.test.ts` + `mailbox-replyto-reason.test.ts` | exit 0 — 13/13 pass (5 misroute-resend + 8 taskId-anchor) |
+| Sanity | `npm run test:critical` | exit 0 — 124/124 pass (11 suites) |
+
+Verdict: **PASS** — updated decision table (row slop-rules + row verify-gate memo/typed) chạy xanh toàn bộ trên `93373708`.
