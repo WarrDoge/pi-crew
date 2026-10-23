@@ -772,3 +772,145 @@ test("WD-DELIVER-GUARD: no idle probe (legacy caller) → verify-then-send, stil
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}
 });
+
+/**
+ * WD-DELIVER-GUARD — CAP-EXPIRY EXIT (residual from the 2026-10-23 ship
+ * battery).
+ *
+ * The idle-boundary path is covered above. The OTHER way out of the pending
+ * map is the delivery cap (`deliverCapMs`, 10 min): if the session never goes
+ * idle (a single foreground tool call blocking longer than the cap), no idle
+ * boundary ever arrives and the alert is handed over on the deadline instead.
+ * That exit must run the SAME classify/verify — a run that finished inside the
+ * cap must be dropped there too, otherwise "finished run still nags" survives
+ * in exactly the long-tool-call case. These tests hold `isSessionIdle` at
+ * false for the whole test (no idle boundary, cap is the only exit) and shrink
+ * the cap to a few ms.
+ */
+
+test("WD-DELIVER-GUARD cap-expiry: session never idles — a run whose tasks are all terminal is DROPPED (real state)", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	setDeliveryTimingForTests(5, 120); // retry 5ms, cap 120ms (instead of 10 min)
+	const debug = captureDebugLogs();
+	const pi = makePi();
+	try {
+		// Streaming for the WHOLE test: the cap is the only exit from the pending map.
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5, isSessionIdle: () => false });
+		await waitFor(() => hungAlertDeliveryPendingForTests() === 1, 2000);
+
+		// The run really finishes (every task terminal) while the session streams on.
+		saveRunTasks(manifest, [task("do", "completed", runId)]);
+
+		// Cap expiry must re-read the state and drop — not deliver.
+		await waitFor(() => hungAlertDeliveryPendingForTests() === 0, 2000);
+		await sleep(60);
+
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			0,
+			"cap-expiry exit must NOT deliver a hung alert for a run that is done",
+		);
+		assert.equal(
+			debug.logs.filter((l) => l.includes("drop hung alert") && l.includes(runId)).length,
+			1,
+			"the cap-expiry drop is debug-logged once per runId",
+		);
+	} finally {
+		stopWatchdog(runId);
+		debug.restore();
+		setDeliveryTimingForTests();
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-DELIVER-GUARD cap-expiry: manifest terminal at the cap → dropped (no unverified delivery)", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	// On-disk manifest stays hung (so the watchdog keeps cycling); the state the
+	// DELIVERY read sees is terminal — the exact race the cap path must catch.
+	setDeliveryLoaderForTests(() => ({ manifest: { ...manifest, status: "completed" }, tasks: [] }));
+	setDeliveryTimingForTests(5, 80);
+	const debug = captureDebugLogs();
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5, isSessionIdle: () => false });
+		await waitFor(() => hungAlertDeliveryPendingForTests() === 1, 2000);
+		await waitFor(() => hungAlertDeliveryPendingForTests() === 0, 2000);
+		await sleep(60);
+
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			0,
+			"a manifest that reads terminal at cap expiry is never delivered",
+		);
+		assert.equal(
+			debug.logs.filter((l) => l.includes("drop hung alert") && l.includes(runId)).length,
+			1,
+			"one drop log for the cap-expiry exit",
+		);
+	} finally {
+		stopWatchdog(runId);
+		debug.restore();
+		setDeliveryTimingForTests();
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-DELIVER-GUARD cap-expiry: a run still hung at the cap IS delivered (late beats never)", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	setDeliveryTimingForTests(5, 80);
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5, isSessionIdle: () => false });
+		await waitFor(() => hungAlertDeliveryPendingForTests() === 1, 2000);
+		assert.equal(pi.messages.length, 0, "nothing handed over before the cap");
+
+		await waitFor(() => pi.messages.some((m) => m.text.includes("appears hung")), 2000);
+		await sleep(80);
+
+		const hung = pi.messages.filter((m) => m.text.includes("appears hung"));
+		assert.equal(hung.length, 1, "cap expiry delivers exactly one hung alert for a genuinely hung run");
+		assert.ok(hung[0].text.includes(runId), "names the runId");
+		assert.deepEqual(hung[0].options, { deliverAs: "followUp" }, "still delivered as followUp");
+		assert.equal(hungAlertDeliveryPendingForTests(), 0, "nothing left pending after the cap handover");
+	} finally {
+		stopWatchdog(runId);
+		setDeliveryTimingForTests();
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-DELIVER-GUARD cap-expiry: unreadable state at the cap FAILS OPEN (alert delivered)", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	setDeliveryLoaderForTests(() => {
+		throw new Error("EACCES: permission denied, open 'tasks.json'");
+	});
+	setDeliveryTimingForTests(5, 80);
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5, isSessionIdle: () => false });
+		await waitFor(() => hungAlertDeliveryPendingForTests() === 1, 2000);
+		await waitFor(() => pi.messages.some((m) => m.text.includes("appears hung")), 2000);
+
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			1,
+			"an unreadable state file NEVER swallows the alert at cap expiry (fail-open)",
+		);
+	} finally {
+		stopWatchdog(runId);
+		setDeliveryTimingForTests();
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});

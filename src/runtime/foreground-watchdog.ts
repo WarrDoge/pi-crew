@@ -154,6 +154,12 @@ let reverifyLoader: ReverifyLoader = loadRunManifestById;
  * blocked) or all tasks terminal ⇒ DROP (debug-logged once per runId, no
  * user-facing noise). FAIL-OPEN: an unreadable/absent record still delivers —
  * a broken state file must never swallow a genuine hung alert.
+ *
+ * BOTH exits re-verify: the idle boundary AND the delivery cap. A session that
+ * never idles (one tool call blocking past the cap) is not a license to hand
+ * over a stale alert — the cap exit runs the same classify/verify, so an
+ * unverified delivery is impossible. "Late beats never" only applies to alerts
+ * whose run still reads as hung.
  */
 const DEFAULT_DELIVER_RETRY_MS = 500;
 const DEFAULT_DELIVER_CAP_MS = 10 * 60_000; // 10 min
@@ -287,6 +293,11 @@ function attemptHungAlertDelivery(pi: ExtensionAPI, cwd: string, runId: string, 
 		return;
 	}
 
+	// Fallthrough covers BOTH exits: the idle boundary and the cap expiry
+	// (`Date.now() >= entry.deadline`, session still streaming), plus any forced
+	// flush from the map cap. No exit skips the re-verify — an alert that got
+	// old is not evidence the run is still hung, so the same drop conditions
+	// apply here and the debug log names the reason it was dropped.
 	const verdict = classifyAtDelivery(cwd, runId);
 	pendingHungDeliveries.delete(runId);
 	if (verdict.kind === "dropped") {
