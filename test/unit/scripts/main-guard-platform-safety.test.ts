@@ -68,13 +68,23 @@ function shippedScripts(): string[] {
 	return files.sort();
 }
 
+/**
+ * Repo-relative label with POSIX separators. `path.relative` yields `scripts\\x.mjs`
+ * on win32 — comparing raw separators against a literal is exactly the
+ * platform-footgun this whole file exists to prevent (my own first version
+ * failed on the Windows runner for that reason).
+ */
+function relLabel(abs: string): string {
+	return path.relative(REPO_ROOT, abs).split(path.sep).join("/");
+}
+
 /** Offending `file:line` strings for one script (empty ⇒ clean). */
 function antipatternHits(file: string): string[] {
 	const hits: string[] = [];
 	const lines = fs.readFileSync(file, "utf8").split("\n");
 	lines.forEach((line, idx) => {
 		for (const { name, re, hint } of ANTIPATTERNS) {
-			if (re.test(line)) hits.push(`${path.relative(REPO_ROOT, file)}:${idx + 1}  [${name}] ${hint}  →  ${line.trim()}`);
+			if (re.test(line)) hits.push(`${relLabel(file)}:${idx + 1}  [${name}] ${hint}  →  ${line.trim()}`);
 		}
 	});
 	return hits;
@@ -88,8 +98,8 @@ describe("main-guard platform safety (win32 silent no-op class)", () => {
 		assert.ok(files.length >= 20, `expected ≥20 shipped scripts, walked ${files.length}: ${files.slice(0, 5).join(", ")}`);
 		for (const must of ["scripts/analyze-run.mjs", "scripts/check-slop-rules.mjs", "scripts/gh-pr-comment.mjs", "install.mjs"]) {
 			assert.ok(
-				files.some((f) => path.relative(REPO_ROOT, f) === must),
-				`walker missed ${must} (walked: ${files.map((f) => path.relative(REPO_ROOT, f)).join(", ")})`,
+				files.some((f) => relLabel(f) === must),
+				`walker missed ${must} (walked: ${files.map(relLabel).join(", ")})`,
 			);
 		}
 	});
