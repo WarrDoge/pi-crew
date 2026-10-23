@@ -1,0 +1,37 @@
+# Ship-gate battery — dist `3ab938dd` (WD-DEDUP + WD-STALE-RECORD + WD-DELIVER-GUARD)
+
+Repo `3ab938dd`, `dist/index.mjs` 1,868,816 B md5 `96550fb1e2fbc87b6d30f1eeb9ea39ac`. Executor worker run `team_20261023065728_67cbeae51bc6eea2`, scratch `/tmp/rtb1023b/*` (no `pi-crew-*` names), exit codes via log files, ambient `PI_CREW_*`/`PI_TEAMS_*` scrubbed on every `pi -p`.
+
+## Tier → recipe → evidence → verdict
+
+| Tier | Recipe | Evidence | Verdict |
+|---|---|---|---|
+| **T1** critical | `npm run test:critical` (log-file exit) | `# tests 124 # pass 124 # fail 0`, 12.6s, `EXIT=0` (`logs/t1-critical.log`) | **PASS** |
+| **T3** typecheck | `npm run typecheck` | `TYPECHECK_EXIT=0`, "strip-types import ok" | **PASS** |
+| **T3+T11j** bundle | `node scripts/check-bundle-staleness.mjs --committed-hash` | `OK: committed dist matches a fresh build` — `sha256(committed)=a5509cd163621fe8… vs fresh=a5509cd163621fe8…`, 1,868,816 B both sides, exit 0 | **PASS** (MATCH) |
+| **T7a** team tool | `pi -ne -e dist/index.mjs -p` → `create`/`list`/`get`/`health`/`search`/`doctor` | `LIST1: 6 teams, 10 workflows` · `CREATE: Created team 'wd-probe-team' at …/wd-probe-team.team.md` · `GET: Team: wd-probe-team (user)` · `LIST2: yes` · `HEALTH: 12 runs scanned` · `SEARCH: wd-probe-team score=6.39` · `DOCTOR: read-only, 6 zombies, 0 killed` · `BATTERY-T7A-T9A: PASS`, `EXIT=0` | **PASS** |
+| **T7b** smoke run | fast-fix sync in a scratch **git** dir | run `team_20261023071038_938091bc71c20d30`: `completed` **3/3** (01_explore/02_execute/03_verify), `consistency=1`, 176s; verifier verdict **PASS** with its own evidence (`test -f hello.txt && grep -q WD-PROBE-OK hello.txt` exit 0, `od -c` → exactly 1 line) — no `npm test` detour, no timeout | **PASS** |
+| **T9b** async | `run async=true` fast-fix | run `team_20261023071448_e3711aa643b09487`: `async.spawned {"pid":2708953,"logPath":…}` (pid ≠ leader pi), `async.started`, `async.completed {status:completed,tasks:3}`; **`"inline":true` occurrences in events.jsonl = 0** → runner DETACHED | **PASS** |
+| **T9c** lifecycle | `status details=true` mid-run → `cancel force=true` → `status` | long async run `team_20261023072642_e8c3a5fb11d59dcb`: `DETAILS: failed tasks=01_explore:completed,02_execute:queued,03_verify:queued agents=2` → `CANCEL: Cancelled run …` → `AFTER: cancelled`; manifest `cancelled`, tasks `01_explore=completed, 02_execute/03_verify=cancelled` | **PASS** |
+| **T9e** parallel | `parallel tasks=[executor,executor]` | 2 runs `…071457_ad519b7dbfff9bcc` + `…071457_239603a70e61f171`, both `completed`, `par-one.txt`/`par-two.txt` present, `BATTERY-T9E: PASS` | **PASS** |
+| **T5** tmux TUI | tmux 160x50 `-ne -e dist`, `/team-help`, `\x1bOA`, Esc+C-c | `/team-help` rendered the pi-crew command card (Core/Inspection lists) inside a live session whose dock painted `┃ ⠙ CREW ▸ fast-fix · 1 running ···· ↓·enter`; pane pid alive (`Ssl+`) after Esc/C-c; `~/.pi/agent/crashes.json` **1 entry before and after** (baseline, no new) | **PASS** |
+| **T6** pty probe | `scripts/pty_probe.py --startup-sleep 30` | `PTY_EXIT=0`, full TUI frames (skills/extensions/statusbar) captured, no zombie, crashes.json unchanged | **PASS** |
+| **T13** render | harness `/tmp/rtb1023b/full-ui.ts` from real run `…071038_938091bc71c20d30` (11 sections: CALL/STREAMING/COLLAPSED/EXPANDED@118+80/DOCK done/running/failed/done@50/PLAN/SIDEBAR) | sweeps **0** `undefined`, **0** retired frame `[╭╮╰╯├┤]`, **0** `->`, **0** plural errors, **0** wire-format (`input=/cacheRead=/cost=`); python `BAD: none`; hint `↓·enter` alive @50; sidebar `71c20d30 · completed · single`; no `fast-fix/fast-fix`; durations uniform (`2m54s/51.8s`) | **PASS** |
+| **WD** drop (new dist) | tmux interactive session, `PI_CREW_WATCHDOG_INTERVAL_MS=10000`, `PI_CREW_DEBUG=1`, `-e dist 3ab938dd`; real foreground run frozen (SIGSTOP worker, `ps stat=T`) so record+agent liveness age past the 2-min/5-min thresholds → run finalized mid-turn → turn ends | run `team_20261023075812_69bbd79a237520aa`: debug `[foreground-watchdog] hung alert for … already pending delivery — not stacking another` (alert **was** queued), run then `cancelled` **before** the idle boundary, session jsonl: **`appears hung` = 0**, while the watchdog's terminal notice *did* arrive (`user: pi-crew run cancelled: team_…75812_…`) proving the watchdog was live in that session | **PASS** (0 stale alerts) |
+| **WD** control (genuine hang) | same freeze, worker never resumed, leader tool call blocks | run `team_20261023081824_8059b22bc1b9c699`: debug `hung alert … already pending delivery` → alert **held**, never swallowed; delivery needs an idle boundary, but the model dropped `timeoutMs` from the tool args (verified in session jsonl: `{action,async,goal,team,workflow}` only) → default 1-hour watch keeps the turn streaming for the whole probe window | **PARTIAL** — queue/hold stage proven live, delivered-message assertion not reachable in-window |
+| **WD** pre-guard A/B | same drop scenario on `cf7a6635` dist (worktree, md5 `ae7edd86…`) | run `team_20261023075814_f7341ea96300d150`: `appears hung` = 0 — the parent wrote the record at 08:00:50, so detection never armed before my cancel | **INCONCLUSIVE** (counterfactual not reproduced) |
+| **WD** unit pin | `--test test/unit/runtime/core/foreground-watchdog.test.ts` | `# tests 20 # pass 20 # fail 0`, `UNIT_EXIT=0` (suite grew +543 lines with these commits) | **PASS** |
+
+## Flakes / deviations (not regressions)
+
+- **Provider-side `pi -p` hangs ×2** (T9c first attempt stalled ≥5 min with 0 output; a second dispatch was killed by my 300s cap): runs kept executing server-side and both were recovered with a follow-up session — the documented `glm-5.3` 0-output quirk. Load 1.0–1.5 in both cases (not starvation).
+- **Orphan reaper vs watchdog race (new observation)**: a genuinely hung **foreground** run is cancelled by the product's own reaper — `run.cancelled "Orphaned run: no async worker and no manifest update in over 5 minutes"` (`wd-b3`, 5m45s) — i.e. the reaper and the watchdog's 5-minute liveness floor fire at nearly the same instant. The watchdog wins only when the *agent* record ages before the *manifest* does (exactly `wd-c3`).
+- **`create resource=team` still lands in USER scope** although cwd is a marked scratch project (same deviation as the 2026-10-23 battery); probe's team file removed.
+
+## Residual (code-read, not fixed here)
+
+`attemptHungAlertDelivery` hands a still-pending alert to the host when the 10-minute `deliverCapMs` elapses even while the session streams (`src/runtime/foreground-watchdog.ts:283-300`: the deadline branch falls through to `pi.sendUserMessage` even when `sessionLooksIdle` is false) — the queued message is then unretractable, so the "finished run nags later" class survives in the narrow case of a hung foreground run whose tool call blocks >10 min. Deliberate "late beats never" tradeoff; flag for the leader.
+
+## Verdict
+
+**PASS** for every assigned tier on dist `3ab938dd`: T1 (124/124 exit 0), T3+T11j (MATCH), T7a, T7b (3/3 + real verifier verdict), T9b (no `inline:true`), T9c, T9e, T5, T6, T13 (all sweeps 0), **WD drop: 0 stale "appears hung" for a run finalized mid-turn with the alert provably queued**, WD unit pin 20/20. Two WD sub-assertions are open and reported honestly (control delivered-message **PARTIAL**, pre-guard A/B **INCONCLUSIVE**) — neither shows a product regression. 0 leftover processes/runs; scratch removed.
