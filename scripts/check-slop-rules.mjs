@@ -36,6 +36,8 @@
 
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** @returns {string[]} tracked .ts files under `dir` (git ls-files) */
 function listTsFiles(dir) {
@@ -191,6 +193,33 @@ function main() {
 	console.log(`check-slop-rules: clean (${files.length} files scanned, 3 rules; ${warns.length} warn-only baseline)`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+/**
+ * ENTRY-POINT GUARD (W10 Windows-safety fix, v0.11.38 — caught by the CI
+ * matrix, not by review): the original guard compared `import.meta.url`
+ * against a hand-built URL string made by prefixing "file://" onto
+ * `process.argv[1]`. That is true on POSIX (/a/b/scripts/x.mjs) and NEVER true
+ * on Windows (D:\a\b\scripts\x.mjs), so `main()` never ran there: exit 0,
+ * EMPTY stdout — i.e. the `check:slop-rules` step of `npm run ci` was a SILENT
+ * no-op on Windows while still reporting success (a false-green gate), and the
+ * CLI e2e pin failed.
+ *
+ * pathToFileURL() normalizes argv[1] into the same URL shape import.meta.url
+ * uses on every platform (precedent: scripts/analyze-run.mjs). realpath on
+ * both sides (precedent: scripts/test-runner.mjs) keeps a symlinked invocation
+ * — e.g. an npm bin shim — from silently no-opping the gate as well.
+ */
+const isEntryPoint = (() => {
+	if (!process.argv[1]) return false;
+	const self = fileURLToPath(import.meta.url);
+	try {
+		return fs.realpathSync(process.argv[1]) === fs.realpathSync(self);
+	} catch {
+		// realpathSync fails only on a vanished/oddly-shaped path — fall back to
+		// a lexical compare so the gate can NEVER silently become a no-op.
+		return pathToFileURL(process.argv[1]).href === import.meta.url || path.resolve(process.argv[1]) === path.resolve(self);
+	}
+})();
+
+if (isEntryPoint) {
 	main();
 }

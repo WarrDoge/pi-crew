@@ -35,8 +35,27 @@ function makeRepo(): string {
 	return dir;
 }
 
-const echo = (json: string) =>
-	process.platform === "win32" ? `node -e "process.stdout.write(${JSON.stringify(json)})"` : `printf '%s' ${JSON.stringify(json)}`;
+/**
+ * Platform-safe "print this exact payload to stdout" fixture.
+ *
+ * W10 Windows-safety fix (v0.11.38, caught by the CI matrix): the old helper
+ * branched per platform and on win32 emitted
+ *   node -e "process.stdout.write({"passed":true,"count":3})"
+ * which was broken TWICE over: (a) nested double quotes, and (b) `node -e` is
+ * REJECTED by validateGateCommand — interpreter eval/print mode is not in the
+ * gate allowlist (verification-gates.ts NODE_EVAL_MODE_PATTERN). The command
+ * never executed, so on Windows every typed check saw empty stdout and came
+ * back FAILED (5 tests red).
+ *
+ * One form now works everywhere without any quoting gymnastics: the gate
+ * executor ALWAYS runs `sh -c <cmd>` (verification-gates.ts executeCommand),
+ * on every OS, so a single POSIX form is correct — `printf` is allowlisted and
+ * the payload is passed as an ARGUMENT (`'%s'`), never as the format string,
+ * so `%`/backslash content stays literal. JSON.stringify gives one
+ * double-quoted shell word (inner `"` are escapes sh keeps literal), i.e. no
+ * per-platform string building at all.
+ */
+const echo = (payload: string) => `printf '%s' ${JSON.stringify(payload)}`;
 
 describe("W10-9 typed JSON gates", () => {
 	it("(1) valid JSON + schema → PASS with structuredOutput", async () => {

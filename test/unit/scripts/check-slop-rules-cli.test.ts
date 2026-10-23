@@ -27,11 +27,17 @@ describe("check-slop-rules CLI e2e (real repo)", () => {
 	it("spawns the real CLI: exit 0, reports clean, scanned >0 files", { timeout: 65_000 }, async () => {
 		// execFileAsync REJECTS on any non-zero exit, so resolving is the
 		// exit-0 assertion; the 60s kill is the harness-level ceiling.
-		const { stdout } = await execFileAsync("node", ["scripts/check-slop-rules.mjs"], {
+		// process.execPath (not the bare `node` string) keeps the spawn
+		// platform-safe: no PATH/`node.exe` resolution difference on win32.
+		const { stdout } = await execFileAsync(process.execPath, ["scripts/check-slop-rules.mjs"], {
 			cwd: REPO_ROOT,
 			timeout: 60_000,
 			maxBuffer: 16 * 1024 * 1024, // 1744-file warn list is ~100KB today
 		});
+		// NOT-A-NO-OP assertion (W10 Windows regression): an entry-point guard
+		// that silently misses on some platform exits 0 with EMPTY stdout — the
+		// exact false green CI caught. Empty output must fail loudly here.
+		assert.ok(stdout.trim().length > 0, "CLI must not be a silent no-op (empty stdout) — main() did not run");
 		const match = CLEAN_LINE.exec(stdout);
 		assert.ok(match, `stdout must contain the clean summary line, got tail: ${stdout.slice(-400)}`);
 		const scanned = Number(match[1]);

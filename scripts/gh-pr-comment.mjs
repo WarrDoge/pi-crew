@@ -20,6 +20,7 @@
  * Bearer-looking string defensively.
  */
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 export const COMMENT_MARKER = "<!-- pi-crew-report -->";
 
@@ -102,7 +103,13 @@ export async function postPrComment({ spec, token, repository, fetchImpl = fetch
 	}
 }
 
-const isEntryPoint = process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop() ?? "");
+// ENTRY-POINT GUARD (W10 Windows-safety fix, v0.11.38): the previous
+// `import.meta.url.endsWith(argv[1].split("/").pop())` compared against the
+// basename of a path that uses `\` on win32 — no "/" to split, so the whole
+// `D:\a\…\gh-pr-comment.mjs` never matched the URL and the CLI became a silent
+// no-op there. Same bug class as scripts/check-slop-rules.mjs; both now route
+// argv[1] through pathToFileURL (precedent: scripts/analyze-run.mjs).
+const isEntryPoint = Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isEntryPoint) {
 	const spec = parseArgs(process.argv.slice(2));
 	if (spec.error) {
