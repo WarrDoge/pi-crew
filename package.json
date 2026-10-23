@@ -118,7 +118,7 @@
 		"smoke:pi": "pi install .",
 		"smoke:release": "node scripts/release-smoke.mjs",
 		"prepack": "node scripts/clean-strip-types.mjs",
-		"prepublishOnly": "npm run ci",
+		"prepublishOnly": "node scripts/prepublish-ci.mjs",
 		"test:fast": "npm run test:critical && npm run test:bundle",
 		"check:wc-gate": "node scripts/wc-gate.mjs"
 	},

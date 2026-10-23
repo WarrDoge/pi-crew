@@ -25,7 +25,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { withFileLockAsync } from "../../src/state/coordination/locks.ts";
 import {
 	appendMailboxMessage,
@@ -179,7 +179,10 @@ async function runWorker(
 	let lastErr: Error | undefined;
 	for (let attempt = 0; attempt < 3; attempt++) {
 		try {
-			return await spawnWorker(process.execPath, [`--import`, `file://${TSX_LOADER}`, ...argList], spawnOpts, timeoutMs);
+			// pathToFileURL, not a hand-built URL made by prefixing the file scheme
+			// onto the path — that form is only valid on POSIX (a win32 `C:\…` path
+			// becomes a broken URL).
+			return await spawnWorker(process.execPath, [`--import`, pathToFileURL(TSX_LOADER).href, ...argList], spawnOpts, timeoutMs);
 		} catch (err) {
 			lastErr = err as Error;
 			// Retry only on module-resolution errors (tsx startup race)
