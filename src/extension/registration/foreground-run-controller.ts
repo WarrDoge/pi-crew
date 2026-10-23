@@ -84,6 +84,25 @@ async function openLiveSidebarImpl(
  * clearing, status notification, run-completed session entry, and crew.run.*
  * event emission.
  */
+/**
+ * WD-DELIVER-GUARD idle probe: true when the leader's own turn is idle — i.e.
+ * the moment `pi.sendUserMessage({deliverAs:"followUp"})` is DELIVERED instead
+ * of parked in the host's follow-up queue. Capability-guarded: an older host
+ * without `ctx.isIdle` (or no ctx yet) reports idle, which keeps the emit path
+ * bit-for-bit with the pre-guard behavior (fail-open — never swallow an alert).
+ */
+function sessionIdleProbe(ctx: RegistrationContext): () => boolean {
+	return () => {
+		const current = ctx.currentCtx;
+		if (!current || typeof current.isIdle !== "function") return true;
+		try {
+			return current.isIdle() !== false;
+		} catch {
+			return true;
+		}
+	};
+}
+
 function startForegroundRunImpl(
 	pi: ExtensionAPI,
 	ctx: RegistrationContext,
@@ -112,9 +131,10 @@ function startForegroundRunImpl(
 		extensionCtx.ui.setWorkingMessage(runId ? `pi-crew foreground run ${runId}...` : "pi-crew foreground run...");
 	}
 	if (runId) {
+		const isSessionIdle = sessionIdleProbe(ctx);
 		void import("../../runtime/foreground-watchdog.ts") // LAZY: defer watchdog module until first foreground run
 			.then(({ startForegroundWatchdog }) => {
-				startForegroundWatchdog({ pi, cwd: extensionCtx.cwd, runId });
+				startForegroundWatchdog({ pi, cwd: extensionCtx.cwd, runId, isSessionIdle });
 			})
 			.catch((error) => {
 				logInternalError("register.foreground-watchdog-import", error);

@@ -10,6 +10,11 @@
  * 2. Injects a followUp message via pi.sendUserMessage() so the assistant
  *    is automatically notified — no manual sleep+check needed.
  * 3. Cleans up after itself when the run completes or the session ends.
+ *
+ * Hung alerts are additionally DELIVERY-gated (WD-DELIVER-GUARD): the message
+ * is only handed to the host when the host will deliver it immediately, and
+ * the run state is re-read at that instant — an alert whose run finished in
+ * the meantime is dropped instead of nagging the user minutes late.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCrewEnv, getCrewEnvInt } from "../config/env-vars.ts";
@@ -30,6 +35,15 @@ export interface WatchdogOptions {
 	checkIntervalMs?: number;
 	/** Maximum time to monitor in ms. Default: 2 hours. */
 	maxMonitorMs?: number;
+	/**
+	 * WD-DELIVER-GUARD (2026-10-23): capability-guarded probe for "the host will
+	 * deliver a followUp message NOW" (`ctx.isIdle()`). When it reports false,
+	 * a hung alert is held in this module's pending map and retried at the idle
+	 * boundary instead of being handed to the host's unretractable followUp
+	 * queue (where it can land minutes later, for a run that already finished).
+	 * Absent / throwing → treated as idle (pre-guard behavior, fail-open).
+	 */
+	isSessionIdle?: () => boolean | undefined;
 }
 
 const DEFAULT_CHECK_INTERVAL_MS = 300_000; // 5 minutes
@@ -55,6 +69,11 @@ interface HungAlertRecord {
 	 * terminal) — skipped hung alert" notice has already been emitted.
 	 */
 	staleNoticeSent?: boolean;
+	/**
+	 * WD-DELIVER-GUARD (2026-10-23): the one-time "drop hung alert at delivery"
+	 * debug log has already been emitted for this runId.
+	 */
+	droppedAtDeliveryLogged?: boolean;
 }
 const HUNG_ALERT_RECORDS_CAP = 256;
 const hungAlertRecords = new Map<string, HungAlertRecord>();
@@ -116,10 +135,60 @@ function resolveCheckIntervalMs(overrideMs: number | undefined): number {
 type ReverifyLoader = typeof loadRunManifestById;
 let reverifyLoader: ReverifyLoader = loadRunManifestById;
 
-/** @internal Test seam — reset module-level hung-alert dedup state. */
+/**
+ * WD-DELIVER-GUARD (2026-10-23) — the residual the emit-time gate cannot see.
+ *
+ * Real incident (run team_20261023050900): the alert was EMITTED while the run
+ * was still running (so emit-time re-verify was correct), then
+ * `pi.sendUserMessage(..., {deliverAs:"followUp"})` pushed it into the host's
+ * follow-up queue while the session was streaming (`agent-session.js`:
+ * `if (this.isStreaming) this.agent.followUp(appMessage)`) and the host
+ * DELIVERED it 28 minutes later — after `run.completed` had landed. The user
+ * still saw "appears hung" for a finished run. `clearQueue()` is all-or-
+ * nothing, so a queued item cannot be retracted: the only fix is to not hand
+ * it over until delivery is imminent.
+ *
+ * Mechanism: while the session is streaming, the alert stays in OUR pending
+ * map; at the idle boundary (the moment the host delivers immediately) the run
+ * state is re-read one final time. Run terminal (completed/failed/cancelled/
+ * blocked) or all tasks terminal ⇒ DROP (debug-logged once per runId, no
+ * user-facing noise). FAIL-OPEN: an unreadable/absent record still delivers —
+ * a broken state file must never swallow a genuine hung alert.
+ */
+const DEFAULT_DELIVER_RETRY_MS = 500;
+const DEFAULT_DELIVER_CAP_MS = 10 * 60_000; // 10 min
+/** Defensive bound — a burst of distinct hung runs must not grow the map. */
+const HUNG_DELIVERY_CAP = 256;
+
+interface PendingHungDelivery {
+	/** Full alert text, handed over verbatim at the idle boundary. */
+	text: string;
+	/** Past this instant the alert is handed over anyway (late beats never). */
+	deadline: number;
+	/** Idle probe captured at queue time (see WatchdogOptions.isSessionIdle). */
+	isSessionIdle?: () => boolean | undefined;
+	timer?: ReturnType<typeof setTimeout>;
+}
+
+/** Hung alerts queued but not yet handed to the host, keyed by runId. */
+const pendingHungDeliveries = new Map<string, PendingHungDelivery>();
+
+let deliverRetryMs = DEFAULT_DELIVER_RETRY_MS;
+let deliverCapMs = DEFAULT_DELIVER_CAP_MS;
+/** Delivery-time state loader (separate seam from the emit-time re-verify). */
+let deliveryLoader: ReverifyLoader = loadRunManifestById;
+
+/** @internal Test seam — reset module-level hung-alert dedup + delivery state. */
 export function resetHungAlertDedupForTests(): void {
 	hungAlertRecords.clear();
+	for (const entry of pendingHungDeliveries.values()) {
+		if (entry.timer !== undefined) clearTimeout(entry.timer);
+	}
+	pendingHungDeliveries.clear();
 	reverifyLoader = loadRunManifestById;
+	deliveryLoader = loadRunManifestById;
+	deliverRetryMs = DEFAULT_DELIVER_RETRY_MS;
+	deliverCapMs = DEFAULT_DELIVER_CAP_MS;
 }
 
 /** @internal Test seam — snapshot of the dedup map size (cap/leak assertions). */
@@ -137,6 +206,137 @@ export function setReverifyLoaderForTests(loader: ReverifyLoader | null): void {
 	reverifyLoader = loader ?? loadRunManifestById;
 }
 
+/** @internal Test seam — replace the DELIVERY-time state loader (null = real). */
+export function setDeliveryLoaderForTests(loader: ReverifyLoader | null): void {
+	deliveryLoader = loader ?? loadRunManifestById;
+}
+
+/** @internal Test seam — shrink the idle-gate retry/cap timings. */
+export function setDeliveryTimingForTests(retryMs?: number, capMs?: number): void {
+	deliverRetryMs = typeof retryMs === "number" && retryMs > 0 ? retryMs : DEFAULT_DELIVER_RETRY_MS;
+	deliverCapMs = typeof capMs === "number" && capMs > 0 ? capMs : DEFAULT_DELIVER_CAP_MS;
+}
+
+/** @internal Test seam — hung alerts queued but not yet handed to the host. */
+export function hungAlertDeliveryPendingForTests(): number {
+	return pendingHungDeliveries.size;
+}
+
+/**
+ * Delivery-time verdict for a queued hung alert. `hung` = hand it to the host;
+ * `dropped` = the run is provably no longer hung, stay silent.
+ */
+type DeliveryVerdict = { kind: "hung" } | { kind: "dropped"; reason: string };
+
+/**
+ * Read the run state at handoff time. This is the WD-DELIVER-GUARD decision
+ * point: it runs immediately before `pi.sendUserMessage`, i.e. at the moment
+ * the host will actually deliver the message (session idle).
+ *
+ * Drop conditions (the exact user-visible pain):
+ *   • manifest status terminal (completed/failed/cancelled/blocked), or
+ *   • manifest still active BUT every task is terminal (stale record — the
+ *     finalize/worker write is merely behind).
+ * FAIL-OPEN: a loader that throws, or a vanished manifest, yields `hung` — an
+ * unreadable record must never swallow a genuine alert.
+ */
+function classifyAtDelivery(cwd: string, runId: string): DeliveryVerdict {
+	let loaded: Awaited<ReturnType<ReverifyLoader>>;
+	try {
+		loaded = deliveryLoader(cwd, runId);
+	} catch {
+		return { kind: "hung" }; // unreadable state → fail-open
+	}
+	if (!loaded) return { kind: "hung" }; // indeterminate → fail-open
+	if (!isActiveRunStatus(loaded.manifest.status)) {
+		return { kind: "dropped", reason: `status=${loaded.manifest.status}` };
+	}
+	if (areAllTasksTerminal(loaded.tasks)) {
+		return { kind: "dropped", reason: `all ${loaded.tasks.length} task(s) terminal (manifest ${loaded.manifest.status})` };
+	}
+	return { kind: "hung" };
+}
+
+/** True when the host would deliver a followUp message right now. */
+function sessionLooksIdle(probe: (() => boolean | undefined) | undefined): boolean {
+	if (typeof probe !== "function") return true; // no capability → pre-guard behavior
+	try {
+		return probe() !== false;
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * Try to hand one pending hung alert to the host. Re-arms itself while the
+ * session is streaming (the host would queue instead of deliver) and, at the
+ * idle boundary or past the cap, re-reads the run state ONCE and either drops
+ * or delivers.
+ */
+function attemptHungAlertDelivery(pi: ExtensionAPI, cwd: string, runId: string, force: boolean): void {
+	const entry = pendingHungDeliveries.get(runId);
+	if (!entry) return;
+	if (entry.timer !== undefined) {
+		clearTimeout(entry.timer);
+		entry.timer = undefined;
+	}
+	if (!force && !sessionLooksIdle(entry.isSessionIdle) && Date.now() < entry.deadline) {
+		const timer = setTimeout(() => attemptHungAlertDelivery(pi, cwd, runId, false), deliverRetryMs);
+		timer.unref();
+		entry.timer = timer;
+		return;
+	}
+
+	const verdict = classifyAtDelivery(cwd, runId);
+	pendingHungDeliveries.delete(runId);
+	if (verdict.kind === "dropped") {
+		if (!hungAlertRecords.get(runId)?.droppedAtDeliveryLogged) {
+			updateHungAlertRecord(runId, { droppedAtDeliveryLogged: true });
+			debugLog(`[foreground-watchdog] drop hung alert for ${runId} at delivery: run is no longer hung (${verdict.reason})`);
+		}
+		return;
+	}
+	try {
+		pi.sendUserMessage(entry.text, { deliverAs: "followUp" });
+	} catch {
+		/* non-critical */
+	}
+}
+
+/**
+ * Queue a hung alert for guarded delivery (WD-DELIVER-GUARD). One in flight
+ * per runId — a second notice for the same run while the first is still
+ * pending is dropped as redundant drip.
+ */
+function queueHungAlertDelivery(
+	pi: ExtensionAPI,
+	cwd: string,
+	runId: string,
+	text: string,
+	isSessionIdle: (() => boolean | undefined) | undefined,
+): void {
+	if (pendingHungDeliveries.has(runId)) {
+		debugLog(`[foreground-watchdog] hung alert for ${runId} already pending delivery — not stacking another`);
+		return;
+	}
+	pendingHungDeliveries.set(runId, { text, deadline: Date.now() + deliverCapMs, isSessionIdle });
+	if (pendingHungDeliveries.size > HUNG_DELIVERY_CAP) {
+		// Defensive: never let the map grow and never delay a real alert —
+		// flush the oldest pending alert immediately (verify-then-send).
+		const oldest = pendingHungDeliveries.keys().next().value;
+		if (oldest !== undefined) attemptHungAlertDelivery(pi, cwd, oldest, true);
+	}
+	attemptHungAlertDelivery(pi, cwd, runId, false);
+}
+
+/** Drop a still-pending (not yet handed-over) hung alert for a runId. */
+function cancelPendingHungDelivery(runId: string): void {
+	const entry = pendingHungDeliveries.get(runId);
+	if (!entry) return;
+	if (entry.timer !== undefined) clearTimeout(entry.timer);
+	pendingHungDeliveries.delete(runId);
+}
+
 /** Stop a specific watchdog by runId. */
 export function stopWatchdog(runId: string): void {
 	const timer = activeWatchdogs.get(runId);
@@ -144,6 +344,7 @@ export function stopWatchdog(runId: string): void {
 		clearTimeout(timer);
 		activeWatchdogs.delete(runId);
 	}
+	cancelPendingHungDelivery(runId);
 }
 
 /** @internal Stop all active watchdogs. Called on session shutdown (RC-01). */
@@ -152,6 +353,10 @@ export function stopAllWatchdogs(): void {
 		clearTimeout(timer);
 	}
 	activeWatchdogs.clear();
+	for (const entry of pendingHungDeliveries.values()) {
+		if (entry.timer !== undefined) clearTimeout(entry.timer);
+	}
+	pendingHungDeliveries.clear();
 }
 
 /**
@@ -262,17 +467,28 @@ export function startForegroundWatchdog(opts: WatchdogOptions): void {
 							// WD-DEDUP: alert-once per runId at module scope — even a
 							// fresh watchdog instance must not re-alert the same run.
 							if (!hungAlertAlreadySent(runId)) {
-								pi.sendUserMessage(
-									`pi-crew watchdog: run ${runId} appears hung (${detail}). Consider running team action='cancel' runId='${runId}' or team action='doctor'.`,
-									{ deliverAs: "followUp" },
-								);
+								// Mark BEFORE queueing so a racing cycle cannot double-queue.
 								updateHungAlertRecord(runId, { alerted: true });
+								// WD-DELIVER-GUARD: the host queues a followUp while the
+								// session streams and delivers it arbitrarily later — so
+								// hand it over only at the idle boundary, re-verifying the
+								// run state at THAT moment.
+								queueHungAlertDelivery(
+									pi,
+									cwd,
+									runId,
+									`pi-crew watchdog: run ${runId} appears hung (${detail}). Consider running team action='cancel' runId='${runId}' or team action='doctor'.`,
+									opts.isSessionIdle,
+								);
 							}
 						} else if (consecutiveHungNotices === HUNG_NOTICE_CAP + 1) {
 							// One-time handoff, then silence — still monitoring, no more drips.
-							pi.sendUserMessage(
+							queueHungAlertDelivery(
+								pi,
+								cwd,
+								runId,
 								`pi-crew watchdog: run ${runId} is still hung after ${consecutiveHungNotices} checks — going quiet now. Intervene via team action='cancel' runId='${runId}', team action='doctor', or leave it; a completion notice will still fire.`,
-								{ deliverAs: "followUp" },
+								opts.isSessionIdle,
 							);
 						}
 					} catch {

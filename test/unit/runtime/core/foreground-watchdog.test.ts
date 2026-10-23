@@ -24,8 +24,11 @@ import { saveCrewAgents } from "../../../../src/runtime/crew-agent-records.ts";
 import type { CrewAgentRecord } from "../../../../src/runtime/crew-agent-runtime.ts";
 import {
 	hungAlertDedupSizeForTests,
+	hungAlertDeliveryPendingForTests,
 	markHungAlertForTests,
 	resetHungAlertDedupForTests,
+	setDeliveryLoaderForTests,
+	setDeliveryTimingForTests,
 	setReverifyLoaderForTests,
 	startForegroundWatchdog,
 	stopWatchdog,
@@ -543,6 +546,228 @@ test("WD-INTERVAL: PI_CREW_WATCHDOG_INTERVAL_MS drives the poll cadence when no 
 		stopWatchdog(runId);
 		if (previous === undefined) delete process.env.PI_CREW_WATCHDOG_INTERVAL_MS;
 		else process.env.PI_CREW_WATCHDOG_INTERVAL_MS = previous;
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+/**
+ * WD-DELIVER-GUARD (2026-10-23) — the residual the emit-time gate cannot see.
+ *
+ * Real incident (run team_20261023050900): the alert was EMITTED while the run
+ * was genuinely running, but `sendUserMessage({deliverAs:"followUp"})` parked
+ * it in the host's follow-up queue (session streaming) and the host DELIVERED
+ * it 28 minutes later — 19s after `run.completed`. Emit-time re-verify can
+ * never see that; the guard has to run at the DELIVERY moment. These tests
+ * drive the real watchdog with an `isSessionIdle` probe that stays false
+ * (session streaming) while the run finishes, then flips true (the host can
+ * deliver now) and asserts the alert is dropped.
+ */
+
+/** Capture PI_CREW_DEBUG output for drop-log assertions. */
+function captureDebugLogs(): { logs: string[]; restore: () => void } {
+	const previous = process.env.PI_CREW_DEBUG;
+	process.env.PI_CREW_DEBUG = "1";
+	const logs: string[] = [];
+	const original = console.log;
+	console.log = (...args: unknown[]) => {
+		logs.push(args.map((a) => String(a)).join(" "));
+	};
+	return {
+		logs,
+		restore: () => {
+			console.log = original;
+			if (previous === undefined) delete process.env.PI_CREW_DEBUG;
+			else process.env.PI_CREW_DEBUG = previous;
+		},
+	};
+}
+
+test("WD-DELIVER-GUARD: alert emitted while running is DROPPED when the run finishes before delivery", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	setDeliveryTimingForTests(5, 10_000);
+	const debug = captureDebugLogs();
+	let sessionIdle = false; // streaming: the host would QUEUE, not deliver
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5, isSessionIdle: () => sessionIdle });
+
+		// The watchdog emitted its hung alert (correct at emit time) while the
+		// session streamed → the alert is HELD, not handed to the host queue.
+		await waitFor(() => hungAlertDeliveryPendingForTests() === 1, 2000);
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			0,
+			"alert is held while the host would only queue it",
+		);
+
+		// Run finalizes (real state write) BEFORE delivery can happen.
+		saveRunManifest({ ...manifest, status: "completed", updatedAt: new Date().toISOString() });
+		sessionIdle = true; // host delivers NOW → the guard re-reads the run state
+
+		await waitFor(() => hungAlertDeliveryPendingForTests() === 0, 2000);
+		await sleep(60);
+
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			0,
+			"0 'appears hung' messages: the run was completed at delivery time",
+		);
+		assert.equal(
+			debug.logs.filter((l) => l.includes("drop hung alert") && l.includes(runId)).length,
+			1,
+			"exactly ONE debug log for the delivery-time drop",
+		);
+	} finally {
+		stopWatchdog(runId);
+		debug.restore();
+		setDeliveryTimingForTests();
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-DELIVER-GUARD: a run still hung at delivery time IS delivered (exactly one message)", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	setDeliveryTimingForTests(5, 10_000);
+	let sessionIdle = false;
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5, isSessionIdle: () => sessionIdle });
+		await waitFor(() => hungAlertDeliveryPendingForTests() === 1, 2000);
+		assert.equal(pi.messages.length, 0, "nothing handed over while streaming");
+
+		sessionIdle = true; // idle boundary: delivery moment, run is STILL hung
+		await waitFor(() => pi.messages.some((m) => m.text.includes("appears hung")), 2000);
+		await sleep(80);
+
+		const hung = pi.messages.filter((m) => m.text.includes("appears hung"));
+		assert.equal(hung.length, 1, "exactly one hung alert for a genuinely hung run");
+		assert.ok(hung[0].text.includes(runId), "names the runId");
+		assert.deepEqual(hung[0].options, { deliverAs: "followUp" }, "still delivered as followUp");
+		assert.equal(hungAlertDeliveryPendingForTests(), 0, "nothing left pending after the handover");
+	} finally {
+		stopWatchdog(runId);
+		setDeliveryTimingForTests();
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-DELIVER-GUARD: unreadable / indeterminate state at delivery FAILS OPEN (alert still delivered)", async () => {
+	// (a) loader throws — e.g. EACCES while reading tasks.json.
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	setDeliveryTimingForTests(5, 10_000);
+	let sessionIdle = false;
+	const pi = makePi();
+	try {
+		setDeliveryLoaderForTests(() => {
+			throw new Error("EACCES: permission denied, open 'tasks.json'");
+		});
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5, isSessionIdle: () => sessionIdle });
+		await waitFor(() => hungAlertDeliveryPendingForTests() === 1, 2000);
+		sessionIdle = true;
+		await waitFor(() => pi.messages.some((m) => m.text.includes("appears hung")), 2000);
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			1,
+			"an unreadable state file NEVER swallows the alert (fail-open)",
+		);
+	} finally {
+		stopWatchdog(runId);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+
+	// (b) manifest vanished between emit and delivery → indeterminate → deliver.
+	resetHungAlertDedupForTests();
+	const second = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(second.manifest, [queuedAgent(second.runId)]);
+	setDeliveryTimingForTests(5, 10_000);
+	let idle2 = false;
+	const pi2 = makePi();
+	try {
+		setDeliveryLoaderForTests(() => undefined as never);
+		startForegroundWatchdog({ pi: pi2 as never, cwd: second.cwd, runId: second.runId, checkIntervalMs: 5, isSessionIdle: () => idle2 });
+		await waitFor(() => hungAlertDeliveryPendingForTests() === 1, 2000);
+		idle2 = true;
+		await waitFor(() => pi2.messages.some((m) => m.text.includes("appears hung")), 2000);
+		assert.equal(
+			pi2.messages.filter((m) => m.text.includes("appears hung")).length,
+			1,
+			"a vanished manifest is indeterminate → alert delivered (fail-open)",
+		);
+	} finally {
+		stopWatchdog(second.runId);
+		setDeliveryTimingForTests();
+		resetHungAlertDedupForTests();
+		fs.rmSync(second.cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-DELIVER-GUARD: the drop happens once per runId — dedup + no drip across cycles", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	setDeliveryTimingForTests(5, 10_000);
+	const debug = captureDebugLogs();
+	let sessionIdle = false;
+	const pi = makePi();
+	try {
+		// Delivery-time read says terminal while the ON-DISK manifest stays hung,
+		// so the watchdog keeps cycling and re-evaluating the same runId.
+		setDeliveryLoaderForTests(() => ({ manifest: { ...manifest, status: "cancelled" }, tasks: [] }));
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5, isSessionIdle: () => sessionIdle });
+		await waitFor(() => hungAlertDeliveryPendingForTests() === 1, 2000);
+		sessionIdle = true;
+		await waitFor(() => hungAlertDeliveryPendingForTests() === 0, 2000);
+
+		// Many further hung cycles — dedup must suppress any re-queue.
+		await sleep(150);
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			0,
+			"no hung alert ever reaches the session for the dropped run",
+		);
+		assert.equal(hungAlertDeliveryPendingForTests(), 0, "nothing re-queued after the drop (dedup intact)");
+		assert.equal(
+			debug.logs.filter((l) => l.includes("drop hung alert") && l.includes(runId)).length,
+			1,
+			"the drop is logged once per runId, not per cycle",
+		);
+	} finally {
+		stopWatchdog(runId);
+		debug.restore();
+		setDeliveryTimingForTests();
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-DELIVER-GUARD: no idle probe (legacy caller) → verify-then-send, still guarded at handoff", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	const pi = makePi();
+	try {
+		// Emit-time re-verify says running (alert is emitted), delivery-time read
+		// says completed → the handoff guard drops it even without an idle probe.
+		setDeliveryLoaderForTests(() => ({ manifest: { ...manifest, status: "completed" }, tasks: [] }));
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await sleep(150);
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			0,
+			"handoff guard applies with no idle capability (pre-fix callers stay safe)",
+		);
+	} finally {
+		stopWatchdog(runId);
 		resetHungAlertDedupForTests();
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}
