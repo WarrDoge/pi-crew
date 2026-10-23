@@ -149,4 +149,30 @@ describe("W10-2 verify-gate memo (real git tree keys)", () => {
 		// Default ON per SPEC; resolver pattern mirrors resolveVerifyGateEnabled.
 		assert.equal(resolveVerifyGateMemoEnabled(), true);
 	});
+
+	it("(10) memo hit skips time-dependent checks BY DESIGN (W10-2 accepted tradeoff)", () => {
+		// A `date +%s` check returns a DIFFERENT value every second, yet the
+		// memo still serves the recorded PASS on an unchanged tree — the TREE,
+		// not wall-clock output, is the memo's boundary. Checks being skipped
+		// on a HIT is the intended time-saving behavior (documented KNOWN
+		// TRADEOFF in verify-gate-memo.ts), NOT a bug; PI_CREW_VERIFY_GATE_MEMO=0
+		// restores full re-runs. This pin exists so a future "fix" that makes
+		// time-dependent checks miss the memo must do it deliberately, in the
+		// open, by amending this test.
+		resetVerifyGateMemoStoreForTests();
+		const repo = makeRepo();
+		const timeChecks = [{ name: "epoch", command: "date +%s", critical: true }];
+		const epochOutcome = {
+			...greenOutcome(),
+			checks: timeChecks.map((c) => ({ ...c, exitCode: 0, passed: true, durationMs: 5, outputTail: "1760000000" })),
+			evidenceLines: ["epoch: exit=0 PASS"],
+		};
+		assert.equal(recordVerifyGateMemo(repo, timeChecks, epochOutcome), true);
+		const hit = lookupVerifyGateMemo(repo, timeChecks);
+		assert.ok(hit, "HIT on the unchanged tree even for a time-dependent command");
+		assert.ok(
+			hit.checks.every((c) => c.skipped),
+			"skipped checks on a HIT are the deliberate W10-2 tradeoff",
+		);
+	});
 });

@@ -189,11 +189,16 @@ export function reconcileUsage(
 	finalUsage: UsageState | undefined,
 ): { usageReconcile: NonNullable<TeamTaskState["usageReconcile"]> } | undefined {
 	if (!attempts || attempts.length < 2) return undefined;
+	// W10-7 batch-A threshold guard: with no final usage to reconcile AGAINST
+	// (finalUsage missing, or its cost not a finite number) the comparison is
+	// meaningless — an attempt-sum alone cannot prove a gap, and comparing to
+	// 0 would file a false 100%-gap alarm against missing data. No note.
+	if (typeof finalUsage?.cost !== "number" || !Number.isFinite(finalUsage.cost)) return undefined;
 	const costs = attempts.map((a) => (typeof a.usage?.cost === "number" && Number.isFinite(a.usage.cost) ? a.usage.cost : undefined));
 	const withUsage = costs.filter((c): c is number => c !== undefined);
 	if (withUsage.length < 2) return undefined;
 	const attemptTotal = withUsage.reduce((sum, c) => sum + c, 0);
-	const finalCost = typeof finalUsage?.cost === "number" && Number.isFinite(finalUsage.cost) ? finalUsage.cost : 0;
+	const finalCost = finalUsage.cost;
 	if (attemptTotal <= 0) return undefined;
 	const deltaPct = Math.abs(attemptTotal - finalCost) / attemptTotal;
 	if (deltaPct <= 0.05) return undefined;
@@ -205,6 +210,16 @@ export function reconcileUsage(
 			attemptsWithUsage: withUsage.length,
 		},
 	};
+}
+
+/**
+ * W10-8 visibility (batch A): the unexpectedMutation note lives on the task
+ * record where it is easy to miss — stamping it also emits ONE stderr line
+ * so a READ-ONLY lane violation shows up in the run log without new
+ * dependencies. Exported for the console-capture pin; fire-and-forget.
+ */
+export function warnReadLaneMutation(taskId: string, note: { filesChanged: number }): void {
+	console.warn(`[pi-crew:read-lane] unexpected mutation in READ-ONLY lane: ${taskId} files=${note.filesChanged}`);
 }
 
 /**
@@ -803,6 +818,9 @@ export async function finalizeTaskResult(ctx: TaskExecutionContext, execResult: 
 		exitCode = exitCode === 0 ? 1 : exitCode;
 	}
 
+	// W10-8 batch-A visibility: emit the one-line stderr event exactly when
+	// the note below is stamped (only on detection).
+	if (readLaneMutation) warnReadLaneMutation(task.id, readLaneMutation);
 	task = {
 		...task,
 		status: error ? "failed" : noYield ? "needs_attention" : "completed",

@@ -23,7 +23,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 
 import { permissionForRole } from "../../../../src/runtime/role-permission.ts";
-import { detectReadLaneMutation } from "../../../../src/runtime/task-runner/post-execution.ts";
+import { detectReadLaneMutation, warnReadLaneMutation } from "../../../../src/runtime/task-runner/post-execution.ts";
 
 function makeRepo(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "w108-"));
@@ -66,5 +66,20 @@ describe("W10-8 read-lane mutation guard", () => {
 	it("(5) probe is read_only-gated: explorer read-only, executor not", () => {
 		assert.equal(permissionForRole("explorer"), "read_only");
 		assert.notEqual(permissionForRole("executor"), "read_only");
+	});
+
+	it("(6) stamping the note emits exactly one stderr warn line (visibility pin)", () => {
+		const original = console.warn;
+		const lines: string[] = [];
+		console.warn = (...args: unknown[]) => {
+			lines.push(args.map(String).join(" "));
+		};
+		try {
+			warnReadLaneMutation("task-9", { filesChanged: 3 });
+		} finally {
+			console.warn = original;
+		}
+		assert.equal(lines.length, 1);
+		assert.equal(lines[0], "[pi-crew:read-lane] unexpected mutation in READ-ONLY lane: task-9 files=3");
 	});
 });

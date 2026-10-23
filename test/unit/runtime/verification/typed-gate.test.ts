@@ -96,4 +96,29 @@ describe("W10-9 typed JSON gates", () => {
 		assert.equal(validateJsonLite([1, 2], { type: "array", items: { type: "number" } }), undefined);
 		assert.match(validateJsonLite([1, "x"], { type: "array", items: { type: "number" } }) ?? "", /\[1\]/);
 	});
+
+	it("(7) W10-9 round-trip: deeply nested structuredOutput survives the JSON boundary (deepEqual identity)", async () => {
+		// A structuredOutput consumer downstream reads the parsed value, so
+		// nesting must round-trip the JSON.stringify/parse boundary intact —
+		// objects-in-arrays-in-objects, not just a flat top level.
+		const nested = { a: { b: [{ c: "x" }] } };
+		const roundTripped = JSON.parse(JSON.stringify(nested));
+		assert.deepEqual(roundTripped, nested); // pure boundary identity
+		const repo = makeRepo();
+		const res = await runVerifierGatePreGate({
+			cwd: repo,
+			checks: [
+				{
+					name: "deep",
+					command: echo(JSON.stringify(nested)),
+					critical: true,
+					output: "json" as const,
+					schema: { type: "object" },
+				},
+			],
+		});
+		assert.equal(res.outcome.verdict, "PASS");
+		assert.deepEqual(res.outcome.checks[0].structuredOutput, roundTripped);
+		assert.deepEqual(res.outcome.checks[0].structuredOutput, nested);
+	});
 });

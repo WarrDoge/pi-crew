@@ -8744,3 +8744,6 @@ the repo. Two genuine wins, plus an informational CI job that never blocks.
   pattern (`jiti` flagged unused but is used via runtime path-loading). A
   blocking gate would create an unpaid maintenance backlog unsuitable for a
   solo-maintained extension.
+
+### Hardening (W10 batch A)
+- `check-slop-rules` no-double-cast baseline ratchet (41, 2026-10-22 — burn down only) + real-CLI e2e pin; W10-7 reconcileUsage missing-finalUsage guard; W10-8 READ-ONLY lane mutation one-line stderr visibility; W10-9 structuredOutput JSON round-trip pin; W10-2 verify-gate memo time-dependent-skip intent pin.

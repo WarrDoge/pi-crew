@@ -61,4 +61,16 @@ describe("W10-7 reconcileUsage", () => {
 		const state: ModelAttemptState = { model: "m", success: true, usage: { cost: 1 } };
 		assert.equal(state.usage?.cost, 1);
 	});
+
+	it("(8) W10-7 threshold guard: finalUsage missing / non-finite cost → undefined (nothing to reconcile against)", () => {
+		// A missing final usage is missing DATA, not a 0-cost final run — the
+		// attempt-sum alone cannot prove a gap, so no note (a pre-batch-A build
+		// would have filed a false 100%-gap alarm with finalRunCostUsd=0).
+		const attempts = [attempt("m1", { cost: 1 }), attempt("m2", { cost: 2 })];
+		assert.equal(reconcileUsage(attempts, undefined), undefined);
+		assert.equal(reconcileUsage(attempts, { cost: Number.NaN }), undefined);
+		// Sanity: the SAME attempts WITH a finite final cost still reconcile
+		// (guard must not swallow the real signal — attempt sum 3 vs final 1).
+		assert.ok(reconcileUsage(attempts, { cost: 1 }));
+	});
 });

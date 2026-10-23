@@ -12,7 +12,10 @@
  *     unfreeze: when types don't line up, widen through unknown instead of
  *     fixing the type relationship. 41 pre-existing sites (baseline
  *     2026-10-22) — flipping to strict is its own cleanup task, exactly like
- *     pisub turned rules on as they cleaned the codebase.
+ *     pisub turned rules on as they cleaned the codebase. The warn count is
+ *     RATCHETED (see DOUBLE_CAST_BASELINE below): it may burn DOWN, never
+ *     creep UP — new double-casts fail the gate until the baseline is earned
+ *     down. This is the only ratcheted rule.
  *  B. no-json-parse-nonnull (STRICT, src+test) — `JSON.parse(...)` result
  *     immediately non-null-asserted. Parsing unknown text and asserting the
  *     RESULT is non-null is always wrong — the parse result can be null,
@@ -47,6 +50,14 @@ function listTsFiles(dir) {
 		.map((l) => l.trim())
 		.filter((l) => l.endsWith(".ts") && fs.existsSync(l));
 }
+
+/**
+ * Ratchet for the WARN-only no-double-cast rule — the ONLY ratcheted rule
+ * (2026-10-22 baseline). Count may go down (burn-down), never up: exceeding
+ * the baseline exits 1 so new double-casts cannot silently pile in. Lower
+ * the constant as sites are fixed — never raise it.
+ */
+const DOUBLE_CAST_BASELINE = 41; // 2026-10-22
 
 /** Intentional-fixture exclusions. Every entry MUST carry a reason. */
 const EXCLUDE = new Set([
@@ -161,11 +172,22 @@ function main() {
 		console.log(`⚠ check-slop-rules: ${warns.length} WARN (no-double-cast baseline burn-down — non-fatal):`);
 		for (const f of warns) console.log(`  ${f.file}:${f.line}  [${f.rule}]`);
 	}
+	// Ratchet (no-double-cast only — the sole non-strict rule): the warn count
+	// must never EXCEED the baseline. Burn-down is welcome; creep is a red.
+	const doubleCastCount = warns.filter((f) => f.rule === "no-double-cast").length;
+	if (doubleCastCount > DOUBLE_CAST_BASELINE) {
+		console.error(
+			`✖ check-slop-rules: no-double-cast ratchet EXCEEDED — baseline ${DOUBLE_CAST_BASELINE}, current ${doubleCastCount}. ` +
+				"Fix the new double-cast (or the type relationship) instead of raising the baseline; burn DOWN only.",
+		);
+		process.exit(1);
+	}
 	if (errors.length > 0) {
 		console.error(`✖ check-slop-rules: ${errors.length} finding(s) — add \`// slop-ok: <reason>\` ONLY with a real justification:`);
 		for (const f of errors) console.error(`  ${f.file}:${f.line}  [${f.rule}]  ${f.why}`);
 		process.exit(1);
 	}
+	console.log(`check-slop-rules: no-double-cast baseline ${DOUBLE_CAST_BASELINE}, current ${doubleCastCount} (burn-down ok)`);
 	console.log(`check-slop-rules: clean (${files.length} files scanned, 3 rules; ${warns.length} warn-only baseline)`);
 }
 
