@@ -12,8 +12,10 @@
  * 3. Cleans up after itself when the run completes or the session ends.
  */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getCrewEnv } from "../config/env-vars.ts";
+import { getCrewEnv, getCrewEnvInt } from "../config/env-vars.ts";
+import { TEAM_TERMINAL_TASK_STATUSES } from "../state/contracts.ts";
 import { loadRunManifestById } from "../state/stores/state-store.ts";
+import type { TeamTaskState } from "../state/types.ts";
 import { readCrewAgents } from "./crew-agent-records.ts";
 import { isActiveRunStatus, isLikelyOrphanedActiveRun } from "./process-status.ts";
 
@@ -21,7 +23,10 @@ export interface WatchdogOptions {
 	pi: ExtensionAPI;
 	cwd: string;
 	runId: string;
-	/** Check interval in ms. Default: 5 minutes. */
+	/**
+	 * Check interval in ms. Default: 5 minutes, or the
+	 * `PI_CREW_WATCHDOG_INTERVAL_MS` override when set (WD-INTERVAL).
+	 */
 	checkIntervalMs?: number;
 	/** Maximum time to monitor in ms. Default: 2 hours. */
 	maxMonitorMs?: number;
@@ -45,6 +50,11 @@ interface HungAlertRecord {
 	alerted: boolean;
 	/** The one-time re-verify-skip debug log has already been emitted. */
 	skipLogged: boolean;
+	/**
+	 * WD-STALE-RECORD (2026-10-23): the one-time "record stale (all tasks
+	 * terminal) — skipped hung alert" notice has already been emitted.
+	 */
+	staleNoticeSent?: boolean;
 }
 const HUNG_ALERT_RECORDS_CAP = 256;
 const hungAlertRecords = new Map<string, HungAlertRecord>();
@@ -59,13 +69,44 @@ function updateHungAlertRecord(runId: string, patch: Partial<HungAlertRecord>): 
 		const oldest = hungAlertRecords.keys().next().value;
 		if (oldest !== undefined) hungAlertRecords.delete(oldest);
 	}
-	const prev = hungAlertRecords.get(runId) ?? { alerted: false, skipLogged: false };
+	const prev = hungAlertRecords.get(runId) ?? { alerted: false, skipLogged: false, staleNoticeSent: false };
 	hungAlertRecords.set(runId, { ...prev, ...patch });
 }
 
 /** Debug log gated behind PI_CREW_DEBUG (same convention as background-runner). */
 function debugLog(message: string): void {
 	if (getCrewEnv("PI_CREW_DEBUG")) console.log(message);
+}
+
+/**
+ * WD-STALE-RECORD (2026-10-23): a run record whose manifest is still `running`
+ * but whose EVERY task is terminal is a stale record, not a hung run. The
+ * worker(s) finished; the manifest write is merely behind (finalize racing, or
+ * a finalize write lost to a crash). Alerting "appears hung" for such a run is
+ * the exact pain users reported (alert for a run that is actually done), so the
+ * re-verify gate treats it as terminal and stays silent.
+ *
+ * Fail-open by design: no tasks recorded (`[]`), a non-array, or an unreadable
+ * tasks.json (loadRunManifestById degrades to `tasks: []`) returns false so the
+ * legacy alert behavior is preserved — a broken tasks file must never silence
+ * a genuinely hung run.
+ */
+function areAllTasksTerminal(tasks: TeamTaskState[] | undefined): boolean {
+	if (!Array.isArray(tasks) || tasks.length === 0) return false;
+	return tasks.every((task) => TEAM_TERMINAL_TASK_STATUSES.has(task.status));
+}
+
+/**
+ * WD-INTERVAL (2026-10-23): resolve the poll interval. An explicit
+ * `checkIntervalMs` (tests / callers) wins, then the `PI_CREW_WATCHDOG_INTERVAL_MS`
+ * env override (live repro at 20s instead of 5 min), then the 5-minute default.
+ * Only positive finite values are honored — `0`/negative/garbage fall through.
+ */
+function resolveCheckIntervalMs(overrideMs: number | undefined): number {
+	if (typeof overrideMs === "number" && Number.isFinite(overrideMs) && overrideMs > 0) return overrideMs;
+	const configured = getCrewEnvInt("PI_CREW_WATCHDOG_INTERVAL_MS");
+	if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) return configured;
+	return DEFAULT_CHECK_INTERVAL_MS;
 }
 
 /**
@@ -126,7 +167,7 @@ export function stopAllWatchdogs(): void {
  */
 export function startForegroundWatchdog(opts: WatchdogOptions): void {
 	const { pi, cwd, runId } = opts;
-	const checkIntervalMs = opts.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
+	const checkIntervalMs = resolveCheckIntervalMs(opts.checkIntervalMs);
 	const maxMonitorMs = opts.maxMonitorMs ?? DEFAULT_MAX_MONITOR_MS;
 	const startTime = Date.now();
 
@@ -190,6 +231,29 @@ export function startForegroundWatchdog(opts: WatchdogOptions): void {
 					}
 					// Fall through to the shared schedule — keep monitoring; the next
 					// cycle hits the terminal branch (completion notice) or !loaded.
+				} else if (areAllTasksTerminal(reverified.tasks)) {
+					// WD-STALE-RECORD: manifest still says running, but every task is
+					// terminal → the run is done and only the record is behind. Stay
+					// silent about "hung" and tell the user ONCE that the record is
+					// stale (per runId, module-scope — no spam across restarts).
+					if (!hungAlertRecords.get(runId)?.skipLogged) {
+						updateHungAlertRecord(runId, { skipLogged: true });
+						debugLog(
+							`[foreground-watchdog] skip hung alert for ${runId}: record stale (manifest ${reverified.manifest.status}, all ${reverified.tasks.length} task(s) terminal)`,
+						);
+					}
+					if (!hungAlertRecords.get(runId)?.staleNoticeSent) {
+						updateHungAlertRecord(runId, { staleNoticeSent: true });
+						try {
+							pi.sendUserMessage(`pi-crew watchdog: run ${runId} record stale (all tasks terminal) — skipped hung alert.`, {
+								deliverAs: "followUp",
+							});
+						} catch {
+							/* non-critical */
+						}
+					}
+					// Keep monitoring: if the manifest eventually finalizes, the
+					// terminal branch delivers the completion notice.
 				} else {
 					const detail = `status=${manifest.status}, updatedAt=${manifest.updatedAt}, agents=${agents.length}`;
 					consecutiveHungNotices += 1;

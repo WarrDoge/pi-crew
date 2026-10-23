@@ -46,6 +46,7 @@ const SRC_READ_NAMES: readonly string[] = [
 	"PI_TEAMS_EXECUTE_WORKERS",
 	"PI_CREW_VERIFICATION_SANITIZE_ENV",
 	"PI_TEAMS_VERIFICATION_SANITIZE_ENV",
+	"PI_CREW_WATCHDOG_INTERVAL_MS",
 	"PI_CREW_WORKER_ATOMIC_WRITER",
 	"PI_TEAMS_WORKER_ATOMIC_WRITER",
 	// singles read via process.env (dot)
@@ -451,4 +452,7 @@ test("registry metadata: mirror pairs and defaults are declared", () => {
 	assert.equal(CREW_ENV_VARS.PI_CREW_EXECUTE_WORKERS.mirrorPrecedence, "or");
 	assert.equal(CREW_ENV_VARS.PI_CREW_DWF_SCRIPT_TIMEOUT_MS.parser, "int");
 	assert.equal(CREW_ENV_VARS.PI_CREW_MAX_RUN_MS.default, 7_200_000);
+	// WD-INTERVAL (2026-10-23): poll-interval override for the foreground watchdog.
+	assert.equal(CREW_ENV_VARS.PI_CREW_WATCHDOG_INTERVAL_MS.parser, "int");
+	assert.equal(CREW_ENV_VARS.PI_CREW_WATCHDOG_INTERVAL_MS.default, 300_000);
 });

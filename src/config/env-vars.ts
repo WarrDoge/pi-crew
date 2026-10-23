@@ -309,6 +309,12 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		default: 1000,
 		doc: "interrupt-guard poll interval; default 1000ms (background-runner.ts:217)",
 	},
+	PI_CREW_WATCHDOG_INTERVAL_MS: {
+		name: "PI_CREW_WATCHDOG_INTERVAL_MS",
+		parser: "int",
+		default: 300_000,
+		doc: "WD-INTERVAL (2026-10-23): foreground-run watchdog poll interval (ms), default 300000 = DEFAULT_CHECK_INTERVAL_MS (foreground-watchdog.ts resolveCheckIntervalMs). Lower it (e.g. 20000) to live-repro watchdog behavior without waiting 5 min per cycle; ≤0/garbage falls back to the default. An explicit checkIntervalMs argument still wins.",
+	},
 	PI_CREW_MAX_RUN_MS: {
 		name: "PI_CREW_MAX_RUN_MS",
 		parser: "int",

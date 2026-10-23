@@ -273,6 +273,10 @@ const CREW_ENV_FORWARDING_DECL: Record<string, CrewEnvForwardDecision> = {
 	PI_CREW_TRUST_PROJECT_DWF: { kind: "gap", reason: "project DWF trust gate on the runner path" },
 	PI_CREW_HEARTBEAT_PULSE_MS: { kind: "gap", reason: "child-executor liveness pulse (runner)" },
 	PI_CREW_INTERRUPT_GUARD_INTERVAL_MS: { kind: "gap", reason: "background-runner interrupt guard" },
+	PI_CREW_WATCHDOG_INTERVAL_MS: {
+		kind: "gap",
+		reason: "WD-INTERVAL foreground-watchdog poll interval — read by the HOST session only; registered as a gap (deliberately not forwarded) so the decision table stays complete and a future runner-side watchdog is auditable",
+	},
 	PI_CREW_MAX_RUN_MS: { kind: "gap", reason: "background-runner run ceiling" },
 	PI_CREW_MAX_WORKERS: { kind: "gap", reason: "global worker cap — enforced in the runner too" },
 	PI_CREW_DISABLE_RESULT_READ_CACHE: { kind: "gap", reason: "task-output-context read cache (runner)" },

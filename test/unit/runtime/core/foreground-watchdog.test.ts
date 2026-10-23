@@ -30,8 +30,8 @@ import {
 	startForegroundWatchdog,
 	stopWatchdog,
 } from "../../../../src/runtime/foreground-watchdog.ts";
-import { createRunManifest, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
-import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
+import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 
 // Minimal team/workflow fixtures (cast as never — matches heartbeat-watcher.test.ts).
 const team = {
@@ -90,6 +90,8 @@ interface SetupOptions {
 	ageMs: number;
 	/** Optional agent records to persist to agents.json. */
 	agents?: CrewAgentRecord[];
+	/** Optional tasks persisted to tasks.json (WD-STALE-RECORD fixtures). */
+	tasks?: TeamTaskState[];
 }
 
 interface PreparedRun {
@@ -117,7 +119,26 @@ function prepareRun(opts: SetupOptions): PreparedRun {
 	if (opts.agents) {
 		saveCrewAgents(manifest, opts.agents);
 	}
+	if (opts.tasks) {
+		saveRunTasks(manifest, opts.tasks);
+	}
 	return { cwd, runId: manifest.runId, manifest };
+}
+
+/** Minimal TeamTaskState — the watchdog stale-record check reads only `status`. */
+function task(id: string, status: TeamTaskState["status"], runId: string): TeamTaskState {
+	return {
+		id,
+		runId,
+		stepId: id,
+		role: "worker",
+		agent: "agent-a",
+		title: id,
+		status,
+		dependsOn: [],
+		cwd: "/tmp/pi-crew-fg-watchdog",
+		graph: { taskId: id, children: [], dependencies: [], queue: "done" },
+	} as unknown as TeamTaskState;
 }
 
 function queuedAgent(runId: string): CrewAgentRecord {
@@ -354,6 +375,174 @@ test("WD-DEDUP: hung-alert dedup map is bounded — oldest evicted at cap, no le
 		);
 	} finally {
 		stopWatchdog(runId);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+/**
+ * WD-STALE-RECORD (2026-10-23) — the user-visible pain being fixed: the
+ * watchdog alerted "run … appears hung" for runs that were actually DONE.
+ * Shape of the incident (real runs team_20261023030033 / team_20261023050900):
+ * manifest still `running` with a frozen updatedAt, but tasks.json shows every
+ * task terminal. The re-verify gate must treat that as terminal (silent hung,
+ * one stale-record notice) instead of nagging for a finished run.
+ */
+test("WD-STALE-RECORD: manifest running + ALL tasks terminal → 0 hung alerts, 1 stale notice", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	saveRunTasks(manifest, [task("do", "completed", runId), task("verify", "failed", runId)]);
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await waitFor(() => pi.messages.some((m) => m.text.includes("record stale")), 2000);
+		// Many more cycles: no hung alert, and the stale notice stays a single one.
+		await sleep(150);
+
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			0,
+			"no hung alert for a stale record whose tasks are all terminal",
+		);
+		const notices = pi.messages.filter((m) => m.text.includes("record stale (all tasks terminal) — skipped hung alert"));
+		assert.equal(notices.length, 1, "exactly ONE stale-record notice per runId (no spam)");
+		assert.ok(notices[0].text.includes(runId), "stale notice names the runId");
+		assert.deepEqual(notices[0].options, { deliverAs: "followUp" }, "stale notice delivered as followUp");
+	} finally {
+		stopWatchdog(runId);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-STALE-RECORD: manifest running + ONE task still running → hung alert fires (not a stale record)", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	saveRunTasks(manifest, [task("do", "completed", runId), task("verify", "running", runId)]);
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await waitFor(() => pi.messages.some((m) => m.text.includes("appears hung")), 2000);
+
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			1,
+			"one hung alert for a genuinely non-terminal task set",
+		);
+		assert.equal(pi.messages.filter((m) => m.text.includes("record stale")).length, 0, "no stale notice when work is still in flight");
+	} finally {
+		stopWatchdog(runId);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-STALE-RECORD: tasks.json MISSING → no crash and NEVER a stale-record claim (fail-open, pre-existing skip)", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	saveRunTasks(manifest, [task("do", "completed", runId)]);
+	// Remove the tasks file AFTER a completed-task write. loadRunManifestById
+	// deliberately refuses to serve a run whose tasks.json vanished (state-store
+	// cache-miss contract → undefined), so the re-verify sees "manifest gone" and
+	// keeps its PRE-EXISTING silent-skip behavior. What must NOT happen is the
+	// new stale-record branch treating missing tasks as "all terminal" (that
+	// would silence a genuinely hung run).
+	fs.rmSync(manifest.tasksPath, { force: true });
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await sleep(150); // many cycles — must not throw, must not claim stale
+
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("record stale")).length,
+			0,
+			"missing tasks.json is NOT read as 'all tasks terminal'",
+		);
+		assert.ok(
+			pi.messages.every((m) => !m.text.includes("appears hung")),
+			"unchanged pre-existing behavior: an unloadable run is skipped, not alerted",
+		);
+	} finally {
+		stopWatchdog(runId);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-STALE-RECORD: CORRUPT tasks.json → fail-open (legacy hung alert, no crash)", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	saveRunTasks(manifest, [task("do", "completed", runId)]);
+	fs.writeFileSync(manifest.tasksPath, "{ this is not json ]]", "utf-8");
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await waitFor(() => pi.messages.some((m) => m.text.includes("appears hung")), 2000);
+
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			1,
+			"corrupt tasks.json keeps the legacy hung alert (fail-open)",
+		);
+		assert.equal(pi.messages.filter((m) => m.text.includes("record stale")).length, 0, "a broken tasks file never silences a hung run");
+	} finally {
+		stopWatchdog(runId);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-STALE-RECORD: stale notice is per-runId across watchdog restarts (module-scope dedup)", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	saveRunTasks(manifest, [task("do", "cancelled", runId)]);
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await waitFor(() => pi.messages.some((m) => m.text.includes("record stale")), 2000);
+		stopWatchdog(runId);
+
+		// A brand-new watchdog for the same run must not repeat the notice.
+		const pi2 = makePi();
+		startForegroundWatchdog({ pi: pi2 as never, cwd, runId, checkIntervalMs: 5 });
+		await sleep(150);
+		assert.equal(
+			pi2.messages.filter((m) => m.text.includes("record stale")).length,
+			0,
+			"fresh watchdog does not re-send the stale notice",
+		);
+		assert.equal(pi2.messages.filter((m) => m.text.includes("appears hung")).length, 0, "and never a hung alert");
+	} finally {
+		stopWatchdog(runId);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("WD-INTERVAL: PI_CREW_WATCHDOG_INTERVAL_MS drives the poll cadence when no explicit interval is given", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	const pi = makePi();
+	const previous = process.env.PI_CREW_WATCHDOG_INTERVAL_MS;
+	process.env.PI_CREW_WATCHDOG_INTERVAL_MS = "15";
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId }); // no checkIntervalMs → env override
+		await waitFor(() => pi.messages.some((m) => m.text.includes("appears hung")), 2000);
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			1,
+			"env-driven 15ms cadence produced the alert quickly",
+		);
+	} finally {
+		stopWatchdog(runId);
+		if (previous === undefined) delete process.env.PI_CREW_WATCHDOG_INTERVAL_MS;
+		else process.env.PI_CREW_WATCHDOG_INTERVAL_MS = previous;
 		resetHungAlertDedupForTests();
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}
