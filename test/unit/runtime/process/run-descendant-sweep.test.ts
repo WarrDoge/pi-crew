@@ -35,26 +35,17 @@ import {
 } from "../../../../src/runtime/process/run-descendant-sweep.ts";
 
 const isLinux = process.platform === "linux";
-const selfUid = (): number => (typeof process.getuid === "function" ? process.getuid() : 0);
-
 /**
- * The sweep's same-uid rung compares every candidate against OUR real uid
- * (`process.getuid`) — there is no injectable seam for it. Windows has no
- * getuid, so on win32 the src-side read is `undefined` and every candidate is
- * rejected as unprovable — an unreachable combination in production (the
- * platform gate returns [] before the uid rung on any non-Linux host), but it
- * would blank every discovery assertion here once `platform: "linux"` is
- * injected. Define a synthetic uid for the lifetime of this FILE only
- * (node:test isolates every file in its own process) so the rung is exercised
- * identically on every OS. Restored in `after()`; a no-op where getuid exists.
+ * The sweep's same-uid rung (safety rung 3) used to be untestable without a
+ * process-wide `process.getuid` monkeypatch — wave 12b (F5) added a `getuid`
+ * seam to `SweepOptions`, so the injected /proc fixtures below just declare the
+ * uid they want compared. `1000` (non-root, POSIX-looking) rather than the old
+ * shim's `0`: comparing against root would change which candidates pass.
+ * The REAL-topology half (b1) passes no `getuid` at all, so it still reads the
+ * production uid source.
  */
-const hadRealGetuid = typeof process.getuid === "function";
-if (!hadRealGetuid) {
-	(process as { getuid?: () => number }).getuid = () => 0;
-}
-after(() => {
-	if (!hadRealGetuid) delete (process as { getuid?: () => number }).getuid;
-});
+const TEST_UID = 1000;
+const selfUid = (): number => TEST_UID;
 /** A pid that is certainly not in use — the "recorded parent is dead" fixture. */
 const DEAD_PID = 999_999;
 /** A pid that is certainly not in use — the "dead surface pane" fixture (11b.4). */
@@ -127,6 +118,9 @@ function fakeSweep(procs: FakeProc[], nowMs: number): FakeSweep {
 		groupAlive: () => false,
 		candidateStartMs: (identity) => (identity.starttime === undefined ? undefined : Number(identity.starttime)),
 		platform: "linux",
+		// F5 seam: the uid the same-uid rung must compare against. Replaces the
+		// per-file `process.getuid` monkeypatch this suite used before wave 12b.
+		getuid: () => TEST_UID,
 	};
 	void nowMs;
 	return { opts, kills };

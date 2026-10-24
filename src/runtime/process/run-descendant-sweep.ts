@@ -232,6 +232,18 @@ export interface SweepOptions {
 	 * and the doctor path are unchanged.
 	 */
 	snapshot?: ProcSnapshot;
+	/**
+	 * uid source for the same-uid rung (safety rung 3). Default
+	 * `() => process.getuid?.()` — production behaviour is unchanged. The seam
+	 * exists because `process.getuid` is undefined on win32, which made the rung
+	 * untestable there without a process-wide monkeypatch.
+	 *
+	 * It is honoured by BOTH halves of a sweep — discovery (`buildProcSnapshot`,
+	 * `collectRunDescendants`) and the group reap — so an injected uid is never
+	 * compared here and then ignored one call deeper (see the propagation note at
+	 * the `reapGroup` call site in `reapRunDescendants`).
+	 */
+	getuid?: () => number | undefined;
 }
 
 /** Sweep verdict: what was signalled, what was refused, what is still in flight. */
@@ -247,6 +259,10 @@ export interface RunSweepResult {
 	 */
 	descendants: RunDescendant[];
 }
+
+/** Default uid source: the real process uid when the runtime has one (POSIX),
+ *  `undefined` on win32 — the pre-seam behaviour, unchanged. */
+const defaultGetuid = (): number | undefined => process.getuid?.();
 
 // ── default /proc readers (all best-effort, none throw) ──────────────────────
 
@@ -399,7 +415,7 @@ export function buildProcSnapshot(opts: SweepOptions = {}): ProcSnapshot {
 	const readIdentity = opts.readIdentity ?? readProcIdentity;
 	const readEnviron = opts.readEnviron ?? readProcEnviron;
 	const readTtyNr = opts.readTtyNr ?? readProcTtyNr;
-	const selfUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+	const selfUid = (opts.getuid ?? defaultGetuid)();
 	const pids: number[] = [];
 	const entries = new Map<number, ProcSnapshotEntry>();
 	for (const pid of (opts.listPids ?? listProcPids)()) {
@@ -482,7 +498,7 @@ export function collectRunDescendants(markers: RunMarkers, opts: SweepOptions = 
 	if ((opts.platform ?? process.platform) !== "linux") return [];
 	const readIdentity = opts.readIdentity ?? readProcIdentity;
 	const candidateStartMs = opts.candidateStartMs ?? defaultCandidateStartMs;
-	const selfUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+	const selfUid = (opts.getuid ?? defaultGetuid)();
 	// Our own group: never a candidate's target group (belt to reap-group's rung).
 	const selfPgrp = readIdentity(process.pid)?.pgid;
 	// 11b.4 (LOW-4): ONE /proc view per call — supplied by the caller (a whole
@@ -715,6 +731,12 @@ export function reapRunDescendants(markers: RunMarkers, opts: SweepOptions = {})
 			...(opts.gracefulMs !== undefined ? { gracefulMs: opts.gracefulMs } : {}),
 			...(opts.capMs !== undefined ? { capMs: opts.capMs } : {}),
 			...(opts.platform !== undefined ? { platform: opts.platform } : {}),
+			// F5 propagation (wave 12b): the uid source MUST reach the ladder too.
+			// Discovery already used `opts.getuid`; forwarding only at that half would
+			// let a caller assert one uid policy and execute another (the sweep would
+			// prove a group safe against the injected uid while the ladder compared
+			// against the real one) — a silent split-brain, worse than no seam at all.
+			...(opts.getuid !== undefined ? { getuid: opts.getuid } : {}),
 		});
 		if (reap.refusal !== undefined) {
 			// Nothing was signalled. Leave the key unset so a later tick can retry

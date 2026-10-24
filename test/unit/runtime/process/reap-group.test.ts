@@ -28,37 +28,42 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
 import * as path from "node:path";
-import test, { after, beforeEach } from "node:test";
+import test, { beforeEach } from "node:test";
 import {
 	__armedEscalationCountForTest,
 	__resetArmedEscalationsForTest,
 	__resetSelfIdentityForTest,
 	__setSelfIdentityForTest,
 	__setSelfIdentityReaderForTest,
-	assertSafeGroup,
+	assertSafeGroup as assertSafeGroupRaw,
 	flushReapEscalationsSync,
 	type GroupRefusalReason,
+	type ReapGroupOptions,
 	readProcIdentity,
-	reapGroup,
+	reapGroup as reapGroupRaw,
 } from "../../../../src/runtime/process/reap-group.ts";
 
 const isLinux = process.platform === "linux";
 
 /**
- * Windows has no `process.getuid`, so the ladder's uid rungs (b5 and the
- * dead-path uid proof) would silently pass on win32 — an unreachable
- * combination in production (the platform rung refuses win32 first). Define a
- * synthetic uid for the lifetime of this FILE only (node:test isolates every
- * file in its own process) so the guard ladder is exercised identically on
- * every OS. Restored in `after()`; a no-op wherever a real getuid exists.
+ * The uid rungs used to be made testable by monkeypatching `process.getuid` for
+ * the lifetime of this FILE (`() => 0` on win32). Wave 12b (F5) replaced that
+ * with an injectable seam on `ReapGroupOptions`, so every call below goes
+ * through these two wrappers: on Linux/macOS the wrapper forwards the real uid
+ * (production parity, which is what the REAL-topology half below needs); on a
+ * runtime without `process.getuid` (win32) it forwards a synthetic non-root uid
+ * so the rungs fire there too instead of silently passing.
+ *
+ * A synthetic `0` (the old shim) is deliberately NOT used: it makes every
+ * comparison happen against root and changes which candidates pass.
  */
-const hadRealGetuid = typeof process.getuid === "function";
-if (!hadRealGetuid) {
-	(process as { getuid?: () => number }).getuid = () => 0;
-}
-after(() => {
-	if (!hadRealGetuid) delete (process as { getuid?: () => number }).getuid;
-});
+const FALLBACK_UID = 1000;
+const uid = (): number => (typeof process.getuid === "function" ? process.getuid() : FALLBACK_UID);
+/** The seam every `assertSafeGroup`/`reapGroup` call in this file is given. */
+const withUid = (opts: ReapGroupOptions = {}): ReapGroupOptions => ({ getuid: uid, ...opts });
+const assertSafeGroup = (pgid: number, candidatePid: number, opts: ReapGroupOptions = {}): GroupRefusalReason | undefined =>
+	assertSafeGroupRaw(pgid, candidatePid, withUid(opts));
+const reapGroup = (pgid: number, candidatePid: number, opts: ReapGroupOptions = {}) => reapGroupRaw(pgid, candidatePid, withUid(opts));
 
 /**
  * MINOR #4 consequence: rungs 1/3 read OUR identity from /proc, never from the
@@ -74,7 +79,6 @@ beforeEach(() => {
 	}
 });
 const FIXTURE = path.join(import.meta.dirname, "..", "..", "..", "fixtures", "proc-tree-leader.mjs");
-const uid = (): number | undefined => (typeof process.getuid === "function" ? process.getuid() : undefined);
 
 // ── A. real topology ────────────────────────────────────────────────────────
 

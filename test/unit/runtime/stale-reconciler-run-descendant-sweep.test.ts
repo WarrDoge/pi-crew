@@ -24,7 +24,7 @@ import { once } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { after, afterEach, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import { __resetSelfIdentityForTest, __setSelfIdentityForTest, readProcIdentity } from "../../../src/runtime/process/reap-group.ts";
 import {
 	__resetSignalledGroupsForTest,
@@ -43,25 +43,15 @@ const DEAD_WORKER_PID = 999_996;
 const DEAD_RUNNER_PID = 999_997;
 /** A pid that is provably not in use — the recorded sync-run spawner (11c). */
 const DEAD_SESSION_PID = 999_995;
-const selfUid = (): number => (typeof process.getuid === "function" ? process.getuid() : 0);
-
 /**
- * The sweep's same-uid rung compares candidates against OUR real uid — there
- * is no seam for it. Windows has no getuid, so the src-side read is undefined
- * there and every candidate is rejected as unprovable (an unreachable
- * combination in production: the platform gate returns [] first on any
- * non-Linux host, but the fixtures inject `platform: "linux"`). Define a
- * synthetic uid for the lifetime of this FILE only (node:test isolates every
- * file in its own process) so the rung is exercised identically on every OS.
- * Restored in `after()`; a no-op where a real getuid exists.
+ * Wave 12b (F5): the same-uid rung is now driven by the injectable `getuid`
+ * seam on `SweepOptions` instead of a per-file `process.getuid` monkeypatch.
+ * `1000` (non-root) rather than the old shim's `0`. The suite's two real-child
+ * cases (`setTimeout` sleepers) only need their recorded pid to be alive — they
+ * never reach the uid rung — so a single synthetic uid is enough here.
  */
-const hadRealGetuid = typeof process.getuid === "function";
-if (!hadRealGetuid) {
-	(process as { getuid?: () => number }).getuid = () => 0;
-}
-after(() => {
-	if (!hadRealGetuid) delete (process as { getuid?: () => number }).getuid;
-});
+const TEST_UID = 1000;
+const selfUid = (): number => TEST_UID;
 
 /** Env keys the sweep's guards read; a worker shell leaks all of them. */
 const GUARD_ENV_KEYS = ["PI_CREW_KIND", "PI_CREW_DEPTH", "PI_TEAMS_DEPTH", "PI_CREW_REAP_RUN_DESCENDANTS"] as const;
@@ -213,6 +203,9 @@ function fakeSweep(procs: FakeProc[]): FakeSweep {
 		groupAlive: () => false,
 		candidateStartMs: (identity) => (identity.starttime === undefined ? undefined : Number(identity.starttime)),
 		platform: "linux",
+		// F5 seam (wave 12b): compare against `TEST_UID` instead of a per-file
+		// `process.getuid` monkeypatch, and forward it down to the group reap.
+		getuid: () => TEST_UID,
 	};
 	return { opts, kills };
 }

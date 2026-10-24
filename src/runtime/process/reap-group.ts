@@ -112,6 +112,18 @@ export interface ReapGroupOptions {
 	expected?: ProcIdentity;
 	/** Diagnostic label used in log messages. */
 	name?: string;
+	/**
+	 * uid source for the same-uid rungs (5 and the dead-path uid proof). Default
+	 * `() => process.getuid?.()` — production behaviour is unchanged. The seam
+	 * exists because `process.getuid` is undefined on win32, which made the uid
+	 * rungs untestable there without a process-wide monkeypatch.
+	 *
+	 * Read PER CALL and never cached: unlike `selfIdentity()` (which is cached
+	 * because a process cannot change its group), this is an injected value with
+	 * no invariant of its own, and caching it would make the first caller win for
+	 * the lifetime of the module.
+	 */
+	getuid?: () => number | undefined;
 }
 
 /** Sync verdict + the authoritative async verdict. */
@@ -226,6 +238,11 @@ export function __setSelfIdentityReaderForTest(reader: ((pid: number) => ProcIde
 	selfIdentityReader = reader ?? readProcIdentity;
 }
 
+/** Default uid source for the same-uid rungs: the real process uid, when the
+ *  runtime has one (POSIX). win32 has none ⇒ `undefined` ⇒ the rungs degrade
+ *  exactly as they did before the seam existed. */
+const defaultGetuid = (): number | undefined => process.getuid?.();
+
 /**
  * Run the refusal ladder. Returns the FIRST failing rung, or undefined when the
  * group is safe to signal. Pure with respect to injected `readIdentity` /
@@ -251,7 +268,7 @@ export function assertSafeGroup(pgid: number, candidatePid: number, opts: ReapGr
 	// state in which `kill(-pgid)` could take out the host session.
 	if (self.pgid === undefined) return "identity-missing";
 	if (pgid === process.pid || pgid === process.ppid || pgid === self.pgid) return "pgid-init-or-self";
-	const selfUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+	const selfUid = (opts.getuid ?? defaultGetuid)();
 	// Rung 4: a LIVE candidate identity, or (dead candidate) leader-proof.
 	const live = readIdentity(candidatePid);
 	if (!live) {
