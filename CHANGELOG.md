@@ -52,6 +52,10 @@ alone; pi's bash tool remains the primary source of detached grandchildren — t
 children for tool commands, or a cgroup/subreaper for the worker tree) is what would make this sweep unnecessary;
 and the sweep can only match processes that still carry the markers (a scrubbed env is invisible).
 
+**11c — sync-run descent proof + test pin (leader-approved options (a) + F1 fix).**
+
+- Record sync-run `manifest.sessionPid` so foreground-run leaks satisfy the descent proof (wave 11c): a sync run has no `async.pid`, so a leaked worker grandchild whose `PI_CREW_PARENT_PID` points at the session pi itself could never be proven and was skipped forever; `sessionPid` is recorded at creation and treated as a recorded parent (dead-only, like the others). Also pin `PI_CREW_REAP_RUN_DESCENDANTS` in the sweep suite's setup so the tests no longer depend on the ambient kill-switch state. Battery addendum: `docs/real-test/reports/real-test-2026-10-24-wave11-battery-addendum.md` (F1/F2 closed, verdict PASS).
+
 ## [0.11.38] — Wave 10: pi-subagents lessons (10 ports) + watchdog hung-alert hardening (WD-DEDUP / WD-STALE-RECORD / WD-DELIVER-GUARD)
 
 ### Fixed — watchdog alerts for FINISHED runs: delivery-time guard (WD-DELIVER-GUARD, root-caused 2026-10-23)
