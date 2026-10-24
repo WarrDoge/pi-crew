@@ -22,6 +22,12 @@ export const PROC_STAT_STATE_INDEX = 0;
 export const PROC_STAT_PPID_INDEX = 1;
 /** Field 5 (pgrp / pgid) → third entry after the comm cut (reap-group.ts). */
 export const PROC_STAT_PGID_INDEX = 2;
+/**
+ * Field 7 (tty_nr) → fifth entry after the comm cut (run-descendant-sweep.ts).
+ * `0` means "no controlling terminal": a heartbeat/daemon shape. Anything else
+ * means the process is attached to a terminal — i.e. an interactive shell.
+ */
+export const PROC_STAT_TTY_INDEX = 4;
 
 /**
  * Fields of a `/proc/<pid>/stat` line AFTER the comm column (paren-aware).

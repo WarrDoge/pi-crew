@@ -24,6 +24,7 @@ import { recordFromTask, upsertCrewAgent } from "../crew-agent-records.ts";
 import { isWorkerHeartbeatStale } from "../heartbeat/worker-heartbeat.ts";
 import { terminateLiveAgentsForRun } from "../live-session/live-agent-manager.ts";
 import type { ManifestCache } from "../manifest-cache.ts";
+import { buildProcSnapshot, type ProcSnapshot } from "../process/run-descendant-sweep.ts";
 import { checkProcessLiveness } from "../process-status.ts";
 import { mapConcurrent } from "../scheduling/parallel-utils.ts";
 import {
@@ -1066,8 +1067,38 @@ const TERMINAL_SWEEP_MIN_AGE_MS = 60_000;
  */
 const TERMINAL_SWEEP_CACHE_WINDOW = 200;
 
+/**
+ * Wave 11b.4 (HIGH-2): how long a run marked `descendantSweepPending` waits
+ * before the lane tries it again. A pending flag means the sweep PROVED
+ * descendants it could not signal (a live unmatched group leader, a candidate
+ * with no usable pgid, a refused group reap, an interactive tty) — the leak is
+ * still out there, but the blocker is usually another live process, so retrying
+ * on the very next pass would burn a /proc scan per pass for as long as that
+ * process lives. Ten minutes is short enough that a real leak is reaped while
+ * the operator is still in the same session, and long enough that a stuck run
+ * cannot dominate the 25-per-pass budget.
+ */
+const TERMINAL_SWEEP_RETRY_MS = 10 * 60_000;
+
 function isTerminalRunStatus(status: TeamRunManifest["status"]): boolean {
 	return TERMINAL_RUN_STATUSES_FOR_SWEEP.has(status);
+}
+
+/**
+ * Wave 11b.2 + 11b.4: is this TERMINAL run still entitled to a sweep attempt?
+ *
+ * Never swept ⇒ yes. Swept and clean ⇒ no (that is what the marker is for).
+ * Swept but `descendantSweepPending` ⇒ yes again, once the bounded retry
+ * interval has elapsed — otherwise a run whose candidates were all skipped
+ * would never be looked at again and 11b.4's whole point (a real leak must stay
+ * reachable) would be lost.
+ */
+function isTerminalSweepEligible(manifest: TeamRunManifest, now: number): boolean {
+	if (!isTerminalRunStatus(manifest.status)) return false;
+	if (manifest.descendantSweepAt === undefined) return true;
+	if (manifest.descendantSweepPending !== true) return false;
+	const sweptAt = Date.parse(manifest.descendantSweepAt);
+	return Number.isFinite(sweptAt) && now - sweptAt > TERMINAL_SWEEP_RETRY_MS;
 }
 
 /**
@@ -1108,11 +1139,17 @@ function terminalSinceMs(manifest: TeamRunManifest): number {
  *
  * Age gate (11b.3): a run whose `updatedAt` is younger than
  * `TERMINAL_SWEEP_MIN_AGE_MS` is skipped and left UNSTAMPED (see the constant).
+ *
+ * Retry gate (11b.4, HIGH-2): a stamped run comes back only while it still
+ * carries `descendantSweepPending` AND `TERMINAL_SWEEP_RETRY_MS` has elapsed
+ * since the stamp — see `isTerminalSweepEligible`. Selection is still
+ * oldest-first and still capped, so a pending run competes for the same 25-scan
+ * budget as a never-swept one rather than getting a lane of its own.
  */
 function selectUnsweptTerminalRunIds(manifestCache: ManifestCache, now = Date.now()): string[] {
 	return manifestCache
 		.list(TERMINAL_SWEEP_CACHE_WINDOW)
-		.filter((manifest) => isTerminalRunStatus(manifest.status) && manifest.descendantSweepAt === undefined)
+		.filter((manifest) => isTerminalSweepEligible(manifest, now))
 		.map((manifest) => ({ runId: manifest.runId, terminalSinceMs: terminalSinceMs(manifest) }))
 		.filter((entry) => now - entry.terminalSinceMs >= TERMINAL_SWEEP_MIN_AGE_MS)
 		.sort((a, b) => a.terminalSinceMs - b.terminalSinceMs)
@@ -1258,6 +1295,12 @@ export async function reconcileAllStaleRuns(
 			"debug",
 		);
 	}
+	// Wave 11b.4 (LOW-4): ONE /proc snapshot for the whole lane. Built lazily —
+	// a pass whose every run bails out below (already clean, resumed, inside the
+	// grace window) never pays for it. Before 11b.4 each run built its own, so a
+	// full 25-run budget read /proc for every process on the host 25 times.
+	let passSnapshot: ProcSnapshot | undefined;
+	const sweepSnapshot = (): ProcSnapshot => (passSnapshot ??= buildProcSnapshot());
 	await mapConcurrent(terminalRunIds, 2, async (runId): Promise<void> => {
 		try {
 			const loaded = await loadRunManifestByIdAsync(cwd, runId); // best-effort; re-read under the lock below
@@ -1266,8 +1309,12 @@ export async function reconcileAllStaleRuns(
 				const fresh = await loadRunManifestByIdAsync(cwd, runId); // consistent read inside the lock
 				if (!fresh) return;
 				// Idempotency: a concurrent pass (or the run's own completion path)
-				// already stamped this run ⇒ nothing to do, and no /proc scan.
-				if (fresh.manifest.descendantSweepAt !== undefined) return;
+				// already stamped this run clean ⇒ nothing to do, and no /proc scan.
+				// 11b.4 (HIGH-2): a run stamped `descendantSweepPending` is NOT done
+				// — it is due again once the retry interval has elapsed, which is
+				// what the cache selection just said; re-checked here because the
+				// fresh read is authoritative and another pass may have just run it.
+				if (!isTerminalSweepEligible(fresh.manifest, now)) return;
 				// The run may have flipped back to running/blocked (resume) between
 				// the cache list and this lock — that run belongs to the reconcile
 				// lane, and its descendants are legitimate again.
@@ -1276,7 +1323,7 @@ export async function reconcileAllStaleRuns(
 				// resumed and finished again since the cache snapshot is young again,
 				// and its panes may have just been re-attached.
 				if (now - terminalSinceMs(fresh.manifest) < TERMINAL_SWEEP_MIN_AGE_MS) return;
-				sweepTerminalRunDescendants(fresh.manifest, fresh.tasks);
+				sweepTerminalRunDescendants(fresh.manifest, fresh.tasks, { snapshot: sweepSnapshot() });
 			});
 			// Wave 11a review MAJOR #3 (same owner as the reconcile lane): the sync
 			// sweep arms a group SIGKILL escalation it cannot await.

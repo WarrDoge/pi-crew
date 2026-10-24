@@ -14,7 +14,7 @@ import { findRunStateDir } from "../utils/paths.ts";
 import { recordFromTask, upsertCrewAgent } from "./crew-agent-records.ts";
 import { currentCrewDepth } from "./model/pi-args.ts";
 import { reapRecordedWorkerOrphans } from "./process/orphan-reaper.ts";
-import { reapRunDescendants, resolveRunDescendantSweepEnabled } from "./process/run-descendant-sweep.ts";
+import { type ProcSnapshot, reapRunDescendants, resolveRunDescendantSweepEnabled } from "./process/run-descendant-sweep.ts";
 import { checkProcessLiveness } from "./process-status.ts";
 
 /**
@@ -631,16 +631,40 @@ function repairStaleRun(
  * The field is also set IN MEMORY so a caller that saves the manifest right
  * after (updateRunStatus on the repair path) carries it along even when the
  * write below fails. Never throws: the sweep already ran.
+ *
+ * 11b.4 (HIGH-2): `descendantSweepAt` records WHEN the last attempt ran, not
+ * that no work is left. When the attempt left a RETRYABLE skip behind (the same
+ * leak is still out there, we just could not signal it yet) `pending` is set so
+ * the startup lane re-selects the run after `TERMINAL_SWEEP_RETRY_MS` instead of
+ * never looking at it again — which is exactly how 11b.2/11b.3 could bury a real
+ * leak for good. A clean attempt clears the flag (and the field, so the manifest
+ * keeps its pre-11b.4 shape).
  */
-function stampDescendantSweep(manifest: TeamRunManifest): void {
+function stampDescendantSweep(manifest: TeamRunManifest, pending: boolean): void {
 	try {
 		manifest.descendantSweepAt = new Date().toISOString();
+		if (pending) manifest.descendantSweepPending = true;
+		else delete manifest.descendantSweepPending;
 		saveRunManifest(manifest);
 	} catch (stampError) {
 		// Warn, never throw: the sweep is done; the worst case is one redundant
 		// (idempotent) rescan on the next reconcile pass.
 		logInternalError("stale-reconciler.run-descendant-sweep", stampError, `marker write failed for ${manifest.runId}`, "warn");
 	}
+}
+
+/**
+ * Skip reasons that mean "the leak may still be there, try again later" (11b.4).
+ *
+ * The complement is what must NOT be retried: `dry-run` (report only — the
+ * caller returns before stamping at all), `already-swept` (this incarnation was
+ * already signalled; the idempotency registry remembers it) and `group-refused`
+ * reasons that are permanent for the run.
+ */
+function isRetryableSweepSkip(reason: string): boolean {
+	return (
+		reason === "leader-alive-unmatched" || reason === "no-pgid" || reason === "interactive-tty" || reason.startsWith("group-refused:")
+	);
 }
 
 /** Recorded worker pids of a run's tasks (heartbeat / checkpoint), deduped. */
@@ -711,8 +735,20 @@ function collectSurfacePids(manifest: TeamRunManifest): number[] {
  * The persist is warn-only: the sweep already happened, so a write error must
  * not fail the reconcile pass — at worst the run is swept again next pass, which
  * is idempotent (its descendants are gone by then).
+ *
+ * Wave 11b.4 (HIGH-2) — the marker is no longer one-shot. An attempt that could
+ * not SIGNAL anything it had proven (a live unmatched group leader, a candidate
+ * with no usable pgid, a refused group reap, an interactive tty) used to stamp
+ * the run as done anyway, so the very leak the sweep exists for was never looked
+ * at again. Now the stamp always records the attempt time, and
+ * `descendantSweepPending` marks the run for a bounded retry after
+ * `TERMINAL_SWEEP_RETRY_MS`.
  */
-export function sweepTerminalRunDescendants(manifest: TeamRunManifest, tasks: TeamTaskState[]): void {
+export function sweepTerminalRunDescendants(
+	manifest: TeamRunManifest,
+	tasks: TeamTaskState[],
+	opts: { snapshot?: ProcSnapshot } = {},
+): void {
 	try {
 		if (!tasks.every((task) => isTerminalTaskStatus(task.status))) return;
 		if (getCrewEnv("PI_CREW_KIND") === "subagent") return;
@@ -732,20 +768,30 @@ export function sweepTerminalRunDescendants(manifest: TeamRunManifest, tasks: Te
 		// parent), so skip the /proc scan entirely.
 		if (recordedPids.length === 0) return;
 		const startedAtMs = Date.parse(manifest.async?.spawnedAt ?? manifest.createdAt);
-		const result = reapRunDescendantsImpl({
-			runId: manifest.runId,
-			...(runnerPid !== undefined ? { runnerPid } : {}),
-			workerPids,
-			...(surfacePids.length > 0 ? { surfacePids } : {}),
-			taskIds: tasks.map((task) => task.id),
-			startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : 0,
-		});
+		const result = reapRunDescendantsImpl(
+			{
+				runId: manifest.runId,
+				...(runnerPid !== undefined ? { runnerPid } : {}),
+				workerPids,
+				...(surfacePids.length > 0 ? { surfacePids } : {}),
+				taskIds: tasks.map((task) => task.id),
+				startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : 0,
+			},
+			// 11b.4 (LOW-4): a caller sweeping several runs in one pass shares ONE
+			// /proc snapshot; a lone call builds its own inside the sweep.
+			opts.snapshot === undefined ? {} : { snapshot: opts.snapshot },
+		);
 		// Same owner as the F2 escalations above — one drain mechanism, never two.
 		for (const escalation of result.pending) trackReapEscalation(escalation);
 		// A dry-run pass signalled nothing (every candidate carries reason
 		// "dry-run"), so it must not consume the one-shot marker.
 		if (result.skipped.some((skip) => skip.reason === "dry-run")) return;
-		stampDescendantSweep(manifest);
+		// 11b.4 (HIGH-2): the marker records the attempt; `pending` records that
+		// something PROVEN could not be signalled yet, so the startup lane retries.
+		stampDescendantSweep(
+			manifest,
+			result.skipped.some((skip) => isRetryableSweepSkip(skip.reason)),
+		);
 		if (result.reaped.length > 0) {
 			logInternalError(
 				"stale-reconciler.run-descendant-sweep",

@@ -26,6 +26,7 @@ import { __setSelfIdentityForTest, readProcIdentity } from "../../../../src/runt
 import {
 	__resetSignalledGroupsForTest,
 	__signalledGroupCountForTest,
+	buildProcSnapshot,
 	collectRunDescendants,
 	type RunDescendant,
 	type RunMarkers,
@@ -37,6 +38,8 @@ const isLinux = process.platform === "linux";
 const selfUid = (): number => (typeof process.getuid === "function" ? process.getuid() : 0);
 /** A pid that is certainly not in use — the "recorded parent is dead" fixture. */
 const DEAD_PID = 999_999;
+/** A pid that is certainly not in use — the "dead surface pane" fixture (11b.4). */
+const MEDIUM_3_PID = 999_998;
 
 // reap-group's ladder reads OUR identity from /proc. On a platform without
 // /proc (macOS) every group signal would short-circuit at `proc-unavailable`,
@@ -56,6 +59,8 @@ interface FakeProc {
 	starttime?: string;
 	uid?: number;
 	env?: Record<string, string>;
+	/** `/proc/<pid>/stat` field 7 — undefined/0 ⇒ no controlling terminal. */
+	tty?: number;
 }
 
 interface FakeSweep {
@@ -73,11 +78,13 @@ function fakeSweep(procs: FakeProc[], nowMs: number): FakeSweep {
 		procs.map((proc) => [proc.pid, { pid: proc.pid, pgid: proc.pgid, starttime: proc.starttime, uid: proc.uid ?? selfUid() }]),
 	);
 	const envs = new Map(procs.map((proc) => [proc.pid, proc.env ?? {}]));
+	const ttys = new Map(procs.filter((proc) => proc.tty !== undefined).map((proc) => [proc.pid, proc.tty as number]));
 	const kills: { pgid: number; signal: NodeJS.Signals }[] = [];
 	const opts: SweepOptions = {
 		listPids: () => procs.map((proc) => proc.pid),
 		readIdentity: (pid) => identities.get(pid),
 		readEnviron: (pid) => envs.get(pid),
+		readTtyNr: (pid) => ttys.get(pid),
 		killGroup: (pgid, signal) => kills.push({ pgid, signal }),
 		groupAlive: () => false,
 		candidateStartMs: (identity) => (identity.starttime === undefined ? undefined : Number(identity.starttime)),
@@ -106,8 +113,18 @@ function inside(proc: FakeProc): FakeProc {
 	return { starttime: String(STARTED_AT_MS + 5_000), ...proc };
 }
 
+/**
+ * A candidate that started well inside the run window, carrying the run-id
+ * marker AND the descent proof 11b.4 requires with it: `PI_CREW_PARENT_PID` is
+ * the recorded runner pid (`DEAD_PID`), which is dead. Before 11b.4 the run-id
+ * marker alone was enough — see the (a16) block for why it no longer is.
+ */
 function withRun(pid: number, pgid: number): FakeProc {
-	return inside({ pid, pgid, env: { PI_CREW_BROKER_RUN_ID: "team_test_11b" } });
+	return inside({
+		pid,
+		pgid,
+		env: { PI_CREW_BROKER_RUN_ID: "team_test_11b", PI_CREW_PARENT_PID: String(DEAD_PID) },
+	});
 }
 
 const pids = (descendants: RunDescendant[]): number[] => descendants.map((descendant) => descendant.pid);
@@ -211,13 +228,22 @@ test("(a4) foreign uid, self, ancestors and pre-run starttimes are never candida
 });
 
 test("(a5) pgid undefined or <= 1 ⇒ skipped as no-pgid, never signalled individually", () => {
+	// Both candidates carry the run marker AND the dead recorded parent, so they
+	// ARE proven descendants — the no-pgid skip is what stops the signal: 541 has
+	// no group of its own and 542 sits in pgid 1 (init's group), neither of which
+	// may ever be signalled.
 	const { opts, kills } = fakeSweep(
 		[
-			{ pid: 541, env: { PI_CREW_BROKER_RUN_ID: "team_test_11b" }, starttime: String(STARTED_AT_MS + 1_000) },
-			{ pid: 542, pgid: 1, env: { PI_CREW_BROKER_RUN_ID: "team_test_11b" }, starttime: String(STARTED_AT_MS + 1_000) },
+			inside({ pid: 541, env: { PI_CREW_BROKER_RUN_ID: "team_test_11b", PI_CREW_PARENT_PID: String(DEAD_PID) } }),
+			inside({
+				pid: 542,
+				pgid: 1,
+				env: { PI_CREW_BROKER_RUN_ID: "team_test_11b", PI_CREW_PARENT_PID: String(DEAD_PID) },
+			}),
 		],
 		STARTED_AT_MS,
 	);
+	assert.deepEqual(pids(collectRunDescendants(markers(), opts)), [541, 542], "both are proven descendants");
 	const result = reapRunDescendants(markers(), opts);
 	assert.deepEqual(pids(result.descendants), [541, 542], "discovery still reports them");
 	assert.deepEqual(result.skipped, [
@@ -385,12 +411,15 @@ test("(a14) a recorded ancestor is never a candidate, even while it is alive", a
 				// The live recorded worker itself carries the run marker (every worker
 				// gets PI_CREW_BROKER_RUN_ID) — it must be excluded by PID, not by death.
 				withRun(liveWorker, 900_681),
-				// Its leaked grandchild, own group, same run marker.
+				// Its leaked grandchild, own group, same run marker, and the recorded
+				// runner as its (dead) parent — the descent proof 11b.4 requires.
 				withRun(682, 900_682),
 			],
 			STARTED_AT_MS,
 		);
-		const result = reapRunDescendants(markers({ workerPids: [liveWorker], runnerPid: undefined }), opts);
+		// The recorded worker stays in the markers (exclusion is by PID, not by
+		// death); the recorded runner is the dead parent the grandchild names.
+		const result = reapRunDescendants(markers({ workerPids: [liveWorker] }), opts);
 		assert.deepEqual(pids(result.descendants), [682], "only the descendant is a candidate");
 		assert.deepEqual(kills, [{ pgid: 900_682, signal: "SIGTERM" }], "the live worker's group is never signalled");
 	} finally {
@@ -433,6 +462,129 @@ test("(a15) a LIVE recorded surface pane pid is never a candidate; a dead one ha
 	} finally {
 		child.kill("SIGKILL");
 	}
+});
+
+// ── A5d. descent proof for the run-id marker (wave 11b.4, HIGH-1) ─────────
+
+test("(a16) the run-id marker alone is NOT descent proof — a dead recorded parent is required", async () => {
+	const child = await spawnLivePid();
+	try {
+		const liveParent = child.pid;
+		assert.ok(typeof liveParent === "number", "the fixture parent must have a pid");
+		const runEnv = { PI_CREW_BROKER_RUN_ID: "team_test_11b" };
+		const { opts, kills } = fakeSweep(
+			[
+				// The incident shape: inherited env + a recorded parent (the runner) that
+				// is already dead ⇒ provably an orphan of THIS run.
+				withRun(701, 900_701),
+				// A live recorded parent: the process may still be doing that run's work.
+				inside({ pid: 702, pgid: 900_702, env: { ...runEnv, PI_CREW_PARENT_PID: String(liveParent) } }),
+				// No PI_CREW_PARENT_PID at all: an operator shell (or a service the run
+				// left behind) that merely INHERITED the env. Nothing proves descent.
+				inside({ pid: 703, pgid: 900_703, env: runEnv }),
+				// A parent this run never recorded — someone else's tree entirely.
+				inside({ pid: 704, pgid: 900_704, env: { ...runEnv, PI_CREW_PARENT_PID: "424242" } }),
+			],
+			STARTED_AT_MS,
+		);
+		const withLiveWorker = markers({ workerPids: [liveParent] });
+		const found = collectRunDescendants(withLiveWorker, opts);
+		assert.deepEqual(pids(found), [701], "only the candidate with a DEAD recorded parent is collected");
+		assert.equal(found[0]?.matchedBy, "run-id");
+		assert.deepEqual(kills, [], "collect never signals");
+		const result = reapRunDescendants(withLiveWorker, opts);
+		assert.deepEqual(kills, [{ pgid: 900_701, signal: "SIGTERM" }], "the operator shell's group is never signalled");
+		assert.deepEqual(pids(result.reaped), [701]);
+	} finally {
+		child.kill("SIGKILL");
+	}
+});
+
+test("(a17) a recorded surface pane pid is an accepted proof parent once it is dead (MEDIUM-3 guard)", () => {
+	assert.equal(pidAlive(MEDIUM_3_PID), false, `fixture assumes pid ${MEDIUM_3_PID} is dead`);
+	const { opts } = fakeSweep(
+		[
+			inside({
+				pid: 721,
+				pgid: 900_721,
+				env: { PI_CREW_BROKER_RUN_ID: "team_test_11b", PI_CREW_PARENT_PID: String(MEDIUM_3_PID) },
+			}),
+		],
+		STARTED_AT_MS,
+	);
+	// No recorded parent and no surface pid ⇒ no proof ⇒ not a candidate.
+	const unproven = markers({ runnerPid: undefined });
+	assert.deepEqual(pids(collectRunDescendants(unproven, opts)), []);
+	// Recorded as a surface pane pid (and dead) ⇒ descent is provable. Today this
+	// set is redundant with the recorded parents; it is kept as a guard in case
+	// surface pids ever diverge from what the tasks recorded.
+	const proven = markers({ runnerPid: undefined, surfacePids: [MEDIUM_3_PID] });
+	assert.deepEqual(pids(collectRunDescendants(proven, opts)), [721]);
+});
+
+// ── A5e. interactive candidates (wave 11b.4, safety rung 12) ───────────────
+
+test("(a18) a candidate holding a controlling terminal is skipped as interactive-tty and never signalled", () => {
+	const { opts, kills } = fakeSweep(
+		[
+			// The operator's shell inside a pane: its markers DO match (dead recorded
+			// parent), but it is attached to a terminal ⇒ rung 12 keeps it alive.
+			{ ...withRun(731, 900_731), tty: 34_816 },
+			// Control: the same shape with no terminal (a detached server) is reaped.
+			withRun(732, 900_732),
+		],
+		STARTED_AT_MS,
+	);
+	const result = reapRunDescendants(markers(), opts);
+	assert.deepEqual(pids(result.descendants), [731, 732], "discovery reports both — the doctor must still show them");
+	assert.equal(result.descendants.find((descendant) => descendant.pid === 731)?.ttyNr, 34_816, "the tty is reported");
+	assert.deepEqual(pids(result.reaped), [732]);
+	assert.deepEqual(result.skipped, [{ pid: 731, reason: "interactive-tty" }]);
+	assert.deepEqual(kills, [{ pgid: 900_732, signal: "SIGTERM" }], "the interactive group is never signalled");
+});
+
+// ── A6. one /proc snapshot per pass (wave 11b.4, LOW-4) ────
+
+test("(a19) one snapshot serves N sweeps in a pass; without a snapshot each sweep reads /proc", () => {
+	let scans = 0;
+	const runs = [
+		{ runId: "team_pass_a", pid: 741, pgid: 900_741 },
+		{ runId: "team_pass_b", pid: 742, pgid: 900_742 },
+		{ runId: "team_pass_c", pid: 743, pgid: 900_743 },
+	];
+	const { opts } = fakeSweep(
+		runs.map((run) =>
+			inside({ pid: run.pid, pgid: run.pgid, env: { PI_CREW_BROKER_RUN_ID: run.runId, PI_CREW_PARENT_PID: String(DEAD_PID) } }),
+		),
+		STARTED_AT_MS,
+	);
+	// `listPids` is exactly the /proc enumeration the snapshot is built from, so
+	// counting it IS "how many full /proc scans did this pass perform".
+	const counting: SweepOptions = {
+		...opts,
+		listPids: () => {
+			scans += 1;
+			return runs.map((run) => run.pid);
+		},
+	};
+	const snapshot = buildProcSnapshot(counting);
+	assert.equal(scans, 1, "the pass pays for exactly ONE /proc enumeration");
+	for (const run of runs) {
+		const result = reapRunDescendants(markers({ runId: run.runId, workerPids: [], runnerPid: DEAD_PID }), {
+			...counting,
+			snapshot,
+		});
+		assert.deepEqual(pids(result.reaped), [run.pid], `${run.runId} reaps its own descendant from the shared snapshot`);
+	}
+	assert.equal(scans, 1, "N runs in one pass ⇒ ONE scan, not N (the 25-run budget used to be 25 full scans)");
+	// No snapshot ⇒ one enumeration per sweep (the doctor path and the lone
+	// reconciler call keep their pre-11b.4 behaviour).
+	scans = 0;
+	__resetSignalledGroupsForTest();
+	for (const run of runs) {
+		reapRunDescendants(markers({ runId: run.runId, workerPids: [], runnerPid: DEAD_PID }), counting);
+	}
+	assert.equal(scans, 3, "without a snapshot each sweep builds its own view");
 });
 
 // ── B. real topology (pi bash tool shape) ────────────────────────────────────

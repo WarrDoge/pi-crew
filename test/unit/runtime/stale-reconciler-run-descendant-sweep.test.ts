@@ -161,6 +161,8 @@ interface FakeProc {
 	starttime?: string;
 	uid?: number;
 	env?: Record<string, string>;
+	/** `/proc/<pid>/stat` field 7 — undefined/0 ⇒ no controlling terminal. */
+	tty?: number;
 }
 
 interface FakeSweep {
@@ -179,11 +181,13 @@ function fakeSweep(procs: FakeProc[]): FakeSweep {
 		procs.map((proc) => [proc.pid, { pid: proc.pid, pgid: proc.pgid, starttime: proc.starttime, uid: proc.uid ?? selfUid() }]),
 	);
 	const envs = new Map(procs.map((proc) => [proc.pid, proc.env ?? {}]));
+	const ttys = new Map(procs.filter((proc) => proc.tty !== undefined).map((proc) => [proc.pid, proc.tty as number]));
 	const kills: { pgid: number; signal: NodeJS.Signals }[] = [];
 	const opts: SweepOptions = {
 		listPids: () => procs.map((proc) => proc.pid),
 		readIdentity: (pid) => identities.get(pid),
 		readEnviron: (pid) => envs.get(pid),
+		readTtyNr: (pid) => ttys.get(pid),
 		killGroup: (pgid, signal) => kills.push({ pgid, signal }),
 		groupAlive: () => false,
 		candidateStartMs: (identity) => (identity.starttime === undefined ? undefined : Number(identity.starttime)),
@@ -290,15 +294,24 @@ describe("wave 11b.1 — the sweep is reachable for a terminal run", () => {
 			await once(child, "spawn");
 			const liveWorkerPid = child.pid;
 			assert.ok(typeof liveWorkerPid === "number", "the fixture worker must have a pid");
-			const manifest = makeManifest(stateRoot);
+			// The run also recorded a DETACHED runner, now dead — the descent proof the
+			// leaked grandchild below names (11b.4 HIGH-1: the run-id marker alone is
+			// not proof any more).
+			const manifest = makeManifest(stateRoot, {
+				async: { pid: DEAD_RUNNER_PID, logPath: path.join(stateRoot, "runner.log"), spawnedAt: new Date().toISOString() },
+			});
 			const leakedPid = 800_002;
 			const workerPgid = 900_010;
 			const { opts, kills } = fakeSweep([
 				// The still-alive recorded worker — carries the run marker (every
-				// worker gets PI_CREW_BROKER_RUN_ID) and would match by run-id.
+				// worker gets PI_CREW_BROKER_RUN_ID) and is excluded by PID.
 				insideRun(manifest, { pid: liveWorkerPid, pgid: workerPgid, env: { PI_CREW_BROKER_RUN_ID: RUN_ID } }),
-				// The real leak: a grandchild of the run, own group, parent gone.
-				insideRun(manifest, { pid: leakedPid, pgid: 900_002, env: { PI_CREW_BROKER_RUN_ID: RUN_ID } }),
+				// The real leak: a grandchild of the run, own group, dead runner as parent.
+				insideRun(manifest, {
+					pid: leakedPid,
+					pgid: 900_002,
+					env: { PI_CREW_BROKER_RUN_ID: RUN_ID, PI_CREW_PARENT_PID: String(DEAD_RUNNER_PID) },
+				}),
 			]);
 			const { calls, results } = installSweepSeam(opts);
 			const liveTask = completedTask(liveWorkerPid);
@@ -364,6 +377,139 @@ describe("wave 11b.1 — the sweep is reachable for a terminal run", () => {
 		try {
 			reconcileStaleRun(manifest, [completedTask(DEAD_WORKER_PID)], Date.now());
 			assert.equal(calls.length, 0, "only depth 0 (host session / detached runner) may sweep");
+		} finally {
+			fs.rmSync(stateRoot, { recursive: true, force: true });
+		}
+	});
+});
+
+// ── g6/g7: HIGH-2 — the stamp records the attempt, `pending` records the leak ──
+
+/**
+ * Wave 11b.4 (HIGH-2). 11b.2/11b.3 stamped `descendantSweepAt` even when the
+ * sweep had PROVEN a descendant and then refused to signal it (a live unmatched
+ * group leader, no usable pgid, a refused group reap, an interactive tty). That
+ * re-created the wave-11b failure mode one level up: the run looked done, so the
+ * startup lane never looked at its leak again. These pins drive the REAL sweep
+ * (fake /proc, no signal) through `reconcileStaleRun` and assert the persisted
+ * marker pair.
+ */
+describe("wave 11b.4 — the sweep marker separates ATTEMPT TIME from PENDING state", () => {
+	/** The marker pair as persisted on disk (the stamp goes through saveRunManifest). */
+	function readMarker(manifest: TeamRunManifest): Record<string, unknown> {
+		return JSON.parse(fs.readFileSync(path.join(manifest.stateRoot, "manifest.json"), "utf-8")) as Record<string, unknown>;
+	}
+
+	function runnableManifest(stateRoot: string, overrides: Partial<TeamRunManifest> = {}): TeamRunManifest {
+		return makeManifest(stateRoot, {
+			async: { pid: DEAD_RUNNER_PID, logPath: path.join(stateRoot, "runner.log"), spawnedAt: new Date().toISOString() },
+			...overrides,
+		});
+	}
+
+	it("(g6) a live unmatched group leader leaves the run PENDING, not done", () => {
+		const stateRoot = makeStateRoot();
+		const manifest = runnableManifest(stateRoot);
+		const { opts, kills } = fakeSweep([
+			// Someone's still-running session leads the group ⇒ leader-alive-unmatched.
+			insideRun(manifest, { pid: 910_101, pgid: 910_101, env: {} }),
+			insideRun(manifest, {
+				pid: 800_101,
+				pgid: 910_101,
+				env: { PI_CREW_BROKER_RUN_ID: RUN_ID, PI_CREW_PARENT_PID: String(DEAD_RUNNER_PID) },
+			}),
+		]);
+		const { results } = installSweepSeam(opts);
+		try {
+			const result = reconcileStaleRun(manifest, [completedTask(DEAD_WORKER_PID)], Date.now());
+			assert.equal(result.verdict, "result_exists");
+			assert.deepEqual(results[0]?.skipped, [{ pid: 800_101, reason: "leader-alive-unmatched" }]);
+			assert.deepEqual(kills, [], "a live unmatched leader is never signalled");
+			const marker = readMarker(manifest);
+			assert.ok(
+				typeof marker.descendantSweepAt === "string" && Number.isFinite(Date.parse(marker.descendantSweepAt)),
+				"the attempt itself is recorded (ISO timestamp)",
+			);
+			assert.equal(
+				marker.descendantSweepPending,
+				true,
+				"a proven-but-blocked leak MUST stay eligible — otherwise 11b.2 buried it for good",
+			);
+		} finally {
+			fs.rmSync(stateRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("(g7) an interactive candidate (controlling terminal) ⇒ zero signals, run PENDING", () => {
+		const stateRoot = makeStateRoot();
+		const manifest = runnableManifest(stateRoot);
+		const { opts, kills } = fakeSweep([
+			{
+				...insideRun(manifest, {
+					pid: 800_102,
+					pgid: 910_102,
+					env: { PI_CREW_BROKER_RUN_ID: RUN_ID, PI_CREW_PARENT_PID: String(DEAD_RUNNER_PID) },
+				}),
+				// A controlling terminal: the operator's shell, not a run resource.
+				tty: 34_816,
+			},
+		]);
+		const { results } = installSweepSeam(opts);
+		try {
+			reconcileStaleRun(manifest, [completedTask(DEAD_WORKER_PID)], Date.now());
+			assert.deepEqual(results[0]?.skipped, [{ pid: 800_102, reason: "interactive-tty" }]);
+			assert.deepEqual(kills, [], "an interactive candidate is never signalled");
+			assert.equal(readMarker(manifest).descendantSweepPending, true, "the tty'd leak is retried, not forgotten");
+		} finally {
+			fs.rmSync(stateRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("(g7-b) a CLEAN sweep clears a previously pending flag", () => {
+		const stateRoot = makeStateRoot();
+		const manifest = runnableManifest(stateRoot, {
+			descendantSweepAt: new Date(Date.now() - 3_600_000).toISOString(),
+			descendantSweepPending: true,
+		});
+		const { opts } = fakeSweep([
+			insideRun(manifest, {
+				pid: 800_103,
+				pgid: 910_103,
+				env: { PI_CREW_BROKER_RUN_ID: RUN_ID, PI_CREW_PARENT_PID: String(DEAD_RUNNER_PID) },
+			}),
+		]);
+		const { results } = installSweepSeam(opts);
+		try {
+			reconcileStaleRun(manifest, [completedTask(DEAD_WORKER_PID)], Date.now());
+			assert.deepEqual(
+				results[0]?.reaped.map((descendant) => descendant.pid),
+				[800_103],
+				"the retry actually reaps the leak it was kept eligible for",
+			);
+			const marker = readMarker(manifest);
+			assert.ok(Number.isFinite(Date.parse(String(marker.descendantSweepAt))), "the stamp is refreshed");
+			assert.equal(marker.descendantSweepPending, undefined, "nothing left to retry ⇒ the flag is cleared, not set to false");
+		} finally {
+			fs.rmSync(stateRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("(g7-c) a dry-run report never stamps and never sets pending", () => {
+		const stateRoot = makeStateRoot();
+		const manifest = runnableManifest(stateRoot);
+		const { opts } = fakeSweep([
+			insideRun(manifest, {
+				pid: 800_104,
+				pgid: 910_104,
+				env: { PI_CREW_BROKER_RUN_ID: RUN_ID, PI_CREW_PARENT_PID: String(DEAD_RUNNER_PID) },
+			}),
+		]);
+		__test.setReapRunDescendants((markers) => reapRunDescendants(markers, { ...opts, dryRun: true }));
+		try {
+			reconcileStaleRun(manifest, [completedTask(DEAD_WORKER_PID)], Date.now());
+			const marker = readMarker(manifest);
+			assert.equal(marker.descendantSweepAt, undefined, "a report-only pass must not consume the marker");
+			assert.equal(marker.descendantSweepPending, undefined);
 		} finally {
 			fs.rmSync(stateRoot, { recursive: true, force: true });
 		}

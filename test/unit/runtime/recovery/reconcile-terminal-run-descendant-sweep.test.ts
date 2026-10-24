@@ -119,6 +119,8 @@ interface WriteRunOptions {
 	updatedAtMs?: number;
 	workerPid?: number;
 	sweepAt?: string;
+	/** 11b.4: the persisted "proven but not signalled yet" flag. */
+	sweepPending?: boolean;
 	/** Extra (foreign) manifest keys, written straight to the JSON file. */
 	extraManifestFields?: Record<string, unknown>;
 }
@@ -139,6 +141,7 @@ function writeRun(cwd: string, runId: string, options: WriteRunOptions): TeamRun
 		status: options.status,
 		updatedAt: new Date(options.updatedAtMs ?? createdAtMs).toISOString(),
 		...(options.sweepAt === undefined ? {} : { descendantSweepAt: options.sweepAt }),
+		...(options.sweepPending === undefined ? {} : { descendantSweepPending: options.sweepPending }),
 	};
 	saveRunManifest(manifest);
 	const task: TeamTaskState = {
@@ -239,6 +242,13 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 			);
 			const stamped = readManifestFromDisk(manifest).descendantSweepAt;
 			assert.ok(isIsoTimestamp(stamped), `marker must be an ISO timestamp on disk, got ${JSON.stringify(stamped)}`);
+			// 11b.4: a clean sweep (nothing discovered, nothing skipped) leaves NO
+			// retry flag behind — the run is done, not "pending".
+			assert.equal(
+				readManifestFromDisk(manifest).descendantSweepPending,
+				undefined,
+				"a clean attempt must not mark the run as pending",
+			);
 			assert.equal(readManifestFromDisk(manifest).status, "completed", "stamping must not disturb the run status");
 		} finally {
 			fs.rmSync(cwd, { recursive: true, force: true });
@@ -534,6 +544,73 @@ describe("wave 11b.3 — the terminal lane is bounded by age, depth and recorded
 			const plainCall = seam.calls.find((call) => call.runId === "team_w11b3_plain");
 			assert.ok(plainCall !== undefined);
 			assert.equal(plainCall.surfacePids, undefined, "no surface state ⇒ no surface exclusion (additive field)");
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+// ── wave 11b.4: the retry gate (HIGH-2) ─────────────────────────────────────
+
+/**
+ * 11b.4 separates "when was the last attempt" (`descendantSweepAt`) from "is
+ * there still something to signal" (`descendantSweepPending`). A pending run is
+ * re-selected only once `TERMINAL_SWEEP_RETRY_MS` (10 min) has elapsed, so a
+ * permanently blocked leak (a live leader, a tty'd candidate) still gets retried
+ * without burning a /proc scan on every pass.
+ */
+describe("wave 11b.4 — a pending terminal run is retried, a clean one never is", () => {
+	it("(h11) pending: not selected inside the retry window, selected after it", async () => {
+		const cwd = makeWorkspace();
+		try {
+			const now = Date.now();
+			const pending = writeRun(cwd, "team_w11b4_pending", {
+				status: "completed",
+				createdAtMs: now - 3_600_000,
+				updatedAtMs: now - 3_600_000,
+				// Swept a minute ago, but the sweep proved a descendant it could not
+				// signal ⇒ still due.
+				sweepAt: new Date(now - 60_000).toISOString(),
+				sweepPending: true,
+			});
+			const seam = installSweepSeam();
+
+			await reconcileAllStaleRuns(cwd, makeStubCache([pending]), now);
+			assert.equal(seam.calls.length, 0, "inside the 10-minute window a pending run must NOT be re-scanned every pass");
+			assert.equal(seam.procScans, 0, "no /proc enumeration for a run that is not due");
+
+			await reconcileAllStaleRuns(cwd, makeStubCache([pending]), now + 11 * 60_000);
+			assert.deepEqual(
+				seam.calls.map((call) => call.runId),
+				["team_w11b4_pending"],
+				"past the retry interval the leak is looked at again",
+			);
+			const marker = readManifestFromDisk(pending);
+			assert.ok(isIsoTimestamp(marker.descendantSweepAt), "the retry refreshes the attempt time");
+			assert.equal(marker.descendantSweepPending, undefined, "the retry was clean (empty /proc table) ⇒ no longer pending");
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("(h12) a CLEAN marker is terminal for good — no retry, however old", async () => {
+		const cwd = makeWorkspace();
+		try {
+			const now = Date.now();
+			const clean = writeRun(cwd, "team_w11b4_clean", {
+				status: "completed",
+				createdAtMs: now - 86_400_000,
+				updatedAtMs: now - 86_400_000,
+				sweepAt: new Date(now - 86_400_000).toISOString(),
+			});
+			const seam = installSweepSeam();
+
+			await reconcileAllStaleRuns(cwd, makeStubCache([clean]), now);
+			assert.equal(seam.calls.length, 0, "a stamped-clean run is done, not merely old");
+
+			await reconcileAllStaleRuns(cwd, makeStubCache([clean]), now + 86_400_000);
+			assert.equal(seam.calls.length, 0, "age never resurrects a clean run — only `descendantSweepPending` does");
+			assert.equal(seam.procScans, 0);
 		} finally {
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}

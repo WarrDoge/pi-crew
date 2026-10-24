@@ -951,8 +951,9 @@ export function formatRunDescendantReport(reports: RunDescendantReport[]): strin
 	}
 	const total = reports.reduce((sum, report) => sum + report.descendants.length, 0);
 	lines.push(`Survivors: ${total} process(es) across ${reports.length} terminal run(s).`);
-	lines.push("Matched by inherited marker (run-id → task-id → parent-pid); a descendant that called setsid or runs in its own");
-	lines.push("container cannot be proven and is not listed.");
+	lines.push("Matched by inherited marker (run-id → task-id → parent-pid); the run-id marker alone is not proof of descent —");
+	lines.push("a candidate must also name a recorded parent of the run that is already dead. A descendant that called setsid or");
+	lines.push("runs in its own container cannot be proven and is not listed.");
 	lines.push("");
 	for (const report of reports) {
 		lines.push(`Run ${report.runId} — ${report.descendants.length} process(es):`);
@@ -962,8 +963,12 @@ export function formatRunDescendantReport(reports: RunDescendantReport[]): strin
 		}
 	}
 	lines.push("");
-	lines.push("Automatic reaping happens in the stale reconciler, only for terminal runs whose recorded runner/worker pids are");
-	lines.push("all dead and never inside a worker. PI_CREW_REAP_RUN_DESCENDANTS=0 disables it entirely.");
+	lines.push("Automatic reaping happens in the stale reconciler, per candidate: it only signals a process that proves descent");
+	lines.push("(a recorded runner/worker parent that is already dead) inside a terminal run, that holds no controlling terminal,");
+	lines.push("and whose process group has a dead leader or a leader that is itself a candidate (a live unmatched leader blocks");
+	lines.push("the group). A same-uid process that merely inherited a run's env — an operator shell, or a service the run left");
+	lines.push("running — has no such proof and is deliberately NOT reaped, so a survivor listed above may stay alive by design.");
+	lines.push("Never runs inside a worker. PI_CREW_REAP_RUN_DESCENDANTS=0 disables it entirely.");
 	return lines.join("\n");
 }
 

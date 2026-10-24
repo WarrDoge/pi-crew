@@ -447,6 +447,16 @@ export interface TeamRunManifest {
 	 *  Stamped only after a REAL sweep (never on dry-run, kill switch off, or
 	 *  a throwing sweep) so a failed attempt is retried on the next pass. */
 	descendantSweepAt?: string;
+	/** Wave 11b.4 (HIGH-2): the last sweep attempt PROVED descendants it could
+	 *  not signal (a live unmatched group leader, a candidate with no usable
+	 *  pgid, a refused group reap, an interactive tty). Without this the run
+	 *  would be stamped as done and the leak never looked at again — the exact
+	 *  failure mode 11b.2 introduced. Purely additive/optional: absent (or
+	 *  `false`) means "nothing left to retry". Startup reconciliation re-selects
+	 *  a pending run once `TERMINAL_SWEEP_RETRY_MS` has elapsed since
+	 *  `descendantSweepAt`, so a permanently un-signallable leak does not burn a
+	 *  /proc scan on every pass. */
+	descendantSweepPending?: boolean;
 }
 
 export interface RunModelContext {
