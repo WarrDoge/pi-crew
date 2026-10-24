@@ -654,6 +654,20 @@ function collectRecordedWorkerPids(tasks: TeamTaskState[]): number[] {
 }
 
 /**
+ * Wave 11b.3: pids the run's mux-surface controller recorded per task
+ * (`manifest.surface.workerPids`, `ManifestSurfaceState` in state/types.ts —
+ * verified field, never invented). A pane pid that is still alive is the pane
+ * the operator may be watching, so the sweep must not treat it as a descendant.
+ */
+function collectSurfacePids(manifest: TeamRunManifest): number[] {
+	const pids = new Set<number>();
+	for (const pid of Object.values(manifest.surface?.workerPids ?? {})) {
+		if (typeof pid === "number" && Number.isInteger(pid) && pid > 1) pids.add(pid);
+	}
+	return [...pids];
+}
+
+/**
  * Wave 11b (F7) + 11b.1 (reachability): run-scoped descendant sweep for a
  * TERMINAL run. Two preconditions, in order:
  *
@@ -708,6 +722,10 @@ export function sweepTerminalRunDescendants(manifest: TeamRunManifest, tasks: Te
 		if (!resolveRunDescendantSweepEnabled()) return;
 		const runnerPid = manifest.async?.pid;
 		const workerPids = collectRecordedWorkerPids(tasks);
+		// 11b.3: recorded surface pane pids — alive ones are excluded from the
+		// candidate set inside the sweep (safety rung 10), so a run that just went
+		// terminal cannot lose a pane the operator is still watching.
+		const surfacePids = collectSurfacePids(manifest);
 		const recordedPids = runnerPid !== undefined ? [runnerPid, ...workerPids] : workerPids;
 		// No recorded process ⇒ no marker can prove descent for the shapes this
 		// wave targets (the parent-pid / task-id branches both need a recorded
@@ -718,6 +736,7 @@ export function sweepTerminalRunDescendants(manifest: TeamRunManifest, tasks: Te
 			runId: manifest.runId,
 			...(runnerPid !== undefined ? { runnerPid } : {}),
 			workerPids,
+			...(surfacePids.length > 0 ? { surfacePids } : {}),
 			taskIds: tasks.map((task) => task.id),
 			startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : 0,
 		});

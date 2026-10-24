@@ -915,11 +915,21 @@ export function collectRunDescendantReport(cwd: string, limit = RUN_DESCENDANT_S
 			),
 		];
 		const startedAtMs = Date.parse(manifest.async?.spawnedAt ?? manifest.createdAt);
+		// 11b.3: the same surface-pane exclusion the automatic sweep applies — a
+		// LIVE pane pid is not a leak, so the report must not list it either.
+		const surfacePids = [
+			...new Set(
+				Object.values(manifest.surface?.workerPids ?? {}).filter(
+					(pid): pid is number => typeof pid === "number" && Number.isInteger(pid) && pid > 1,
+				),
+			),
+		];
 		const result = reapRunDescendants(
 			{
 				runId: manifest.runId,
 				...(runnerPid !== undefined ? { runnerPid } : {}),
 				workerPids,
+				...(surfacePids.length > 0 ? { surfacePids } : {}),
 				taskIds: loaded.tasks.map((task) => task.id),
 				startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : 0,
 			},

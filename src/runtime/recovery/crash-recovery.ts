@@ -1044,13 +1044,50 @@ const TERMINAL_RUN_STATUSES_FOR_SWEEP: ReadonlySet<TeamRunManifest["status"]> = 
  */
 const MAX_UNSWEPT_TERMINAL_RUNS_PER_PASS = 25;
 
+/**
+ * Wave 11b.3 (grace window): a terminal run is only swept once its `updatedAt`
+ * is at least this old. `status` flips to `completed` the moment the last task
+ * finishes, while the run's mux panes / live sessions can still be attached for
+ * a while afterwards — the operator may be reading that output. Sweeping
+ * immediately would kill processes the operator is still using, so the lane
+ * waits one minute. A run that is still inside the window is NOT stamped: it
+ * simply stays eligible and is picked up by a later pass (startup + the periodic
+ * reconcile), which is exactly the reachability the 11b.2 marker provides.
+ */
+const TERMINAL_SWEEP_MIN_AGE_MS = 60_000;
+
+/**
+ * Wave 11b.3 (old-run starvation): how deep the terminal lane reads the manifest
+ * cache. `list(50)` (the call the reconcile lane uses) is a top-N by `createdAt`
+ * — with 50 newer runs in between, the run that actually leaked (the 10-22
+ * incident: completed a day before its grandchildren died) would never be seen.
+ * 200 is a per-lane window only; `DEFAULT_CACHE.manifestMaxEntries` and the
+ * global `list()` default stay untouched.
+ */
+const TERMINAL_SWEEP_CACHE_WINDOW = 200;
+
 function isTerminalRunStatus(status: TeamRunManifest["status"]): boolean {
 	return TERMINAL_RUN_STATUSES_FOR_SWEEP.has(status);
 }
 
 /**
- * Wave 11b.2: terminal runs whose descendant sweep marker is absent, NEWEST
- * first, capped at `MAX_UNSWEPT_TERMINAL_RUNS_PER_PASS`.
+ * Epoch ms of the run's last state change (`updatedAt`), falling back to
+ * `createdAt`. `TeamRunManifest` has no `completedAt` (verified in
+ * state/types.ts) and `updatedAt` is the field every status write refreshes, so
+ * it is the correct "when did this run become terminal" proxy. A manifest whose
+ * timestamps are both unparseable is treated as ANCIENT (0) — it must not starve
+ * a leak just because its clock field is broken.
+ */
+function terminalSinceMs(manifest: TeamRunManifest): number {
+	const updated = Date.parse(manifest.updatedAt);
+	if (Number.isFinite(updated)) return updated;
+	const created = Date.parse(manifest.createdAt);
+	return Number.isFinite(created) ? created : 0;
+}
+
+/**
+ * Wave 11b.2 + 11b.3: terminal runs whose descendant sweep marker is absent,
+ * OLDEST first, capped at `MAX_UNSWEPT_TERMINAL_RUNS_PER_PASS`.
  *
  * This list is what makes the sweep reachable after the fact: the pre-11b.2
  * enumeration (`status === running | blocked`) structurally could not see a run
@@ -1060,13 +1097,25 @@ function isTerminalRunStatus(status: TeamRunManifest["status"]): boolean {
  * (the marker, checked again under the run lock, is the idempotency guard), and
  * the sweep itself refuses to signal anything it cannot prove descends from
  * THIS run with a dead recorded parent.
+ *
+ * Ordering (11b.3): OLDEST `updatedAt` first, deliberately the opposite of the
+ * reconcile lane. The cap is 25 /proc scans per pass, so whatever order is
+ * chosen decides which leaks STARVE — and a leak from an old run is the one
+ * that has been burning memory longest (the incident ran for 24 h). Newest-first
+ * would let a steady stream of fresh runs push an old leak out of the cap
+ * forever; oldest-first guarantees every eligible run is visited within
+ * `ceil(eligible / 25)` passes.
+ *
+ * Age gate (11b.3): a run whose `updatedAt` is younger than
+ * `TERMINAL_SWEEP_MIN_AGE_MS` is skipped and left UNSTAMPED (see the constant).
  */
-function selectUnsweptTerminalRunIds(manifestCache: ManifestCache): string[] {
+function selectUnsweptTerminalRunIds(manifestCache: ManifestCache, now = Date.now()): string[] {
 	return manifestCache
-		.list(50)
+		.list(TERMINAL_SWEEP_CACHE_WINDOW)
 		.filter((manifest) => isTerminalRunStatus(manifest.status) && manifest.descendantSweepAt === undefined)
-		.map((manifest) => ({ runId: manifest.runId, createdAtMs: Date.parse(manifest.createdAt) }))
-		.sort((a, b) => (Number.isFinite(b.createdAtMs) ? b.createdAtMs : 0) - (Number.isFinite(a.createdAtMs) ? a.createdAtMs : 0))
+		.map((manifest) => ({ runId: manifest.runId, terminalSinceMs: terminalSinceMs(manifest) }))
+		.filter((entry) => now - entry.terminalSinceMs >= TERMINAL_SWEEP_MIN_AGE_MS)
+		.sort((a, b) => a.terminalSinceMs - b.terminalSinceMs)
 		.slice(0, MAX_UNSWEPT_TERMINAL_RUNS_PER_PASS)
 		.map((entry) => entry.runId);
 }
@@ -1086,7 +1135,10 @@ export async function reconcileAllStaleRuns(
 	// been swept yet (`manifest.descendantSweepAt` absent) is enumerated here and
 	// swept once, under its own run lock, in a lane that never runs the stale
 	// verdict tree (a terminal run is not stale — it is finished).
-	const terminalRunIds = selectUnsweptTerminalRunIds(manifestCache);
+	// Wave 11b.3 adds the two bounds: the grace window (`updatedAt` at least a
+	// minute old, so a just-finished run keeps its panes) and the deeper cache
+	// window (oldest first), both documented on the constants above.
+	const terminalRunIds = selectUnsweptTerminalRunIds(manifestCache, now);
 	// Capture runIds to reconcile BEFORE acquiring locks — avoids TOCTOU between cache iteration and lock acquisition.
 	const runIds = manifestCache
 		.list(50)
@@ -1220,6 +1272,10 @@ export async function reconcileAllStaleRuns(
 				// the cache list and this lock — that run belongs to the reconcile
 				// lane, and its descendants are legitimate again.
 				if (!isTerminalRunStatus(fresh.manifest.status)) return;
+				// 11b.3: re-check the grace window on the FRESH manifest — a run that
+				// resumed and finished again since the cache snapshot is young again,
+				// and its panes may have just been re-attached.
+				if (now - terminalSinceMs(fresh.manifest) < TERMINAL_SWEEP_MIN_AGE_MS) return;
 				sweepTerminalRunDescendants(fresh.manifest, fresh.tasks);
 			});
 			// Wave 11a review MAJOR #3 (same owner as the reconcile lane): the sync

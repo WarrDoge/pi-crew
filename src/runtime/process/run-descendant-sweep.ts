@@ -57,6 +57,12 @@
  *      when it is still alive. Only its children/grandchildren are, so a live
  *      recorded pid cannot veto the sweep the way the old all-or-nothing
  *      "every recorded pid is dead" gate did.
+ *  10. (11b.3) A recorded SURFACE pane pid (`manifest.surface.workerPids`) is
+ *      something the operator may still be watching in a mux pane ⇒ while it is
+ *      ALIVE it is never a candidate. It is not excluded unconditionally like a
+ *      recorded ancestor: once it is dead there is nothing left to kill, so the
+ *      pid simply falls out of /proc (and a recycled pid must still satisfy
+ *      every start-time/uid/marker proof above).
  *
  * Escalation: like every other `reapGroup` caller, the SIGKILL rung comes back
  * as a `pending` promise. The caller registers it with the EXISTING drain
@@ -123,6 +129,12 @@ export interface RunMarkers {
 	workerPids: number[];
 	/** Task ids of the run (PI_CREW_TASK_ID values its workers carried). */
 	taskIds: string[];
+	/**
+	 * 11b.3: pids recorded in `manifest.surface.workerPids` (the mux-surface
+	 * controller's view of each worker). A pane pid the operator can still see
+	 * must not be reaped while it is alive — see safety rung 10.
+	 */
+	surfacePids?: number[];
 	/** Run start (epoch ms) — a candidate that predates it cannot belong to it. */
 	startedAtMs: number;
 }
@@ -334,6 +346,8 @@ export function collectRunDescendants(markers: RunMarkers, opts: SweepOptions = 
 	const selfPgrp = readIdentity(process.pid)?.pgid;
 	const recordedParents = new Set<number>(markers.workerPids);
 	if (markers.runnerPid !== undefined) recordedParents.add(markers.runnerPid);
+	// 11b.3: pids the surface controller recorded for this run's panes.
+	const surfacePids = new Set<number>((markers.surfacePids ?? []).filter((pid) => Number.isInteger(pid) && pid > 1));
 	const taskIds = new Set<string>(markers.taskIds);
 	const ancestors = selfAncestors();
 	const descendants: RunDescendant[] = [];
@@ -350,6 +364,11 @@ export function collectRunDescendants(markers: RunMarkers, opts: SweepOptions = 
 		// recycled onto a genuine leaked descendant is skipped here — a miss, never
 		// a wrong kill.
 		if (recordedParents.has(pid)) continue;
+		// 11b.3: a recorded surface pane pid that is STILL ALIVE may be the pane the
+		// operator is watching right now (a run that just went terminal keeps its
+		// mux panes until they are closed). Never a candidate while alive; once it
+		// is dead the pid is gone from /proc anyway, so nothing is left to reap.
+		if (surfacePids.has(pid) && isPidAlive(pid)) continue;
 		const identity = readIdentity(pid);
 		if (!identity) continue;
 		// Same uid only — an unknown uid cannot be proven to be ours either.

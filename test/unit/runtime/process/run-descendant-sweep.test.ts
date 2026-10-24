@@ -398,7 +398,44 @@ test("(a14) a recorded ancestor is never a candidate, even while it is alive", a
 	}
 });
 
-// ── B. real topology (pi bash tool shape) ───────────────────────────────────
+// ── A5c. recorded surface panes (wave 11b.3) ────────────────────────
+
+test("(a15) a LIVE recorded surface pane pid is never a candidate; a dead one has nothing to reap", async () => {
+	const child = await spawnLivePid();
+	try {
+		const livePane = child.pid;
+		assert.ok(typeof livePane === "number", "the fixture pane must have a pid");
+		assert.equal(pidAlive(livePane), true, "fixture precondition: the recorded pane pid is alive");
+		const procs = [
+			// The pane the operator may still be watching. It carries the run marker
+			// (every worker gets PI_CREW_BROKER_RUN_ID) ⇒ it WOULD match by run-id.
+			withRun(livePane, 900_691),
+			// A genuine leak of the same run, in its own group.
+			withRun(692, 900_692),
+		];
+
+		// Control: with no surface knowledge this live pid IS collected — that is
+		// exactly what the exclusion has to prevent.
+		const control = fakeSweep(procs, STARTED_AT_MS);
+		assert.deepEqual(pids(collectRunDescendants(markers(), control.opts)), [livePane, 692]);
+
+		const { opts, kills } = fakeSweep(procs, STARTED_AT_MS);
+		// DEAD_PID stands for a pane that has already exited: a dead pid has no
+		// /proc entry, so it is never enumerated and never appears in the report.
+		const result = reapRunDescendants(markers({ surfacePids: [livePane, DEAD_PID] }), opts);
+
+		assert.deepEqual(pids(result.descendants), [692], "only the real leak is reported — the live pane is not a descendant");
+		assert.deepEqual(pids(result.reaped), [692]);
+		assert.deepEqual(kills, [{ pgid: 900_692, signal: "SIGTERM" }], "the live pane's group is never signalled");
+		assert.ok(!pids(result.descendants).includes(DEAD_PID), "a dead surface pid is absent from the report (nothing to reap)");
+		assert.ok(!result.skipped.some((skip) => skip.pid === DEAD_PID));
+		assert.equal(pidAlive(livePane), true, "the operator's pane survives the sweep");
+	} finally {
+		child.kill("SIGKILL");
+	}
+});
+
+// ── B. real topology (pi bash tool shape) ────────────────────────────────────
 
 const FIXTURE = path.join(import.meta.dirname, "..", "..", "..", "fixtures", "marked-bash-tree.mjs");
 

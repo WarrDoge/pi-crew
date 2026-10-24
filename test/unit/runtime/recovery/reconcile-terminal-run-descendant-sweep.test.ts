@@ -12,11 +12,17 @@
  * These tests are STARTUP-level (`reconcileAllStaleRuns`) and pin:
  *   h1  terminal run without a marker ⇒ enumerated + swept + marker persisted
  *   h2  second pass ⇒ skipped, ZERO /proc enumeration (collectRunDescendants)
- *   h3  30 unswept terminal runs ⇒ only the 25 newest are swept (per-pass cap)
+ *   h3  30 unswept terminal runs ⇒ only the 25 OLDEST are swept (per-pass cap)
  *   h4  a RUNNING run keeps the old path and is never swept
  *   h5  old manifests load; an unknown field is neither required nor stripped
  *   h6  kill switch OFF ⇒ no sweep AND no marker (stays eligible)
  *   h7  a throwing sweep ⇒ no marker (retried next pass)
+ *   h8  GRACE WINDOW (11b.3): updatedAt 30 s old ⇒ not selected, NO marker;
+ *       120 s old ⇒ selected; the skipped run is picked up once it ages out
+ *   h9  CACHE WINDOW (11b.3): 60 unswept terminal runs where the oldest sits
+ *       OUTSIDE the reconcile lane's top-50 ⇒ still swept (oldest first)
+ *   h10 SURFACE PIDS (11b.3): manifest.surface.workerPids ⇒ markers.surfacePids
+ *       (the sweep then refuses to touch a live pane pid)
  *
  * The sweep is swapped through the `__test.setReapRunDescendants` seam (same as
  * the sibling 11b.1 suite) and the swapped implementation is the REAL
@@ -104,6 +110,13 @@ function makeWorkspace(): string {
 interface WriteRunOptions {
 	status: TeamRunManifest["status"];
 	createdAtMs?: number;
+	/**
+	 * `manifest.updatedAt` (11b.3): the field the terminal lane uses for its grace
+	 * window. Defaults to `createdAtMs`; set it OLDER than `createdAtMs` to model a
+	 * run that finished long after it started, or NEWER to model one that just
+	 * went terminal.
+	 */
+	updatedAtMs?: number;
 	workerPid?: number;
 	sweepAt?: string;
 	/** Extra (foreign) manifest keys, written straight to the JSON file. */
@@ -124,7 +137,7 @@ function writeRun(cwd: string, runId: string, options: WriteRunOptions): TeamRun
 	const manifest: TeamRunManifest = {
 		...created.manifest,
 		status: options.status,
-		updatedAt: new Date(createdAtMs).toISOString(),
+		updatedAt: new Date(options.updatedAtMs ?? createdAtMs).toISOString(),
 		...(options.sweepAt === undefined ? {} : { descendantSweepAt: options.sweepAt }),
 	};
 	saveRunManifest(manifest);
@@ -150,10 +163,17 @@ function writeRun(cwd: string, runId: string, options: WriteRunOptions): TeamRun
 	return manifest;
 }
 
+/**
+ * Stub cache honouring the real `list(limit)` contract: the REAL cache returns
+ * the newest `createdAt` first and slices to `limit`, which is exactly the
+ * top-N window 11b.3 has to widen (h9). Fixtures are therefore passed in the
+ * order the real cache would return them (newest first) whenever the limit
+ * matters.
+ */
 function makeStubCache(manifests: TeamRunManifest[]): ManifestCache {
 	const byId = new Map(manifests.map((manifest) => [manifest.runId, manifest]));
 	return {
-		list: () => manifests,
+		list: (limit?: number) => (limit === undefined ? manifests : manifests.slice(0, limit)),
 		listActive: (limit: number) => manifests.filter((manifest) => manifest.status === "running").slice(0, limit),
 		get: (runId: string) => byId.get(runId),
 		clear: () => {
@@ -204,7 +224,7 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 	it("(h1) completed run without descendantSweepAt ⇒ swept once and stamped", async () => {
 		const cwd = makeWorkspace();
 		try {
-			const manifest = writeRun(cwd, "team_w11b2_h1", { status: "completed" });
+			const manifest = writeRun(cwd, "team_w11b2_h1", { status: "completed", createdAtMs: Date.now() - 120_000 });
 			const seam = installSweepSeam();
 
 			const results = await reconcileAllStaleRuns(cwd, makeStubCache([manifest]), Date.now());
@@ -228,7 +248,7 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 	it("(h2) second pass skips the stamped run: collectRunDescendants 0 calls", async () => {
 		const cwd = makeWorkspace();
 		try {
-			const manifest = writeRun(cwd, "team_w11b2_h2", { status: "completed" });
+			const manifest = writeRun(cwd, "team_w11b2_h2", { status: "completed", createdAtMs: Date.now() - 120_000 });
 			const seam = installSweepSeam();
 
 			await reconcileAllStaleRuns(cwd, makeStubCache([manifest]), Date.now());
@@ -244,7 +264,7 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 		}
 	});
 
-	it("(h3) 30 unswept completed runs ⇒ only the 25 newest are swept per pass", async () => {
+	it("(h3) 30 unswept completed runs ⇒ only the 25 OLDEST are swept per pass", async () => {
 		const cwd = makeWorkspace();
 		try {
 			const base = Date.parse("2026-10-20T00:00:00.000Z");
@@ -262,11 +282,19 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 			await reconcileAllStaleRuns(cwd, makeStubCache(manifests), Date.now());
 
 			const swept = seam.calls.map((call) => call.runId);
-			const expected = Array.from({ length: 25 }, (_, offset) => `team_w11b2_r${String(29 - offset).padStart(2, "0")}`);
+			// 11b.3: OLDEST first (updatedAt asc) — the selection order. It is pinned
+			// by MEMBERSHIP, not by call order: the lane runs `mapConcurrent(..., 2)`,
+			// so the handful of runs that reach the seam are pushed in completion
+			// order. What the ordering has to guarantee is WHICH 25 survive the cap.
+			const expected = Array.from({ length: 25 }, (_, index) => `team_w11b2_r${String(index).padStart(2, "0")}`);
 			assert.equal(swept.length, 25, "the per-pass cap is exactly 25 (/proc scan budget)");
-			assert.deepEqual(swept, expected, "newest createdAt first; the 5 oldest are deferred to a later pass");
+			assert.deepEqual(
+				[...swept].sort(),
+				[...expected].sort(),
+				"the 25 OLDEST are swept; the 5 youngest are deferred to a later pass",
+			);
 			// Deferred runs keep NO marker ⇒ eligible on the next pass.
-			for (let index = 0; index < 5; index += 1) {
+			for (let index = 25; index < 30; index += 1) {
 				const deferred = manifests[index];
 				assert.ok(deferred !== undefined);
 				assert.equal(
@@ -341,7 +369,7 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 	it("(h6) kill switch off ⇒ no sweep AND no marker", async () => {
 		const cwd = makeWorkspace();
 		try {
-			const manifest = writeRun(cwd, "team_w11b2_h6", { status: "completed" });
+			const manifest = writeRun(cwd, "team_w11b2_h6", { status: "completed", createdAtMs: Date.now() - 120_000 });
 			const seam = installSweepSeam();
 			process.env.PI_CREW_REAP_RUN_DESCENDANTS = "0";
 
@@ -362,7 +390,7 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 	it("(h7) a throwing sweep leaves no marker ⇒ retried next pass", async () => {
 		const cwd = makeWorkspace();
 		try {
-			const manifest = writeRun(cwd, "team_w11b2_h7", { status: "completed" });
+			const manifest = writeRun(cwd, "team_w11b2_h7", { status: "completed", createdAtMs: Date.now() - 120_000 });
 			let attempts = 0;
 			__test.setReapRunDescendants(() => {
 				attempts += 1;
@@ -379,6 +407,133 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 
 			await reconcileAllStaleRuns(cwd, makeStubCache([manifest]), Date.now());
 			assert.equal(attempts, 2, "the run stays eligible, so the next pass retries the sweep");
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+// ── wave 11b.3: age gate + cache window + surface panes ────────────────
+
+describe("wave 11b.3 — the terminal lane is bounded by age, depth and recorded panes", () => {
+	it("(h8) a run that JUST went terminal is not swept yet (60 s grace window)", async () => {
+		const cwd = makeWorkspace();
+		try {
+			const now = Date.now();
+			// Identical but for `updatedAt`: 30 s vs 120 s since the run went terminal.
+			const fresh = writeRun(cwd, "team_w11b3_fresh", {
+				status: "completed",
+				createdAtMs: now - 300_000,
+				updatedAtMs: now - 30_000,
+			});
+			const aged = writeRun(cwd, "team_w11b3_aged", {
+				status: "completed",
+				createdAtMs: now - 300_000,
+				updatedAtMs: now - 120_000,
+			});
+			const seam = installSweepSeam();
+
+			await reconcileAllStaleRuns(cwd, makeStubCache([fresh, aged]), now);
+
+			assert.deepEqual(
+				seam.calls.map((call) => call.runId),
+				["team_w11b3_aged"],
+				"only the run past the 60 s window is swept; updatedAt (not createdAt) decides",
+			);
+			assert.equal(
+				readManifestFromDisk(fresh).descendantSweepAt,
+				undefined,
+				"a run inside the grace window must NOT be stamped — its mux panes may still be attached",
+			);
+			assert.ok(isIsoTimestamp(readManifestFromDisk(aged).descendantSweepAt), "the aged run is swept once");
+
+			// Nothing is lost: the deferred run is swept as soon as it ages out.
+			await reconcileAllStaleRuns(cwd, makeStubCache([fresh, aged]), now + 90_000);
+			assert.deepEqual(
+				[...seam.calls.map((call) => call.runId)].sort(),
+				["team_w11b3_aged", "team_w11b3_fresh"],
+				"the skipped run stays eligible and is swept on a later pass (call order is concurrency-2 completion order, so only membership is asserted)",
+			);
+			assert.ok(isIsoTimestamp(readManifestFromDisk(fresh).descendantSweepAt));
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("(h9) 60 unswept terminal runs: the OLDEST (outside a top-50 window) is still swept", async () => {
+		const cwd = makeWorkspace();
+		try {
+			const base = Date.parse("2026-10-20T00:00:00.000Z");
+			const ascending: TeamRunManifest[] = [];
+			for (let index = 0; index < 60; index += 1) {
+				ascending.push(
+					writeRun(cwd, `team_w11b3_c${String(index).padStart(2, "0")}`, {
+						status: "completed",
+						createdAtMs: base + index * 60_000,
+					}),
+				);
+			}
+			// The REAL cache returns newest `createdAt` first and slices to `limit`.
+			const newestFirst = [...ascending].reverse();
+			// Pre-condition of the fix: with the reconcile lane's window (50) the run
+			// that ACTUALLY leaked would be invisible — the starvation 11b.3 removes.
+			assert.ok(
+				!newestFirst.slice(0, 50).some((manifest) => manifest.runId === "team_w11b3_c00"),
+				"fixture precondition: c00 sits outside a top-50 window",
+			);
+			const seam = installSweepSeam();
+
+			await reconcileAllStaleRuns(cwd, makeStubCache(newestFirst), Date.now());
+
+			const swept = seam.calls.map((call) => call.runId);
+			const expected = Array.from({ length: 25 }, (_, index) => `team_w11b3_c${String(index).padStart(2, "0")}`);
+			assert.equal(swept.length, 25, "the /proc budget per pass is unchanged");
+			// Membership, not call order: the lane sweeps at concurrency 2, so the
+			// order in which the seam observes the runs is completion order. The
+			// oldest-first SELECTION is what decides membership under the cap — and
+			// with newest-first, c00 (below) would be the one starved.
+			assert.deepEqual([...swept].sort(), [...expected].sort(), "the 25 OLDEST, so an old leak can never starve behind newer runs");
+			assert.ok(swept.includes("team_w11b3_c00"), "the run outside a top-50 window is reached (11b.3 cache window)");
+			assert.ok(isIsoTimestamp(readManifestFromDisk(ascending[0] as TeamRunManifest).descendantSweepAt));
+			assert.equal(
+				readManifestFromDisk(ascending[59] as TeamRunManifest).descendantSweepAt,
+				undefined,
+				"the remaining 35 keep no marker ⇒ eligible on the next pass",
+			);
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("(h10) manifest.surface.workerPids reach the sweep as surfacePids", async () => {
+		const cwd = makeWorkspace();
+		try {
+			const manifest = writeRun(cwd, "team_w11b3_surface", {
+				status: "completed",
+				createdAtMs: Date.now() - 120_000,
+				extraManifestFields: {
+					surface: {
+						provider: "tmux",
+						panes: { "01_01-agent": "%3" },
+						workerPids: { "01_01-agent": 424_201, "02_02-agent": 424_202 },
+						sessionPaths: {},
+					},
+				},
+			});
+			const plain = writeRun(cwd, "team_w11b3_plain", { status: "completed", createdAtMs: Date.now() - 120_000 });
+			const seam = installSweepSeam();
+
+			await reconcileAllStaleRuns(cwd, makeStubCache([manifest, plain]), Date.now());
+
+			const surfaced = seam.calls.find((call) => call.runId === "team_w11b3_surface");
+			assert.deepEqual(
+				surfaced?.surfacePids,
+				[424_201, 424_202],
+				"the recorded pane pids are handed to the sweep so a LIVE pane is never a candidate",
+			);
+			const plainCall = seam.calls.find((call) => call.runId === "team_w11b3_plain");
+			assert.ok(plainCall !== undefined);
+			assert.equal(plainCall.surfacePids, undefined, "no surface state ⇒ no surface exclusion (additive field)");
 		} finally {
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}
