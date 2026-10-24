@@ -525,9 +525,16 @@ export async function drainReapEscalations(): Promise<void> {
 // orphan reaper so the escalation registration can be driven by a deferred
 // promise — no real /proc read and no real signal.
 let reapRecordedWorkerOrphansImpl = reapRecordedWorkerOrphans;
+// Wave 11b.1 test seam (same shape as the orphan-reaper seam above): swap the
+// run-descendant sweep so its REACHABILITY can be pinned at reconcile level — a
+// real /proc scan and a real signal must never be part of a reconcile test.
+let reapRunDescendantsImpl: typeof reapRunDescendants = reapRunDescendants;
 export const __test = {
 	setReapRecordedWorkerOrphans(fn: typeof reapRecordedWorkerOrphans | undefined): void {
 		reapRecordedWorkerOrphansImpl = fn ?? reapRecordedWorkerOrphans;
+	},
+	setReapRunDescendants(fn: typeof reapRunDescendants | undefined): void {
+		reapRunDescendantsImpl = fn ?? reapRunDescendants;
 	},
 	/** Register a synthetic escalation (event-loop pin test — no real reap). */
 	trackEscalation(promise: Promise<unknown>): void {
@@ -535,6 +542,7 @@ export const __test = {
 	},
 	reset(): void {
 		reapRecordedWorkerOrphansImpl = reapRecordedWorkerOrphans;
+		reapRunDescendantsImpl = reapRunDescendants;
 		inflightReapEscalations.clear();
 	},
 };
@@ -603,7 +611,15 @@ function repairStaleRun(
 	// a group nothing rooted at the worker can signal (the 390 MB / 24 h leak
 	// after team_20261022110510 completed). The run-scoped sweep matches the env
 	// markers they INHERITED instead, and only once this run is terminal.
-	sweepRunDescendants(manifest, reapTargets);
+	// NOTE (11b.1): the sweep is handed the POST-repair array, never the input
+	// `tasks` and never `reapTargets`. The terminal guard inside the helper is
+	// `tasks.every(isTerminalTaskStatus)`, and the input array still carries the
+	// `running`/`queued` statuses this function just cancelled — so the pre-11b.1
+	// call site passed a guard that could NEVER pass and the sweep was dead code
+	// on this path too. `repairedTasks` is exactly "what is left to run": all
+	// terminal when the whole run was repaired, still non-terminal (⇒ no sweep)
+	// on the individual-stale-subset branch, which is the behaviour we want.
+	sweepTerminalRunDescendants(manifest, repairedTasks);
 	return repairedTasks;
 }
 
@@ -618,28 +634,35 @@ function collectRecordedWorkerPids(tasks: TeamTaskState[]): number[] {
 }
 
 /**
- * Wave 11b (F7): run-scoped descendant sweep, fired only from `repairStaleRun`
- * once the run has reached a TERMINAL state. Three preconditions, in order:
+ * Wave 11b (F7) + 11b.1 (reachability): run-scoped descendant sweep for a
+ * TERMINAL run. Two preconditions, in order:
  *
  *  1. TERMINAL only — a run that still has a live task may legitimately own
  *     live descendants; sweeping it would kill in-flight work. `repairStaleRun`
- *     has just cancelled the stale subset, so `tasks.every(isTerminalTaskStatus)`
- *     is exactly the "nothing left to run" test.
+ *     passes its POST-repair array (the pre-repair one is never all-terminal,
+ *     which is what made the guard unsatisfiable before 11b.1); the
+ *     `result_exists` path passes the tasks checkResultFile just proved
+ *     terminal.
  *  2. NEVER inside a worker — a worker process carries `PI_CREW_KIND=subagent`
  *     and/or a non-zero crew depth, and every descendant it can see may belong
  *     to its OWN (still-running) run. Only the host session / detached runner
  *     may sweep, which is also why the kill switch is forwarded there.
- *  3. Every recorded ancestor must be DEAD (runner pid + worker pids). A live
- *     recorded pid means the tree is still owned by someone: its descendants
- *     are legitimately alive, and the markers we match would be indistinguishable
- *     from a still-running run's.
+ *
+ * The pre-11b.1 third precondition ("every recorded ancestor must be dead") is
+ * GONE: it was all-or-nothing, so ONE surviving recorded worker aborted the
+ * sweep for the entire run and the leaked grandchildren — the incident this wave
+ * exists for — were never reaped. Descent is now proven PER CANDIDATE inside
+ * run-descendant-sweep.ts: a recorded ancestor (runner/worker) is never a
+ * candidate, and a `task-id` match additionally requires its recorded parent to
+ * be dead. A live recorded pid therefore no longer vetoes the sweep; it simply
+ * is not swept.
  *
  * Best-effort: never throws. When something was reaped the result is logged at
  * `warn` (logInternalError has no `info` level; this mirrors the F2 reap above,
  * whose success log is also `warn`), otherwise at `debug`. Escalations are
  * registered with the existing drain owners.
  */
-function sweepRunDescendants(manifest: TeamRunManifest, tasks: TeamTaskState[]): void {
+function sweepTerminalRunDescendants(manifest: TeamRunManifest, tasks: TeamTaskState[]): void {
 	try {
 		if (!tasks.every((task) => isTerminalTaskStatus(task.status))) return;
 		if (getCrewEnv("PI_CREW_KIND") === "subagent") return;
@@ -647,12 +670,12 @@ function sweepRunDescendants(manifest: TeamRunManifest, tasks: TeamTaskState[]):
 		const runnerPid = manifest.async?.pid;
 		const workerPids = collectRecordedWorkerPids(tasks);
 		const recordedPids = runnerPid !== undefined ? [runnerPid, ...workerPids] : workerPids;
-		// No recorded process ⇒ no marker can prove descent (every branch needs a
-		// recorded parent), so skip the /proc scan entirely.
+		// No recorded process ⇒ no marker can prove descent for the shapes this
+		// wave targets (the parent-pid / task-id branches both need a recorded
+		// parent), so skip the /proc scan entirely.
 		if (recordedPids.length === 0) return;
-		if (recordedPids.some((pid) => checkProcessLiveness(pid).alive)) return;
 		const startedAtMs = Date.parse(manifest.async?.spawnedAt ?? manifest.createdAt);
-		const result = reapRunDescendants({
+		const result = reapRunDescendantsImpl({
 			runId: manifest.runId,
 			...(runnerPid !== undefined ? { runnerPid } : {}),
 			workerPids,
@@ -767,6 +790,18 @@ export function reconcileStaleRun(manifest: TeamRunManifest, tasks: TeamTaskStat
 		// NOTE (OPT-02): Remains sync — reconcileStaleRun is called from withRunLockSync in
 		// crash-recovery.ts and from sync reconcileOrphanedTempWorkspaces; cannot await here.
 		saveRunManifest(manifest);
+		// Wave 11b.1 (F7 reachability): the sweep MUST run on THIS path too.
+		// `result_exists` is the most common way a run becomes terminal, and the
+		// only pre-11b.1 caller was `repairStaleRun` — unreachable once a result
+		// file exists. That is exactly why the leak behind
+		// team_20261022110510 (6 grandchildren, 399 MB, 24 h) survived a run that
+		// was `completed` while the sweep's unit tests were green: a leak lives
+		// LONGER than its run, so "this run is finished" is the reason to sweep,
+		// never the reason to skip. Every task is terminal here (checkResultFile
+		// just proved it); the helper keeps its own guards (all tasks terminal,
+		// never inside a worker, kill switch) and this branch RETURNS, so the
+		// sweep still runs at most once per run per reconcile pass.
+		sweepTerminalRunDescendants(manifest, tasks);
 		return {
 			runId,
 			verdict: "result_exists",

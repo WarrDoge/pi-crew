@@ -341,6 +341,63 @@ test("(a12) a process without a run marker is never a candidate — and never si
 	assert.deepEqual(kills, []);
 });
 
+// ── A5b. per-candidate proof (wave 11b.1: the all-or-nothing gate is gone) ───
+
+/** A real, live child process — the "recorded pid is still running" fixture. */
+async function spawnLivePid(): Promise<ChildProcess> {
+	const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+	await new Promise<void>((resolve, reject) => {
+		child.once("spawn", () => resolve());
+		child.once("error", reject);
+	});
+	return child;
+}
+
+test("(a13) task-id needs a DEAD recorded parent — a live one may still be doing its work", async () => {
+	const child = await spawnLivePid();
+	try {
+		const liveParent = child.pid;
+		assert.ok(typeof liveParent === "number", "the fixture parent must have a pid");
+		const { opts } = fakeSweep(
+			[
+				inside({
+					pid: 671,
+					pgid: 900_671,
+					env: { PI_CREW_KIND: "subagent", PI_CREW_TASK_ID: "01_01-agent", PI_CREW_PARENT_PID: String(liveParent) },
+				}),
+			],
+			STARTED_AT_MS,
+		);
+		const found = collectRunDescendants(markers({ workerPids: [liveParent], runnerPid: undefined }), opts);
+		assert.deepEqual(pids(found), [], "a live recorded parent means the candidate is not (yet) an orphan");
+	} finally {
+		child.kill("SIGKILL");
+	}
+});
+
+test("(a14) a recorded ancestor is never a candidate, even while it is alive", async () => {
+	const child = await spawnLivePid();
+	try {
+		const liveWorker = child.pid;
+		assert.ok(typeof liveWorker === "number", "the fixture worker must have a pid");
+		const { opts, kills } = fakeSweep(
+			[
+				// The live recorded worker itself carries the run marker (every worker
+				// gets PI_CREW_BROKER_RUN_ID) — it must be excluded by PID, not by death.
+				withRun(liveWorker, 900_681),
+				// Its leaked grandchild, own group, same run marker.
+				withRun(682, 900_682),
+			],
+			STARTED_AT_MS,
+		);
+		const result = reapRunDescendants(markers({ workerPids: [liveWorker], runnerPid: undefined }), opts);
+		assert.deepEqual(pids(result.descendants), [682], "only the descendant is a candidate");
+		assert.deepEqual(kills, [{ pgid: 900_682, signal: "SIGTERM" }], "the live worker's group is never signalled");
+	} finally {
+		child.kill("SIGKILL");
+	}
+});
+
 // ── B. real topology (pi bash tool shape) ───────────────────────────────────
 
 const FIXTURE = path.join(import.meta.dirname, "..", "..", "..", "fixtures", "marked-bash-tree.mjs");

@@ -52,6 +52,11 @@
  *      `leader-alive-unmatched`, nothing signalled.
  *   8. `dryRun` reports and signals nothing; `PI_CREW_REAP_RUN_DESCENDANTS=0`
  *      disables the whole sweep.
+ *   9. (11b.1) A RECORDED ancestor (the detached runner pid, a worker pid) is
+ *      the tree's ROOT, never its descendant ⇒ it is never a candidate, even
+ *      when it is still alive. Only its children/grandchildren are, so a live
+ *      recorded pid cannot veto the sweep the way the old all-or-nothing
+ *      "every recorded pid is dead" gate did.
  *
  * Escalation: like every other `reapGroup` caller, the SIGKILL rung comes back
  * as a `pending` promise. The caller registers it with the EXISTING drain
@@ -298,7 +303,13 @@ function matchMarkers(
 	// runner — or a worker pid for a nested worker).
 	if (environ.PI_CREW_KIND === "subagent") {
 		const taskId = environ.PI_CREW_TASK_ID;
-		if (taskId !== undefined && taskIds.has(taskId) && hasParent && recordedParents.has(parentPid)) return "task-id";
+		// 11b.1 (per-candidate proof): the recorded parent this candidate names
+		// must ALSO be gone. While it is alive the candidate may still be doing
+		// that worker's work, so a `task-id` match alone is not proof of a leak —
+		// the parent-pid branch below has always required the same thing.
+		if (taskId !== undefined && taskIds.has(taskId) && hasParent && recordedParents.has(parentPid) && !isPidAlive(parentPid)) {
+			return "task-id";
+		}
 	}
 	// The orphan shape of the incident survivors: only the dead recorded parent
 	// is available as proof.
@@ -330,6 +341,15 @@ export function collectRunDescendants(markers: RunMarkers, opts: SweepOptions = 
 		if (!Number.isInteger(pid) || pid <= 1) continue;
 		// Never ourselves, never a process that hosts this session.
 		if (pid === process.pid || ancestors.has(pid)) continue;
+		// 11b.1 per-candidate rule: a RECORDED ancestor is the root of the tree we
+		// are cleaning up, never a descendant of it. Excluding it is what makes the
+		// sweep safe WITHOUT the old all-or-nothing "every recorded pid is dead"
+		// gate: a live worker keeps running (its own group reap / orphan reaper
+		// owns it) while the leaked grandchildren whose recorded parent is already
+		// gone are still reaped. Trade-off, stated plainly: a recorded pid that was
+		// recycled onto a genuine leaked descendant is skipped here — a miss, never
+		// a wrong kill.
+		if (recordedParents.has(pid)) continue;
 		const identity = readIdentity(pid);
 		if (!identity) continue;
 		// Same uid only — an unknown uid cannot be proven to be ours either.
@@ -415,9 +435,12 @@ function defaultGroupAlive(pgid: number): boolean {
  * candidates that share a pgid are reported individually but signalled once.
  * Never throws.
  *
- * MUST only be called for a terminal run whose recorded ancestors are dead —
- * `stale-reconciler.ts` enforces exactly that before calling, and the doctor
- * path is `dryRun`.
+ * MUST only be called for a TERMINAL run. 11b.1: the recorded ancestors need NOT
+ * be dead any more — a recorded pid is never a candidate (see
+ * `collectRunDescendants`), so a live worker cannot veto reaping the leaked
+ * grandchildren whose own recorded parent is gone. `stale-reconciler.ts`
+ * enforces the terminal-run precondition before calling, and the doctor path is
+ * `dryRun`.
  */
 export function reapRunDescendants(markers: RunMarkers, opts: SweepOptions = {}): RunSweepResult {
 	const result: RunSweepResult = { reaped: [], skipped: [], pending: [], descendants: [] };
