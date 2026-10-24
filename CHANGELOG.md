@@ -2,6 +2,55 @@
 
 ## [Unreleased]
 
+## [0.11.40] — fix wave 12: fixture teardown — test-harness orphan leaks (2026-10-24)
+
+Closes the leak class wave 11 exposed but did not own: the reaping wave made production descendants provable, and
+then two fixtures of the shape `node -e "process.on('SIGTERM',()=>{}); setInterval(...)"` were found alive **> 6 h**
+after their run completed, re-parented to systemd. Both were tests with `finally { child.kill() }` teardown — a
+pid-only signal that cannot reach a tree, is a no-op against a SIGTERM-swallower, and never runs at all when the
+spawn happens after the throw (SPEC `fixwave12-fixture-teardown-2026-10-24`).
+
+**Added — `test/helpers/fixture-process.ts` (the fixture counterpart of `src/runtime/process/reap-group.ts`).**
+- `spawnFixture` / `reapFixture` / `registerFixtureTrap`: pgid-correct fixture lifecycle. `spawnFixture` snapshots
+  identity (`readProcIdentity`) at spawn and normalises `pgid` to `pid` (a detached child leads its own group), so
+  the later group kill is pgid-reuse-proof; `reapFixture` escalates SIGTERM → SIGKILL and never throws (it runs in
+  `finally`, where a throw would mask the failure under test); a refusal that PROVES the pid is a stranger
+  (`starttime-mismatch`, `uid-mismatch`, `not-group-member`) signals nothing rather than pid-killing a recycled pid.
+- `spawnFixture` **refuses non-detached children** by throwing: a non-detached fixture shares the test runner's
+  group, so a group kill rooted at it would signal the runner, sibling test files and the harness.
+- `registerFixtureTrap` flushes registered handles **synchronously** on `exit`/`SIGINT`/`SIGTERM`, covering the abort
+  window where no `finally` runs.
+
+**Fixed — HIGH orphan leak (`test/integration/background-runner-sigint-cleanup.test.ts`).** The grandchild group is
+now reaped even when an assertion throws; the harness stays pid-only by design (documented in
+`test/helpers/README.md`).
+
+**Fixed — orphan risk in three more fixtures.** `test/unit/retrieval-orchestrator.test.ts` (the fake `rg` writes its
+pid/pgid and the group is reaped), `test/unit/runtime/child-pi/inference-broker.test.ts` (the live `pi` is spawned
+detached and its group reaped via `reapFixture`; the 90 s timer is demoted to a safety net, not the teardown), and
+`test/unit/runtime/process/reap-group.test.ts` (the `spawnTree` failure path reaps its own group — GAP-4).
+
+**Fixed — teardown race (`test/unit/extension/team-tool-steer-clamp.test.ts`).** `ENOTEMPTY` on `afterEach`: the
+fire-and-forget `appendEventAsync` re-creates the run directory after a plain `rmSync`. Now uses
+`removeDirWithRetry` (the existing helper) so the retry absorbs the async writer.
+
+**Added — `getuid?: () => number | undefined` seam** on `ReapGroupOptions`/`SweepOptions`, propagated to the sweep's
+`reapGroup` call site so discovery and group kill can never disagree about the uid (`process.getuid` is undefined on
+win32); this also removes 3 duplicated `process.getuid` monkeypatches from tests.
+
+**Tests.** `test/unit/runtime/process/getuid-seam.test.ts` (10 pins), `test/unit/helpers/fixture-process.test.ts`
+(5 pins: h1–h5), `test/helpers/README.md` (fixture lifecycle rules: detached ⇒ group reap with the spawn-time
+identity snapshot, non-detached ⇒ pid-only with the reason in a comment, never read identity in `finally`).
+
+**Fixed — shard regression.** `helpers: 180` weight registered in `scripts/test-runner.mjs` (wave 12a created
+`test/unit/helpers/`, which had no shard weight).
+
+**Docs.** real-test skill: wave-12 decision-table row, history entry, failure symptom, coverage row, and the
+wave-12d lesson (teardown of a directory with async writers must retry).
+
+**Battery (PASS).** 30/30 targeted runs, `test:critical` 124/124, full unit 10,009 pass / 2 load-flakes (adjudicated
+isolated ×3), integration 144/0, static gates 0, dist MATCH.
+
 ## [0.11.39] — fix wave 11: worker descendant reaping (2026-10-24)
 
 Closes the leak that motivated the wave: run `team_20261022110510_cefb9164af126460` reached `completed` on
