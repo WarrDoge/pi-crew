@@ -437,6 +437,16 @@ export interface TeamRunManifest {
 	/** MuxSurface A1 (spec §8.3): pane/pid/lockout state of this run. Absent on
 	 *  runs that never booted a surface worker and on older manifests. */
 	surface?: ManifestSurfaceState;
+	/** Wave 11b.2 (F7 reachability): ISO timestamp of the LAST completed
+	 *  run-descendant sweep for this run (`sweepTerminalRunDescendants`).
+	 *  Purely additive/optional — absent on every manifest written before
+	 *  11b.2, and absent means "never swept" (⇒ still eligible for the
+	 *  startup sweep). Startup reconciliation enumerates terminal runs that
+	 *  lack it, because a leak OUTLIVES its run: the incident run was
+	 *  `completed` the day before its 6 grandchildren were finally reaped.
+	 *  Stamped only after a REAL sweep (never on dry-run, kill switch off, or
+	 *  a throwing sweep) so a failed attempt is retried on the next pass. */
+	descendantSweepAt?: string;
 }
 
 export interface RunModelContext {

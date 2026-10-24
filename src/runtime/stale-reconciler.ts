@@ -14,7 +14,7 @@ import { findRunStateDir } from "../utils/paths.ts";
 import { recordFromTask, upsertCrewAgent } from "./crew-agent-records.ts";
 import { currentCrewDepth } from "./model/pi-args.ts";
 import { reapRecordedWorkerOrphans } from "./process/orphan-reaper.ts";
-import { reapRunDescendants } from "./process/run-descendant-sweep.ts";
+import { reapRunDescendants, resolveRunDescendantSweepEnabled } from "./process/run-descendant-sweep.ts";
 import { checkProcessLiveness } from "./process-status.ts";
 
 /**
@@ -623,6 +623,26 @@ function repairStaleRun(
 	return repairedTasks;
 }
 
+/**
+ * Wave 11b.2: persist "this run has been swept" so no later reconcile pass
+ * rescans /proc for it. `saveRunManifest` is the same helper every other writer
+ * in this module uses (sync by contract, atomic write, cache-repopulating), and
+ * the caller already holds the run lock on every path that reaches the sweep.
+ * The field is also set IN MEMORY so a caller that saves the manifest right
+ * after (updateRunStatus on the repair path) carries it along even when the
+ * write below fails. Never throws: the sweep already ran.
+ */
+function stampDescendantSweep(manifest: TeamRunManifest): void {
+	try {
+		manifest.descendantSweepAt = new Date().toISOString();
+		saveRunManifest(manifest);
+	} catch (stampError) {
+		// Warn, never throw: the sweep is done; the worst case is one redundant
+		// (idempotent) rescan on the next reconcile pass.
+		logInternalError("stale-reconciler.run-descendant-sweep", stampError, `marker write failed for ${manifest.runId}`, "warn");
+	}
+}
+
 /** Recorded worker pids of a run's tasks (heartbeat / checkpoint), deduped. */
 function collectRecordedWorkerPids(tasks: TeamTaskState[]): number[] {
 	const pids = new Set<number>();
@@ -661,12 +681,31 @@ function collectRecordedWorkerPids(tasks: TeamTaskState[]): number[] {
  * `warn` (logInternalError has no `info` level; this mirrors the F2 reap above,
  * whose success log is also `warn`), otherwise at `debug`. Escalations are
  * registered with the existing drain owners.
+ *
+ * Wave 11b.2 — the SWEEP MARKER. A leak lives LONGER than its run (the incident
+ * run was `completed` a full day before its grandchildren died), so the sweep is
+ * not a run-lifecycle step at all: it has to be reachable from any later
+ * reconcile pass. `manifest.descendantSweepAt` is that reachability record —
+ * startup reconciliation (`reconcileAllStaleRuns`) enumerates TERMINAL runs that
+ * lack it, and this function stamps it after a REAL sweep so the /proc scan runs
+ * at most once per run. Stamped only when a sweep was actually attempted:
+ *  - never on a dry-run report (nothing was signalled ⇒ not swept),
+ *  - never when the kill switch (`PI_CREW_REAP_RUN_DESCENDANTS=0`) is off, so
+ *    turning it back on still finds the run (surface-runtime forwarded kill
+ *    switches must not silently burn the one-shot marker),
+ *  - never when the sweep throws (the failure stays retryable next pass).
+ * The persist is warn-only: the sweep already happened, so a write error must
+ * not fail the reconcile pass — at worst the run is swept again next pass, which
+ * is idempotent (its descendants are gone by then).
  */
-function sweepTerminalRunDescendants(manifest: TeamRunManifest, tasks: TeamTaskState[]): void {
+export function sweepTerminalRunDescendants(manifest: TeamRunManifest, tasks: TeamTaskState[]): void {
 	try {
 		if (!tasks.every((task) => isTerminalTaskStatus(task.status))) return;
 		if (getCrewEnv("PI_CREW_KIND") === "subagent") return;
 		if (currentCrewDepth() !== 0) return;
+		// Kill switch OFF ⇒ no scan, and NO marker: the run must stay eligible so
+		// that flipping the switch back on still reaps its leak.
+		if (!resolveRunDescendantSweepEnabled()) return;
 		const runnerPid = manifest.async?.pid;
 		const workerPids = collectRecordedWorkerPids(tasks);
 		const recordedPids = runnerPid !== undefined ? [runnerPid, ...workerPids] : workerPids;
@@ -684,6 +723,10 @@ function sweepTerminalRunDescendants(manifest: TeamRunManifest, tasks: TeamTaskS
 		});
 		// Same owner as the F2 escalations above — one drain mechanism, never two.
 		for (const escalation of result.pending) trackReapEscalation(escalation);
+		// A dry-run pass signalled nothing (every candidate carries reason
+		// "dry-run"), so it must not consume the one-shot marker.
+		if (result.skipped.some((skip) => skip.reason === "dry-run")) return;
+		stampDescendantSweep(manifest);
 		if (result.reaped.length > 0) {
 			logInternalError(
 				"stale-reconciler.run-descendant-sweep",

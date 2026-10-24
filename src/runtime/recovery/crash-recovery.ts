@@ -33,6 +33,7 @@ import {
 	isPlanApprovalPendingEffective,
 	type ReconcileResult,
 	reconcileStaleRun,
+	sweepTerminalRunDescendants,
 } from "../stale-reconciler.ts";
 
 export interface RecoveryPlan {
@@ -1024,12 +1025,68 @@ export function applyReconcileAtOpenFastPath(
 	};
 }
 
+/**
+ * Wave 11b.2: run statuses whose descendants are fair game for the startup
+ * sweep. Deliberately NARROWER than `TEAM_TERMINAL_RUN_STATUSES`, which also
+ * counts `blocked`: a blocked run is intentionally parked (plan approval / ask)
+ * and is enumerated by the reconcile lane, so its descendants must not be swept
+ * here. `queued`/`planning`/`running` never appear either — those runs may
+ * legitimately own live processes.
+ */
+const TERMINAL_RUN_STATUSES_FOR_SWEEP: ReadonlySet<TeamRunManifest["status"]> = new Set(["completed", "failed", "cancelled"]);
+
+/**
+ * Wave 11b.2: hard cap on terminal runs swept in ONE pass. Each visit costs a
+ * /proc enumeration (plus a lock + two manifest reads), so an install with
+ * hundreds of historical runs must not turn startup into a /proc storm; the
+ * remainder are picked up on later passes (startup + the periodic reconcile),
+ * newest first, which is also where leaks are most likely to still exist.
+ */
+const MAX_UNSWEPT_TERMINAL_RUNS_PER_PASS = 25;
+
+function isTerminalRunStatus(status: TeamRunManifest["status"]): boolean {
+	return TERMINAL_RUN_STATUSES_FOR_SWEEP.has(status);
+}
+
+/**
+ * Wave 11b.2: terminal runs whose descendant sweep marker is absent, NEWEST
+ * first, capped at `MAX_UNSWEPT_TERMINAL_RUNS_PER_PASS`.
+ *
+ * This list is what makes the sweep reachable after the fact: the pre-11b.2
+ * enumeration (`status === running | blocked`) structurally could not see a run
+ * that had already persisted as `completed` — the shape of the incident run,
+ * whose leaked grandchildren outlived it by a day. It is intentionally NOT
+ * filtered by `currentSessionId`: a terminal run has no live claim to respect
+ * (the marker, checked again under the run lock, is the idempotency guard), and
+ * the sweep itself refuses to signal anything it cannot prove descends from
+ * THIS run with a dead recorded parent.
+ */
+function selectUnsweptTerminalRunIds(manifestCache: ManifestCache): string[] {
+	return manifestCache
+		.list(50)
+		.filter((manifest) => isTerminalRunStatus(manifest.status) && manifest.descendantSweepAt === undefined)
+		.map((manifest) => ({ runId: manifest.runId, createdAtMs: Date.parse(manifest.createdAt) }))
+		.sort((a, b) => (Number.isFinite(b.createdAtMs) ? b.createdAtMs : 0) - (Number.isFinite(a.createdAtMs) ? a.createdAtMs : 0))
+		.slice(0, MAX_UNSWEPT_TERMINAL_RUNS_PER_PASS)
+		.map((entry) => entry.runId);
+}
+
 export async function reconcileAllStaleRuns(
 	cwd: string,
 	manifestCache: ManifestCache,
 	now = Date.now(),
 	currentSessionId?: string,
 ): Promise<ReconcileResult[]> {
+	// Wave 11b.2 (F7 reachability): startup reconciliation used to enumerate
+	// `running | blocked` only, so a run that had ALREADY persisted as terminal —
+	// the common case the next morning — never reached `reconcileStaleRun` and its
+	// leaked descendants (the 390 MB / 24 h bash grandchildren behind
+	// team_20261022110510) were never reaped. A leak outlives its run, so the
+	// sweep must be reachable from a LATER pass: every terminal run that has not
+	// been swept yet (`manifest.descendantSweepAt` absent) is enumerated here and
+	// swept once, under its own run lock, in a lane that never runs the stale
+	// verdict tree (a terminal run is not stale — it is finished).
+	const terminalRunIds = selectUnsweptTerminalRunIds(manifestCache);
 	// Capture runIds to reconcile BEFORE acquiring locks — avoids TOCTOU between cache iteration and lock acquisition.
 	const runIds = manifestCache
 		.list(50)
@@ -1136,6 +1193,42 @@ export async function reconcileAllStaleRuns(
 		}
 	});
 	const results = perRun.flat();
+	// Wave 11b.2: terminal-run descendant sweep lane. Deliberately SEPARATE from
+	// the reconcile lane above: a terminal run must never enter the stale verdict
+	// tree (`updateRunStatus`, task repair, `crew.run.reconciled_stale`), it only
+	// needs its leaked descendants reaped once. Same per-run error isolation and
+	// per-run lock as the reconcile lane; contributes no ReconcileResult.
+	if (terminalRunIds.length > 0) {
+		logInternalError(
+			"crash-recovery.terminal-descendant-sweep",
+			new Error(`sweeping descendants of ${terminalRunIds.length} unswept terminal run(s)`),
+			terminalRunIds.join(","),
+			"debug",
+		);
+	}
+	await mapConcurrent(terminalRunIds, 2, async (runId): Promise<void> => {
+		try {
+			const loaded = await loadRunManifestByIdAsync(cwd, runId); // best-effort; re-read under the lock below
+			if (!loaded) return;
+			await withRunLock(loaded.manifest, async () => {
+				const fresh = await loadRunManifestByIdAsync(cwd, runId); // consistent read inside the lock
+				if (!fresh) return;
+				// Idempotency: a concurrent pass (or the run's own completion path)
+				// already stamped this run ⇒ nothing to do, and no /proc scan.
+				if (fresh.manifest.descendantSweepAt !== undefined) return;
+				// The run may have flipped back to running/blocked (resume) between
+				// the cache list and this lock — that run belongs to the reconcile
+				// lane, and its descendants are legitimate again.
+				if (!isTerminalRunStatus(fresh.manifest.status)) return;
+				sweepTerminalRunDescendants(fresh.manifest, fresh.tasks);
+			});
+			// Wave 11a review MAJOR #3 (same owner as the reconcile lane): the sync
+			// sweep arms a group SIGKILL escalation it cannot await.
+			await drainReapEscalations();
+		} catch (error) {
+			logInternalError("crash-recovery.terminal-descendant-sweep", error, `runId=${runId}`, "warn");
+		}
+	});
 	// US-002 (2026-09-22): structured stale-lock sweep. Runs after reconciliation
 	// so locks whose holder died (kill -9 / crash) do not linger. The sweep is
 	// strictly safer than acquire-time steal (stale AND holder-dead only), so a
