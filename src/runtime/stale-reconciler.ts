@@ -499,6 +499,14 @@ function repairStaleRun(
 				"warn",
 			);
 		}
+		// Wave 11a (F2): the group path delivers SIGTERM synchronously and returns
+		// the SIGKILL escalation as a promise. The reconcile IS the owner of those
+		// process lifetimes, so it must not return (and let the host exit) before
+		// the escalation settled. Fire-and-forget with a settled no-op catch — the
+		// promises themselves never reject.
+		void Promise.allSettled(reapResult.pending).catch(() => {
+			/* already settled — nothing to surface */
+		});
 	} catch (reapError) {
 		logInternalError("stale-reconciler", reapError, `orphan reap failed for ${manifest.runId}`, "warn");
 	}

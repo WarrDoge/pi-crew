@@ -52,10 +52,30 @@ export interface RpcSpawnHandle {
 /** Spawn function: receives the pi argv (after `--mode rpc` etc.), returns a handle. */
 export type RpcSpawnFn = (argv: string[]) => RpcSpawnHandle;
 
+/**
+ * Spawn options for the frame client's child (wave 11a, F4). Exported as a pure
+ * function so the platform-dependent group-leadership flag is unit-testable
+ * without spawning a real pi binary. POSIX: `detached` makes the child its own
+ * process-group leader, so a group-targeted teardown can reach its descendants.
+ * `detached` does NOT detach the stdio pipes — frames still round-trip through
+ * the same fd 0/1/2. Windows has no process groups (single-process kill
+ * fallback), so it never detaches.
+ */
+export function frameClientSpawnOptions(platform: NodeJS.Platform): {
+	stdio: ["pipe", "pipe", "pipe"];
+	detached: boolean;
+	windowsHide: boolean;
+} {
+	return { stdio: ["pipe", "pipe", "pipe"], detached: platform !== "win32", windowsHide: true };
+}
+
 /** Default spawner: host pi binary (PI_TEAMS_PI_BIN aware) with piped stdio. */
 function defaultSpawnFn(argv: string[]): RpcSpawnHandle {
 	const { command, args } = getPiSpawnCommand(argv);
-	const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+	// Wave 11a (F4): mirror the headless spawn branch (child-pi-spawn.ts) — see
+	// frameClientSpawnOptions above for why `detached` is on and why it does not
+	// break piped stdio.
+	const child = spawn(command, args, frameClientSpawnOptions(process.platform));
 	return {
 		stdin: child.stdin as Writable,
 		stdout: child.stdout as Readable,

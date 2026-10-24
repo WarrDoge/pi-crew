@@ -152,7 +152,12 @@ const BUDGETS = {
 		// — the spawn path is sync and cannot lazy-import the wrapper).
 		// v0.11.38 W10-8: 534 → 535 — runtime/role-permission.ts (read-only lane
 		// classification for the same-tree guard; tiny pure module, static is right).
-		maxFiles: 535,
+		// fix-wave 11a: 535 → 536 — runtime/process/reap-group.ts (guarded
+		// process-group reaper; statically imported by child-pi-kill.ts and
+		// orphan-reaper.ts, both on the KILL path where a dynamic import could
+		// not be awaited before the pid disappears — static is the only correct
+		// shape here).
+		maxFiles: 536,
 		forbid: ["test/", "scripts/", "docs/", "dist/"],
 	},
 };

@@ -68,6 +68,7 @@ import { readEnabledModelsPatterns } from "../model/model-scope.ts";
 import { type ParsedPiJsonOutput, parsePiJsonOutput } from "../output/pi-json-output.ts";
 import { type ProgressEventSummary, shouldAppendProgressEventUpdate } from "../output/progress-event-coalescer.ts";
 import { buildSyntheticTerminalEvidence, cancellationReasonFromSignal } from "../process/cancellation.ts";
+import { readProcIdentity } from "../process/reap-group.ts";
 import { checkProcessLiveness } from "../process-status.ts";
 import { DEFAULT_RETRY_POLICY } from "../recovery/retry-executor.ts";
 import { runWorker } from "../run-worker.ts";
@@ -866,7 +867,10 @@ export async function runChildProcessTask(ctx: TaskExecutionContext): Promise<Ta
 						} catch (err) {
 							logInternalError("task-runner.ownership-write", err, `pid=${pid}, taskId=${task.id}`);
 						}
-						({ task, tasks } = checkpointTask(manifest, tasks, task, "child-spawned", pid));
+						// Wave 11a (F3): persist the spawn-time identity alongside the pid so a
+						// later reaper can prove the process (starttime/pgid/uid) instead of
+						// guessing from a pid that may already have been recycled.
+						({ task, tasks } = checkpointTask(manifest, tasks, task, "child-spawned", pid, readProcIdentity(pid)));
 						// Security review (T1/WP-1 round 1, security-1 replay fix): scope the
 						// steering file to ONE worker incarnation on EVERY spawn. Steering
 						// lines are id-less; each new worker process reads the file from
@@ -1035,10 +1039,17 @@ export async function runChildProcessTask(ctx: TaskExecutionContext): Promise<Ta
 							// Surface pid was previously never persisted into task state - the
 							// heartbeat-watcher PID-liveness gate (alive -> downgrade dead->stale)
 							// had nothing to check. Pin it once from the worker.started self-report.
+							// Wave 11a (F3): also pin the spawn-time identity (pgid/starttime/uid)
+							// so the orphan reaper can prove this pid later; a /proc read that
+							// races the exit simply contributes nothing (all fields optional).
+							const surfaceIdentity = readProcIdentity(pidFromStart);
 							task = {
 								...task,
 								heartbeat: touchWorkerHeartbeat(task.heartbeat ?? createWorkerHeartbeat(task.id), {
 									pid: pidFromStart,
+									...(surfaceIdentity?.pgid !== undefined ? { pgid: surfaceIdentity.pgid } : {}),
+									...(surfaceIdentity?.starttime !== undefined ? { starttime: surfaceIdentity.starttime } : {}),
+									...(surfaceIdentity?.uid !== undefined ? { uid: surfaceIdentity.uid } : {}),
 								}),
 							};
 						}

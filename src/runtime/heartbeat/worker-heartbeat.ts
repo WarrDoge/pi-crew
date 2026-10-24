@@ -1,6 +1,10 @@
 export interface WorkerHeartbeatState {
 	workerId: string;
 	pid?: number;
+	/** Wave 11a (F3): spawn-time identity of `pid` (see `readProcIdentity`). */
+	pgid?: number;
+	starttime?: string;
+	uid?: number;
 	lastSeenAt: string;
 	lastStdoutAt?: string;
 	lastEventAt?: string;

@@ -7,6 +7,7 @@ import { loadRunManifestById, saveRunTasksCoalesced } from "../../state/stores/s
 import type { TaskCheckpointState, TeamRunManifest, TeamTaskState } from "../../state/types.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
 import { recordFromTask, upsertCrewAgent } from "../crew-agent-records.ts";
+import type { ProcIdentity } from "../process/reap-group.ts";
 
 export function updateTask(tasks: TeamTaskState[], updated: TeamTaskState): TeamTaskState[] {
 	return tasks.map((task) => (task.id === updated.id ? updated : task));
@@ -283,11 +284,19 @@ export function checkpointTask(
 	task: TeamTaskState,
 	phase: TaskCheckpointState["phase"],
 	childPid?: number,
+	identity?: ProcIdentity,
 ): { task: TeamTaskState; tasks: TeamTaskState[] } {
 	const checkpoint: TaskCheckpointState = {
 		phase,
 		updatedAt: new Date().toISOString(),
 		...(childPid ? { childPid } : task.checkpoint?.childPid ? { childPid: task.checkpoint.childPid } : {}),
+		// Wave 11a (F3): persist the spawn-time identity so a later reaper can
+		// PROVE the pid (starttime) instead of guessing. Only defined fields are
+		// spread, so a caller that passes nothing keeps the pre-wave record shape
+		// and old records/state files keep loading unchanged.
+		...(identity?.pgid !== undefined ? { childPgid: identity.pgid } : {}),
+		...(identity?.starttime !== undefined ? { childStartTime: identity.starttime } : {}),
+		...(identity?.uid !== undefined ? { childUid: identity.uid } : {}),
 	};
 	const nextTask = { ...task, checkpoint };
 	const nextTasks = persistSingleTaskUpdate(manifest, updateTask(tasks, nextTask), nextTask);

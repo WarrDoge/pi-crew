@@ -198,6 +198,10 @@ export function buildChildPiSpawnOptions(
 		},
 		stdio: ["ignore", "pipe", "pipe"], // stdin=ignore: child doesn't wait for input; task comes via CLI args
 		detached: process.platform !== "win32",
+		// Wave 11a (GAP-5): `setsid` is NOT a Node spawn option — it is silently
+		// ignored. Group leadership comes from `detached` alone (POSIX setsid() in
+		// the child). Kept verbatim instead of deleted: removing it would suggest a
+		// behaviour change that never happened.
 		setsid: true,
 		// NOTE: setsid creates a new session; the child process becomes the session leader
 		// and its parent becomes that session leader (still the team-runner in the same

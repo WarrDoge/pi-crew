@@ -29,6 +29,7 @@ import { spawn } from "node:child_process";
 import { DEFAULT_CHILD_PI } from "../../config/defaults.ts";
 import { logInternalError } from "../../utils/internal-error.ts";
 import { TailCaptureStage } from "../compaction/compact-stages/tail-capture-stage.ts";
+import { type ProcIdentity, readProcIdentity, reapGroup, resolveReapGroupEnabled } from "../process/reap-group.ts";
 import { HARD_KILL_MS } from "./child-pi-constants.ts";
 import { adoptOwnedProcess, disposeAllOwnedProcesses, type OwnedProcess } from "./owned-process.ts";
 
@@ -44,6 +45,34 @@ const childHardKillTimers = new Map<number, NodeJS.Timeout>();
 // once the owner reaches its terminal state.
 const ownedByPid = new Map<number, OwnedProcess>();
 
+// Wave 11a (F1): the /proc identity snapshot of each registered child, taken
+// AT REGISTRATION (while the child is definitely alive). This is the only
+// pre-exit record of the child's pgid/starttime — once the root exits, /proc is
+// gone and `adoptOwnedProcess`'s live pgid resolution (owned-process.ts) has
+// nothing left to read, so a still-live group becomes unreachable. killProcessTree
+// uses this snapshot for the exited-root case; the 60 s sweep prunes it once the
+// owner is terminal.
+const identityByPid = new Map<number, ProcIdentity>();
+
+// Wave 11a injection seam (same shape as zombie-scanner.ts `__test`): tests seed
+// identity snapshots and swap the group reaper without a real child process.
+let reapGroupImpl: typeof reapGroup = reapGroup;
+export const __test = {
+	/** Seed the exit-time identity snapshot for a pid (as registerActiveChild would). */
+	seedIdentity(pid: number, identity: ProcIdentity | undefined): void {
+		if (identity === undefined) identityByPid.delete(pid);
+		else identityByPid.set(pid, identity);
+	},
+	/** Drop every seeded/recorded identity snapshot. */
+	clearIdentities(): void {
+		identityByPid.clear();
+	},
+	/** Replace the group reaper (undefined restores the real one). */
+	setReapGroup(fn: typeof reapGroup | undefined): void {
+		reapGroupImpl = fn ?? reapGroup;
+	},
+};
+
 // Periodic cleanup of dead child process entries to prevent memory leaks.
 // If a child process never emits exit/close (zombie), the entry would leak.
 setInterval(() => {
@@ -57,7 +86,10 @@ setInterval(() => {
 	// U15: prune adopted owners that reached terminal state (group confirmed
 	// gone via dispose or drain-reconcile). Non-terminal owners stay routable.
 	for (const [pid, owner] of ownedByPid) {
-		if (owner.terminated) ownedByPid.delete(pid);
+		if (!owner.terminated) continue;
+		ownedByPid.delete(pid);
+		// Wave 11a: the owner confirmed its group is gone — the snapshot is spent.
+		identityByPid.delete(pid);
 	}
 }, 60_000).unref();
 
@@ -69,6 +101,11 @@ export function registerActiveChild(pid: number, child: ChildProcess): void {
 	// (authoritative /proc check on Linux — the rpc branch child, spawned
 	// without detached, lands on the single-process fallback automatically).
 	ownedByPid.set(pid, adoptOwnedProcess(child, { name: `child-pi:${pid}` }));
+	// Wave 11a (F1): snapshot the identity NOW — the child is alive here, so
+	// /proc is readable. killProcessTree's exited-root branch reaps the group
+	// from this snapshot after the root is gone.
+	const identity = readProcIdentity(pid);
+	if (identity) identityByPid.set(pid, identity);
 }
 
 /**
@@ -220,7 +257,29 @@ export function killProcessTree(pid: number | undefined, child?: ChildProcess): 
 		void owned.dispose();
 		return;
 	}
-	if (child && child.exitCode !== null) return;
+	if (child && child.exitCode !== null) {
+		// Wave 11a (F1): an EXITED ROOT IS NOT AN EMPTY GROUP. The root may have
+		// backgrounded descendants that are still alive in its process group; the
+		// pre-wave early-out returned here and left them running forever. We reap
+		// the group only when the registration-time snapshot PROVES the root was
+		// its own group leader (pgid === pid) — reapGroup re-validates everything
+		// (uid/pgid/starttime) and refuses on a recycled pgid. No snapshot, or a
+		// non-leader root, keeps the pre-wave behaviour exactly (no signal, and
+		// nothing logged above debug).
+		const identity = identityByPid.get(pid);
+		if (identity?.pgid === pid && resolveReapGroupEnabled()) {
+			reapGroupImpl(pid, pid, { name: `child-pi:exited-root:${pid}`, expected: identity });
+			identityByPid.delete(pid);
+		} else {
+			logInternalError(
+				"child-pi.kill-exited-root-no-snapshot",
+				new Error(`exited root pid=${pid} has no group-leader snapshot; no signal sent`),
+				`pid=${pid}`,
+				"debug",
+			);
+		}
+		return;
+	}
 	killProcessPid(pid);
 	child?.once("exit", () => clearHardKillTimer(pid));
 }

@@ -321,6 +321,12 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		default: 7_200_000,
 		doc: "max background run duration; default 2h (background-runner.ts:31)",
 	},
+	PI_CREW_REAP_GROUP: {
+		name: "PI_CREW_REAP_GROUP",
+		parser: "boolean",
+		default: true,
+		doc: "wave 11a kill switch for identity-proven PROCESS-GROUP reaping: '0'/'false' degrades child-pi-kill + orphan-reaper to their pre-wave pid-only paths (resolveReapGroupEnabled, reap-group.ts). host-process only, never passed to children — deliberately NOT in env-allowlist-registry.ts",
+	},
 	PI_CREW_MAX_WORKERS: {
 		name: "PI_CREW_MAX_WORKERS",
 		parser: "int",

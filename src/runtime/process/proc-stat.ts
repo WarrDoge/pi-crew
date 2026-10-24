@@ -20,6 +20,8 @@ export const PROC_STAT_STARTTIME_INDEX = 19;
 export const PROC_STAT_STATE_INDEX = 0;
 /** Field 4 (ppid) → second entry after the comm cut. */
 export const PROC_STAT_PPID_INDEX = 1;
+/** Field 5 (pgrp / pgid) → third entry after the comm cut (reap-group.ts). */
+export const PROC_STAT_PGID_INDEX = 2;
 
 /**
  * Fields of a `/proc/<pid>/stat` line AFTER the comm column (paren-aware).

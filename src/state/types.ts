@@ -621,6 +621,16 @@ export interface TaskCheckpointState {
 	phase: "started" | "child-spawned" | "child-stdout-final" | "artifact-written";
 	updatedAt: string;
 	childPid?: number;
+	/**
+	 * Wave 11a (F3): spawn-time process identity of `childPid`, written from
+	 * `readProcIdentity(pid)` right after the spawn. `starttime` is the
+	 * PID-reuse-proof field and `pgid` is only meaningful when the child leads
+	 * its own group (detached spawn). All three are OPTIONAL: records written
+	 * before this wave keep loading unchanged.
+	 */
+	childPgid?: number;
+	childStartTime?: string;
+	childUid?: number;
 }
 
 export interface TaskAttemptState {
