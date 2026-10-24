@@ -157,3 +157,31 @@ test("(d4) win32 ⇒ the group reaper never receives a negative-pid signal", asy
 		reset();
 	}
 });
+
+test("(d5) the fire-and-forget escalation is swallowed — a rejection cannot go unhandled", async () => {
+	// MINOR #5: the exited-root branch is sync, so it `void`s the escalation
+	// promise; an unexpected rejection there would be FATAL on Node 22, so the
+	// call site must attach a settle-only catch.
+	const child = await exitedChild();
+	const pid = child.pid;
+	assert.ok(pid && pid > 1);
+	const identity: ProcIdentity = { pid, pgid: pid, starttime: "424242", uid: selfUid() };
+	__test.seedIdentity(pid, identity);
+	__test.setReapGroup(() => ({
+		outcome: "killed-after-escalation",
+		pending: Promise.reject(new Error("escalation exploded")),
+	}));
+	const unhandled: unknown[] = [];
+	const onUnhandled = (reason: unknown) => unhandled.push(reason);
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		const kills = withKillSpy(() => killProcessTree(pid, child));
+		assert.deepEqual(kills, [], "the group reaper owns the kill");
+		// Two macrotask turns: an unhandled rejection surfaces at the end of the turn.
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		assert.deepEqual(unhandled, [], "the rejection must be swallowed at the call site");
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
+		reset();
+	}
+});

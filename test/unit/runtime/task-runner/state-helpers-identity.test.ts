@@ -151,3 +151,78 @@ test("(f3-4) touchWorkerHeartbeat carries the identity fields additively", () =>
 	const plain = touchWorkerHeartbeat(createWorkerHeartbeat("T4", 8181), { alive: false });
 	assert.deepEqual(Object.keys(plain).sort(), ["alive", "lastSeenAt", "pid", "workerId"]);
 });
+
+test("(f3-5) MAJOR #4: a later phase transition CARRIES the spawn-time identity over", () => {
+	// checkpointTask is called again for "child-stdout-final" / "artifact-written"
+	// with NO identity argument. Pre-fix those calls rebuilt the checkpoint from
+	// scratch and silently dropped childPgid/childStartTime/childUid, so the
+	// pid-proof F3 persists was gone exactly when a reaper needs it.
+	withIsolatedHome(() => {
+		const cwd = makeTempDir("pi-crew-f3-5-");
+		try {
+			const created = createRunManifest({ cwd, team, workflow, goal: "f3-5 identity carry-over" });
+			const task = makeTask("T");
+			const spawned = checkpointTask(created.manifest, [task], task, "child-spawned", 4242, {
+				pid: 4242,
+				pgid: 4242,
+				starttime: "998877",
+				uid: 1000,
+			});
+			const later = checkpointTask(created.manifest, spawned.tasks, spawned.task, "child-stdout-final");
+			flushPendingAtomicWrites();
+			assert.equal(later.task.checkpoint?.phase, "child-stdout-final");
+			assert.equal(later.task.checkpoint?.childPid, 4242, "childPid must still carry over");
+			assert.equal(later.task.checkpoint?.childPgid, 4242, "childPgid must carry over (was erased)");
+			assert.equal(later.task.checkpoint?.childStartTime, "998877", "childStartTime must carry over (was erased)");
+			assert.equal(later.task.checkpoint?.childUid, 1000, "childUid must carry over (was erased)");
+			// An explicit new identity still overrides the carried one field-by-field.
+			const overridden = checkpointTask(created.manifest, later.tasks, later.task, "child-spawned", 5252, {
+				pid: 5252,
+				pgid: 5252,
+				starttime: "123123",
+				uid: undefined,
+			});
+			assert.equal(overridden.task.checkpoint?.childPid, 5252);
+			assert.equal(overridden.task.checkpoint?.childPgid, 5252);
+			assert.equal(overridden.task.checkpoint?.childStartTime, "123123");
+			// MINOR #6: a DIFFERENT child pid must never inherit the previous
+			// incarnation's identity — an old starttime paired with a new pid is a
+			// false pid proof (it would refuse the real child, or match a stranger).
+			assert.equal(overridden.task.checkpoint?.childUid, undefined, "a new child pid must not carry the old child's uid over");
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("(f3-6) MINOR #6: identity is carried over ONLY while childPid is unchanged", () => {
+	withIsolatedHome(() => {
+		const cwd = makeTempDir("pi-crew-f3-6-");
+		try {
+			const created = createRunManifest({ cwd, team, workflow, goal: "f3-6 identity carry-over scope" });
+			const task = makeTask("T");
+			const spawned = checkpointTask(created.manifest, [task], task, "child-spawned", 4242, {
+				pid: 4242,
+				pgid: 4242,
+				starttime: "998877",
+				uid: 1000,
+			});
+			// Same child, later phase, no arguments ⇒ everything carries over.
+			const sameChild = checkpointTask(created.manifest, spawned.tasks, spawned.task, "artifact-written");
+			assert.equal(sameChild.task.checkpoint?.childPid, 4242);
+			assert.equal(sameChild.task.checkpoint?.childStartTime, "998877");
+			assert.equal(sameChild.task.checkpoint?.childUid, 1000);
+
+			// Re-spawn: a NEW pid with no identity argument ⇒ the stale identity is
+			// DROPPED (never paired with the new pid).
+			const respawned = checkpointTask(created.manifest, sameChild.tasks, sameChild.task, "started", 5252);
+			flushPendingAtomicWrites();
+			assert.equal(respawned.task.checkpoint?.childPid, 5252);
+			assert.equal(respawned.task.checkpoint?.childPgid, undefined, "old pgid must not survive a new child pid");
+			assert.equal(respawned.task.checkpoint?.childStartTime, undefined, "old starttime must not survive a new child pid");
+			assert.equal(respawned.task.checkpoint?.childUid, undefined, "old uid must not survive a new child pid");
+		} finally {
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});

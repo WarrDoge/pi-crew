@@ -14,6 +14,14 @@ import { recordFromTask, upsertCrewAgent } from "./crew-agent-records.ts";
 import { reapRecordedWorkerOrphans } from "./process/orphan-reaper.ts";
 import { checkProcessLiveness } from "./process-status.ts";
 
+/**
+ * Synchronous shutdown flush — RE-EXPORTED so every caller of the escalation
+ * machinery (`drainReapEscalations` in this module, `flushReapEscalationsSync`
+ * in `process/reap-group.ts`) imports from one family. `reap-group.ts` owns the
+ * armed registry because it is the only module that may signal a group.
+ */
+export { flushReapEscalationsSync } from "./process/reap-group.ts";
+
 /** Age threshold for orphaned temp directory cleanup: 1 hour. */
 const ORPHAN_TEMP_DIR_AGE_THRESHOLD_MS = 60 * 60 * 1000;
 /** A `.cleanup-in-progress` sentinel older than this is abandoned — its owner
@@ -449,6 +457,85 @@ export function hasLiveRunClaim(runId: string, manifest: TeamRunManifest): boole
 	return false;
 }
 
+// ── armed group escalations (wave 11a review, MAJOR #3) ────────────────────
+//
+// `repairStaleRun` is SYNCHRONOUS by contract: it is reached from
+// `withRunLockSync` (crash-recovery) and from the sync
+// `reconcileOrphanedTempWorkspaces`, and 50+ tests pin its sync return value
+// (see the OPT-02 note in checkResultFile). It therefore CANNOT await the
+// SIGKILL escalation it arms when it reaps a worker process group. The pre-fix
+// code dropped the promise outright — `void Promise.allSettled(...).catch(...)`,
+// whose catch could never fire because allSettled never rejects — so a host
+// that returned and exited here could leave the escalation undelivered.
+//
+// Every armed escalation is now REGISTERED, and an async owner awaits
+// `drainReapEscalations()`: `reconcileAllStaleRuns` (crash-recovery.ts) does it
+// for the background sweep, and any other caller that wants the guarantee can.
+//
+// Why the keep-alive pin below: the escalation itself is a chain of UNREF'd
+// timers (reap-group.ts must never keep an idle run alive), so the event loop
+// would drain underneath a still-in-flight escalation and abandon the SIGKILL
+// (measured on Node 22: an unsettled top-level await over unref'd timers exits
+// 13). The drain therefore holds ONE ref'd interval of its own — and only while
+// it actually has something to await.
+const inflightReapEscalations = new Set<Promise<unknown>>();
+/** Keep-alive cadence for the drain (ms). Any value works: it only has to exist. */
+const DRAIN_KEEPALIVE_MS = 200;
+
+/** Register an armed escalation; the entry clears once it settles. Never throws. */
+function trackReapEscalation(promise: Promise<unknown>): void {
+	const settled = promise.catch((err) => {
+		logInternalError("stale-reconciler.reap-escalation", err, "group escalation rejected", "warn");
+	});
+	inflightReapEscalations.add(settled);
+	void settled.finally(() => inflightReapEscalations.delete(settled));
+}
+
+/**
+ * Await every group escalation this module armed (SIGKILL rung included) and
+ * clear the registry. Never throws; resolves only AFTER the in-flight
+ * escalations settled, and holds a ref'd keep-alive for exactly that window (an
+ * empty drain is an immediate no-op that creates no keep-alive at all).
+ */
+export async function drainReapEscalations(): Promise<void> {
+	const snapshot = [...inflightReapEscalations];
+	if (snapshot.length === 0) return;
+	// REF'd (not unref'd) on purpose: this is the only thing that keeps the
+	// process alive while an escalation is mid-flight. Cleared in `finally`, so
+	// it lives exactly as long as the wait.
+	const pin = setInterval(() => {
+		/* ref'd no-op: its ONLY job is to keep the loop alive */
+	}, DRAIN_KEEPALIVE_MS);
+	pin.ref();
+	try {
+		await Promise.allSettled(snapshot);
+	} catch (err) {
+		// allSettled never rejects — belt-and-braces only.
+		logInternalError("stale-reconciler.drainReapEscalations", err, undefined, "warn");
+	} finally {
+		clearInterval(pin);
+		for (const promise of snapshot) inflightReapEscalations.delete(promise);
+	}
+}
+
+// Wave 11a review test seam (same shape as child-pi-kill.ts `__test`): swap the
+// orphan reaper so the escalation registration can be driven by a deferred
+// promise — no real /proc read and no real signal.
+let reapRecordedWorkerOrphansImpl = reapRecordedWorkerOrphans;
+export const __test = {
+	setReapRecordedWorkerOrphans(fn: typeof reapRecordedWorkerOrphans | undefined): void {
+		reapRecordedWorkerOrphansImpl = fn ?? reapRecordedWorkerOrphans;
+	},
+	/** Register a synthetic escalation (event-loop pin test — no real reap). */
+	trackEscalation(promise: Promise<unknown>): void {
+		trackReapEscalation(promise);
+	},
+	reset(): void {
+		reapRecordedWorkerOrphansImpl = reapRecordedWorkerOrphans;
+		inflightReapEscalations.clear();
+	},
+};
+
 function repairStaleRun(
 	manifest: TeamRunManifest,
 	tasks: TeamTaskState[],
@@ -490,7 +577,7 @@ function repairStaleRun(
 	// marker + dead crew-parent), so a live worker is never touched. Best-effort.
 	try {
 		const reapTargets = onlyTaskIds ? tasks.filter((task) => onlyTaskIds.has(task.id)) : tasks;
-		const reapResult = reapRecordedWorkerOrphans(reapTargets);
+		const reapResult = reapRecordedWorkerOrphansImpl(reapTargets);
 		if (reapResult.reaped.length > 0) {
 			logInternalError(
 				"stale-reconciler",
@@ -499,14 +586,12 @@ function repairStaleRun(
 				"warn",
 			);
 		}
-		// Wave 11a (F2): the group path delivers SIGTERM synchronously and returns
-		// the SIGKILL escalation as a promise. The reconcile IS the owner of those
-		// process lifetimes, so it must not return (and let the host exit) before
-		// the escalation settled. Fire-and-forget with a settled no-op catch — the
-		// promises themselves never reject.
-		void Promise.allSettled(reapResult.pending).catch(() => {
-			/* already settled — nothing to surface */
-		});
+		// Wave 11a (F2) + review MAJOR #3: the group path delivers SIGTERM
+		// synchronously and returns the SIGKILL escalation as a promise. This
+		// function is sync by contract (see the block above `repairStaleRun`), so
+		// the escalations are REGISTERED here and the async owner awaits
+		// `drainReapEscalations()` — nothing is dropped, nothing dangles.
+		for (const escalation of reapResult.pending) trackReapEscalation(escalation);
 	} catch (reapError) {
 		logInternalError("stale-reconciler", reapError, `orphan reap failed for ${manifest.runId}`, "warn");
 	}
@@ -1010,6 +1095,12 @@ export function reconcileOrphanedTempWorkspaces(
 	} catch {
 		/* skip if tmpdir unreadable */
 	}
+	// Wave 11a review (MAJOR #3): this scan repairs runs too, so it can arm the
+	// same group escalation. The function is sync (its callers are sync configurers
+	// and 5+ tests), so the best it can do is START the drain — the escalations are
+	// already registered with the module and any later `drainReapEscalations()`
+	// caller awaits them. The promise never rejects (allSettled + catch inside).
+	void drainReapEscalations();
 	return { repaired, cleanedDirs };
 }
 

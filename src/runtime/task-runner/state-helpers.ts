@@ -286,17 +286,35 @@ export function checkpointTask(
 	childPid?: number,
 	identity?: ProcIdentity,
 ): { task: TeamTaskState; tasks: TeamTaskState[] } {
+	// Wave 11a review (MAJOR #4): CARRY the spawn-time identity over exactly like
+	// `childPid`. This function is also called on phase transitions that know
+	// nothing about the process ("child-stdout-final", "artifact-written"); those
+	// calls used to REBUILD the checkpoint without the three identity fields and
+	// silently erase them, so a later reaper lost the pid proof F3 exists to
+	// provide. Only a DEFINED argument overrides the carried value, so a caller
+	// that passes nothing keeps the pre-wave record shape byte-for-byte.
+	const previous = task.checkpoint;
+	const carriedPid = childPid ?? previous?.childPid;
+	// MINOR #6 (review): the identity belongs to ONE pid. Carrying it over a
+	// CHANGE of `childPid` (retry / re-spawn) would pair a fresh pid with the old
+	// incarnation's starttime — the reaper's reuse-proof field would then be a
+	// lie that REFUSES the real child (or, worse, matches an unrelated pid). So
+	// carry identity only while the child stays the same one.
+	const sameChild = childPid === undefined || childPid === previous?.childPid;
+	const carriedPgid = identity?.pgid ?? (sameChild ? previous?.childPgid : undefined);
+	const carriedStartTime = identity?.starttime ?? (sameChild ? previous?.childStartTime : undefined);
+	const carriedUid = identity?.uid ?? (sameChild ? previous?.childUid : undefined);
 	const checkpoint: TaskCheckpointState = {
 		phase,
 		updatedAt: new Date().toISOString(),
-		...(childPid ? { childPid } : task.checkpoint?.childPid ? { childPid: task.checkpoint.childPid } : {}),
+		...(carriedPid !== undefined ? { childPid: carriedPid } : {}),
 		// Wave 11a (F3): persist the spawn-time identity so a later reaper can
 		// PROVE the pid (starttime) instead of guessing. Only defined fields are
 		// spread, so a caller that passes nothing keeps the pre-wave record shape
 		// and old records/state files keep loading unchanged.
-		...(identity?.pgid !== undefined ? { childPgid: identity.pgid } : {}),
-		...(identity?.starttime !== undefined ? { childStartTime: identity.starttime } : {}),
-		...(identity?.uid !== undefined ? { childUid: identity.uid } : {}),
+		...(carriedPgid !== undefined ? { childPgid: carriedPgid } : {}),
+		...(carriedStartTime !== undefined ? { childStartTime: carriedStartTime } : {}),
+		...(carriedUid !== undefined ? { childUid: carriedUid } : {}),
 	};
 	const nextTask = { ...task, checkpoint };
 	const nextTasks = persistSingleTaskUpdate(manifest, updateTask(tasks, nextTask), nextTask);

@@ -26,9 +26,18 @@
  *   - the `scanZombieSubagents()` gate is FAIL-OPEN: a scan throw no longer
  *     disables reaping wholesale — identity-proven candidates still reap,
  *   - `PI_CREW_REAP_GROUP=0` degrades every path to the pre-wave pid-only kill.
+ *
+ * Wave 11a review fixes (round 1):
+ *   - identity proof now ALSO requires leader-proof (`evidence.pgid ===
+ *     evidence.pid`) — a non-leader pgid can be the HOST's group when the child
+ *     was spawned with `useGroup=false` (MAJOR #2).
+ *   - single accounting: a pid lands in `reaped` XOR `skipped` (MINOR #6).
+ *   - an escalation promise is never dropped, and `escalate:false` wraps it with
+ *     a settle-only catch so Node 22 cannot see an unhandled rejection (MINOR #5).
  */
 
 import type { TeamTaskState } from "../../state/types.ts";
+import { logInternalError } from "../../utils/internal-error.ts";
 import { checkProcessLiveness } from "../process-status.ts";
 import { type ProcIdentity, readProcIdentity, reapGroup, resolveReapGroupEnabled } from "./reap-group.ts";
 import { scanZombieSubagents } from "./zombie-scanner.ts";
@@ -178,12 +187,19 @@ export function reapOrphanWorkers(evidences: WorkerPidEvidence[], opts: ReapOrph
 			continue;
 		}
 		const alive = isAlive(pid);
-		// Wave 11a: a recorded starttime that matches the LIVE process (or a pid
-		// that is already gone, so nothing can be reused) proves this is the very
-		// incarnation we spawned — no zombie-scan confirmation needed.
+		// Wave 11a review (MAJOR #2): a recorded starttime proves this is the very
+		// incarnation we spawned ONLY when it also proves LEADERSHIP
+		// (`evidence.pgid === evidence.pid`). A non-leader pgid cannot be reasoned
+		// about from a snapshot: it may be the group of the host that spawned the
+		// worker (rpc frames are `detached` but reuse the parent group when
+		// useGroup=false). Those candidates are refused here and are the target of
+		// the marker-based sweep in wave 11b. An already-dead pid needs no liveness
+		// cross-check (nothing can be reused), a live one must match exactly.
 		const liveIdentity = alive ? readIdentity(pid) : undefined;
+		const leaderProven = evidence.pgid !== undefined && evidence.pgid === pid;
 		const identityProven =
 			allowIdentityProven &&
+			leaderProven &&
 			evidence.starttime !== undefined &&
 			(alive ? liveIdentity?.starttime !== undefined && liveIdentity.starttime === evidence.starttime : true);
 		if (opts.allowedPids && !opts.allowedPids.has(pid) && !identityProven) {
@@ -201,8 +217,16 @@ export function reapOrphanWorkers(evidences: WorkerPidEvidence[], opts: ReapOrph
 		const pgid = evidence.pgid ?? liveIdentity?.pgid;
 		if (pgid !== undefined && Number.isInteger(pgid) && pgid > 1) {
 			if (!resolveReapGroupEnabled()) {
-				// Kill switch: record it, then fall through to the pid-only path.
-				skipped.push({ pid, reason: "group-disabled" });
+				// Kill switch on ⇒ degrade to the pre-wave pid-only path (the pid is
+				// still SIGTERMed below). Not recorded as skipped: a pid only ever
+				// appears in ONE of the two result arrays (MINOR #6 — double
+				// accounting made `reaped` and `skipped` overlap).
+				logInternalError(
+					"orphan-reaper.group-disabled",
+					new Error(`PI_CREW_REAP_GROUP=0: pgid ${pgid} of pid=${pid} left untouched, pid-only kill path`),
+					`task=${evidence.taskId}`,
+					"debug",
+				);
 			} else {
 				const expected: ProcIdentity | undefined =
 					evidence.starttime !== undefined ? { pid, pgid, starttime: evidence.starttime, uid: evidence.uid } : undefined;
@@ -217,12 +241,33 @@ export function reapOrphanWorkers(evidences: WorkerPidEvidence[], opts: ReapOrph
 					name: `orphan-reaper:${pid}`,
 				});
 				if (groupResult.refusal === undefined) {
-					if (escalate) pending.push(groupResult.pending);
+					// MINOR #5: never DROP an escalation promise. `escalate:false` callers
+					// (doctor/dry-run) still get it collected, with a settle-only catch so
+					// an unexpected rejection cannot become a fatal unhandled rejection.
+					pending.push(
+						escalate
+							? groupResult.pending
+							: groupResult.pending.catch(() => {
+									/* settle-only: a dry-run/doctor caller has no verdict to act on */
+								}),
+					);
 					reaped.push(pid);
 					continue;
 				}
-				skipped.push({ pid, reason: `group-refused:${groupResult.refusal}` });
-				if (!alive) continue; // nothing left to signal individually
+				if (!alive) {
+					// Refused group + dead pid ⇒ nothing left to signal: this pid is
+					// SKIPPED, and only skipped (never also `reaped`).
+					skipped.push({ pid, reason: `group-refused:${groupResult.refusal}` });
+					continue;
+				}
+				// Refused group + live pid ⇒ the pid-only fallback below still runs and
+				// will decide the single accounting slot.
+				logInternalError(
+					"orphan-reaper.group-refused",
+					new Error(`group reap refused for pid=${pid} pgid=${pgid} (${groupResult.refusal}); pid-only fallback`),
+					`task=${evidence.taskId}`,
+					"debug",
+				);
 			}
 		}
 		if (!alive) {

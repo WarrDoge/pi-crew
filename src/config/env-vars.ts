@@ -325,7 +325,7 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		name: "PI_CREW_REAP_GROUP",
 		parser: "boolean",
 		default: true,
-		doc: "wave 11a kill switch for identity-proven PROCESS-GROUP reaping: '0'/'false' degrades child-pi-kill + orphan-reaper to their pre-wave pid-only paths (resolveReapGroupEnabled, reap-group.ts). host-process only, never passed to children — deliberately NOT in env-allowlist-registry.ts",
+		doc: "wave 11a kill switch for identity-proven PROCESS-GROUP reaping: '0'/'false' degrades child-pi-kill + orphan-reaper to their pre-wave pid-only paths (resolveReapGroupEnabled, reap-group.ts). FORWARDED to the detached background runner (env-allowlist-registry: PI_CREW_REAP_GROUP → background-runner) because the runner/worker process is the one that reaps its own children — an unforwarded switch would be silently inert there",
 	},
 	PI_CREW_MAX_WORKERS: {
 		name: "PI_CREW_MAX_WORKERS",

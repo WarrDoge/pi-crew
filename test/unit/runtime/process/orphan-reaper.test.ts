@@ -151,7 +151,7 @@ test("(c2) identity-proven pid uses the GROUP path and bypasses the allowed-pid 
 	assert.deepEqual(log.pidSignals, [], "the pid-only path must not run when the group path is taken");
 });
 
-test("(c3) a refused group is recorded and the pid-only fallback still runs", () => {
+test("(c3) a refused group falls back to the pid-only path — recorded in ONE array only (MINOR #6)", () => {
 	const log = newLog();
 	const result = reapOrphanWorkers([{ taskId: "a", pid: 4000, pgid: 4000, starttime: "555", uid: selfUid() }], {
 		isAlive: () => true,
@@ -160,12 +160,13 @@ test("(c3) a refused group is recorded and the pid-only fallback still runs", ()
 		groupAlive: () => true,
 		...signalSpies(log),
 	});
-	assert.ok(
-		result.skipped.some((s) => s.pid === 4000 && s.reason === "group-refused:not-group-member"),
-		`expected group-refused:not-group-member, got ${JSON.stringify(result.skipped)}`,
-	);
 	assert.deepEqual(log.groupSignals, [], "a refused group must never be signalled");
 	assert.deepEqual(log.pidSignals, [{ pid: 4000, signal: "SIGTERM" }], "legacy pid-only fallback still runs");
+	assert.deepEqual(result.reaped, [4000]);
+	assert.ok(
+		!result.skipped.some((s) => s.pid === 4000),
+		`a REAPED pid must not also appear in skipped (double accounting): ${JSON.stringify(result.skipped)}`,
+	);
 });
 
 test("(c4) zombie-scan throw is fail-open: identity-proven pids reap, unproven ones do not", () => {
@@ -216,7 +217,7 @@ test("(c5) reaping is idempotent — a second pass on a dead pid signals nothing
 	assert.equal(log.pidSignals.length, 1, "the second pass must not signal again");
 });
 
-test("(c6) PI_CREW_REAP_GROUP=0 degrades the group path to pid-only (group-disabled)", () => {
+test("(c6) PI_CREW_REAP_GROUP=0 degrades the group path to pid-only (single accounting)", () => {
 	const log = newLog();
 	const saved = process.env.PI_CREW_REAP_GROUP;
 	process.env.PI_CREW_REAP_GROUP = "0";
@@ -227,11 +228,64 @@ test("(c6) PI_CREW_REAP_GROUP=0 degrades the group path to pid-only (group-disab
 			groupAlive: () => false,
 			...signalSpies(log),
 		});
-		assert.ok(result.skipped.some((s) => s.pid === 4000 && s.reason === "group-disabled"));
 		assert.deepEqual(log.groupSignals, [], "kill switch must disable group signalling");
 		assert.deepEqual(log.pidSignals, [{ pid: 4000, signal: "SIGTERM" }], "pid-only fallback remains");
+		assert.deepEqual(result.reaped, [4000], "the pid is still reaped (pid-only, pre-wave behaviour)");
+		assert.ok(!result.skipped.some((s) => s.pid === 4000), "MINOR #6: a reaped pid must not also be reported as skipped");
 	} finally {
 		if (saved === undefined) delete process.env.PI_CREW_REAP_GROUP;
 		else process.env.PI_CREW_REAP_GROUP = saved;
 	}
+});
+
+test("(c7) identity proof requires LEADER proof — a non-leader pgid is never admitted", () => {
+	// MAJOR #2: `pgid !== pid` can be the HOST's group (rpc / useGroup=false). A
+	// matching starttime alone used to bypass the authoritative-orphan gate.
+	const log = newLog();
+	const result = reapOrphanWorkers([{ taskId: "a", pid: 4000, pgid: 5000, starttime: "555", uid: selfUid() }], {
+		isAlive: () => true,
+		readIdentity: (pid) => ({ pid, pgid: 5000, starttime: "555", uid: selfUid() }),
+		groupAlive: () => true,
+		allowedPids: new Set([9999]), // scan set does NOT contain 4000
+		...signalSpies(log),
+	});
+	assert.deepEqual(result.reaped, []);
+	assert.deepEqual(log.groupSignals, []);
+	assert.deepEqual(log.pidSignals, []);
+	assert.deepEqual(result.skipped, [{ pid: 4000, reason: "not-an-authoritative-orphan" }]);
+});
+
+test("(c8) dead candidate + non-leader snapshot ⇒ group refused, skipped exactly once", () => {
+	const log = newLog();
+	const result = reapOrphanWorkers([{ taskId: "a", pid: 4000, pgid: 5000, starttime: "555", uid: selfUid() }], {
+		isAlive: () => false,
+		// self readable (rung 1), candidate + leader gone from /proc
+		readIdentity: (pid) => (pid === process.pid ? { pid, pgid: process.pid, starttime: "1", uid: selfUid() } : undefined),
+		groupAlive: () => true,
+		...signalSpies(log),
+	});
+	assert.deepEqual(log.groupSignals, [], "nothing may be signalled");
+	assert.deepEqual(log.pidSignals, []);
+	assert.deepEqual(result.reaped, []);
+	assert.deepEqual(
+		result.skipped.filter((s) => s.pid === 4000),
+		[{ pid: 4000, reason: "group-refused:identity-missing" }],
+		"exactly one skipped entry, carrying the leader-proof refusal reason",
+	);
+});
+
+test("(c9) escalate:false still COLLECTS the escalation (never dropped, never rejects)", () => {
+	const log = newLog();
+	const result = reapOrphanWorkers([{ taskId: "a", pid: 4000, pgid: 4000, starttime: "555", uid: selfUid() }], {
+		isAlive: () => true,
+		readIdentity: (pid) => ({ pid, pgid: 4000, starttime: "555", uid: selfUid() }),
+		groupAlive: () => true, // the group survives SIGTERM ⇒ an escalation is armed
+		gracefulMs: 30,
+		capMs: 30,
+		escalate: false,
+		...signalSpies(log),
+	});
+	assert.deepEqual(log.groupSignals, ["4000:SIGTERM"]);
+	assert.equal(result.pending.length, 1, "MINOR #5: the escalation must be collected even with escalate:false");
+	assert.doesNotThrow(() => result.pending[0]?.catch(() => {}));
 });

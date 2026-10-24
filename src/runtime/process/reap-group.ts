@@ -13,20 +13,38 @@
  *
  *   1. POSIX only, and /proc must be readable (the identity source).
  *   2. `pgid` must be an integer > 1 — NEVER `kill(-1)` / `kill(0)`, which
- *      would signal every process we are allowed to signal.
- *   3. never our own group or our parent's group.
- *   4. the candidate must have a live identity, OR a caller-supplied snapshot
- *      (`expected`) that itself carries pgid + starttime.
+ *      would signal every process we are allowed to signal, and never 1 (init's
+ *      group).
+ *   3. never our own group (its REAL pgrp, read once from /proc — see
+ *      `selfIdentity()`), never our pid, never our parent's pid.
+ *   4. the candidate must have a live identity, OR (candidate already gone) a
+ *      caller-supplied snapshot (`expected`) that PROVES the group leader —
+ *      `expected.pid === expected.pgid === pgid` + a starttime — because a
+ *      dead candidate cannot prove anything by itself.
  *   5. same uid as us (we can only reason about our own processes).
  *   6. the candidate's REAL pgid must equal the requested pgid (PID-reuse).
  *   7. the identity must carry a starttime (the reuse-proof field).
  *   8. if a snapshot exists, its starttime must match the live one.
  *
+ * Wave 11a REVIEW FIXES (round 1) baked into the ladder:
+ *   - CRITICAL #1 `selfIdentity()`: comparing `pgid` with {pid, ppid} misses a
+ *     host started under `setsid`/a wrapper, whose pgrp is neither ⇒ the old
+ *     rung PASSED and `kill(-ownPgrp)` took out the host session.
+ *   - MAJOR #2 dead-candidate path: `identity := expected` made rungs 4/6/7/8
+ *     tautologies over the snapshot itself (blind `kill(-pgid)`). The snapshot
+ *     is now only usable as LEADER PROOF, and the kernel's "a pgid is not
+ *     recycled while the group still has members" property is what makes
+ *     "leader gone but group alive" safe.
+ *
  * Escalation: SIGTERM is delivered SYNCHRONOUSLY (postmortem-safe — a hard exit
  * right after the call still leaves the graceful signal sent), then a bounded
- * poll → re-validate → SIGKILL → bounded poll. Timers are unref'd so a reaper
- * never pins the event loop. Nothing here throws: every failure is a typed
- * refusal or outcome.
+ * poll → re-validate → SIGKILL → bounded poll. The poll timers are unref'd so a
+ * reaper never pins the event loop — which is exactly why the SIGKILL rung needs
+ * explicit owners (see the "deferred SIGKILL deliveries" block below):
+ * `drainReapEscalations()` awaits the armed promises under a REF'D keep-alive,
+ * and `flushReapEscalationsSync()` delivers the last rung synchronously on
+ * session shutdown. Nothing here throws: every failure is a typed refusal or
+ * outcome.
  *
  * Scope note (wave 11a): a worker's bash grandchildren live in PI's bash-tool
  * group, not the worker's group (GAP-0) — this module cannot reach them. That
@@ -147,38 +165,148 @@ export function readProcIdentity(pid: number): ProcIdentity | undefined {
 }
 
 /**
+ * OUR OWN identity as read from /proc — the authoritative answer to "which
+ * process group am I in?". Read ONCE per process and cached (a POSIX process
+ * cannot change its group after start), so the ladder never re-reads /proc for
+ * a value that cannot move. A FAILED read is NOT cached (MINOR #3): /proc can be
+ * momentarily unreadable (mount race, sandbox start-up) and caching that would
+ * turn a transient failure into a permanent refuse-everything state.
+ *
+ * Why not {process.pid, process.ppid} (the pre-review rung 3): a host started
+ * under `setsid`, a tmux/systemd/supervisor wrapper, or any launcher that puts
+ * it in a fresh group has a pgrp that is NEITHER its pid NOR its parent's pid
+ * — the old comparison PASSED for that group, and `kill(-pgrp)` then killed the
+ * whole host session. Review finding CRITICAL #1 (wave 11a).
+ */
+let selfIdentityCache: ProcIdentity | undefined;
+let selfIdentityLoaded = false;
+/** Injected ONLY by tests (the ladder never accepts a per-call reader for self). */
+let selfIdentityReader: (pid: number) => ProcIdentity | undefined = readProcIdentity;
+
+/**
+ * Lazily read + cache our own /proc identity (undefined ⇒ unreadable RIGHT NOW;
+ * the next call retries). Only a successful read is cached (MINOR #3).
+ */
+function selfIdentity(): ProcIdentity | undefined {
+	if (selfIdentityLoaded) return selfIdentityCache;
+	const identity = selfIdentityReader(process.pid);
+	if (!identity) {
+		logInternalError(
+			"reap-group.self-identity",
+			new Error("cannot read our own /proc identity — refusing group signals, will retry"),
+			undefined,
+			"debug",
+		);
+		return undefined;
+	}
+	selfIdentityCache = identity;
+	selfIdentityLoaded = true;
+	return identity;
+}
+
+/** Test seam: forget the cached self identity so the next call re-reads /proc. */
+export function __resetSelfIdentityForTest(): void {
+	selfIdentityCache = undefined;
+	selfIdentityLoaded = false;
+	selfIdentityReader = readProcIdentity;
+}
+
+/** Test seam: install a synthetic self identity (undefined ⇒ "cannot read"). */
+export function __setSelfIdentityForTest(identity: ProcIdentity | undefined): void {
+	selfIdentityCache = identity;
+	selfIdentityLoaded = true;
+}
+
+/**
+ * Test seam: swap the /proc reader used for OUR OWN identity. Needed to pin the
+ * MINOR #3 retry rule (a FAILED self read must not be cached) without depending
+ * on a real /proc — the per-call `opts.readIdentity` deliberately cannot do it.
+ */
+export function __setSelfIdentityReaderForTest(reader: ((pid: number) => ProcIdentity | undefined) | undefined): void {
+	selfIdentityReader = reader ?? readProcIdentity;
+}
+
+/**
  * Run the refusal ladder. Returns the FIRST failing rung, or undefined when the
- * group is safe to signal. Pure with respect to injected `readIdentity`.
+ * group is safe to signal. Pure with respect to injected `readIdentity` /
+ * `groupAlive`; the self identity is cached module state (seam above).
  */
 export function assertSafeGroup(pgid: number, candidatePid: number, opts: ReapGroupOptions = {}): GroupRefusalReason | undefined {
 	const platform = opts.platform ?? process.platform;
 	const readIdentity = opts.readIdentity ?? readProcIdentity;
-	// Rung 1: we can only reason about POSIX groups, and only with /proc.
+	const groupAlive = opts.groupAlive ?? defaultGroupAlive;
+	// Rung 1: our own /proc identity must be readable — it is BOTH the /proc
+	// availability probe AND the rung-3 comparison. MINOR #4 (review): this is
+	// the cached SELF read, never the injected `readIdentity`: the injection point
+	// exists for the CANDIDATE, and letting a test hook vouch for our own identity
+	// is precisely the shape of CRITICAL #1.
 	if (platform === "win32") return "platform-not-posix";
-	if (!readIdentity(process.pid)) return "proc-unavailable";
-	// Rung 2: a non-positive pgid would signal far too much (kill(-1)/kill(0)).
+	const self = selfIdentity();
+	if (!self) return "proc-unavailable";
+	// Rung 2: a non-positive pgid would signal far too much (kill(-1)/kill(0));
+	// pgid 1 is init's group — reaping it is never a worker cleanup.
 	if (!Number.isInteger(pgid) || pgid <= 1) return "pgid-invalid";
-	// Rung 3: never our own group, never our parent's group.
-	if (pgid === process.pid || pgid === process.ppid) return "pgid-init-or-self";
-	// Rung 4: live identity, or a snapshot that itself proves pgid + starttime.
+	// Rung 3: never our own group (its REAL pgrp — CRITICAL #1), never our pid,
+	// never our parent's pid. Unknown self pgrp ⇒ refuse: that is exactly the
+	// state in which `kill(-pgid)` could take out the host session.
+	if (self.pgid === undefined) return "identity-missing";
+	if (pgid === process.pid || pgid === process.ppid || pgid === self.pgid) return "pgid-init-or-self";
+	const selfUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+	// Rung 4: a LIVE candidate identity, or (dead candidate) leader-proof.
 	const live = readIdentity(candidatePid);
-	let identity = live;
-	if (!identity) {
+	if (!live) {
+		// The candidate is gone, so nothing about IT can be verified any more. A
+		// snapshot is only evidence when it PROVES the group leader: the candidate
+		// we were asked to signal must BE the leader (`candidatePid === pgid`, and
+		// the snapshot must agree on both pid and pgid — MINOR #1) and must carry
+		// the starttime. Without that, every later rung would compare the snapshot
+		// with itself ⇒ tautology ⇒ blind kill(-pgid) after PID reuse (MAJOR #2).
 		const expected = opts.expected;
-		if (!expected || expected.pgid !== pgid || expected.starttime === undefined) return "identity-missing";
-		identity = expected;
+		if (!expected || candidatePid !== pgid || expected.pid !== pgid || expected.pgid !== pgid || expected.starttime === undefined) {
+			return "identity-missing";
+		}
+		// Rung 5 (dead path): the uid proof is MANDATORY here (MINOR #2). The live
+		// /proc path always carries one, so an absent uid means we cannot separate
+		// our own process from a stranger's: signalling then fails with EPERM AFTER
+		// the caller already reported `reaped`, which leaves a false `stuck`.
+		if (expected.uid === undefined) return "identity-missing";
+		if (selfUid !== undefined && expected.uid !== selfUid) return "uid-mismatch";
+		// The kernel does NOT recycle a pgid while the group still has a member,
+		// so the leader is the only pid whose starttime the snapshot pins. If the
+		// leader is still there it must be the SAME incarnation AND still lead that
+		// group (MINOR #1: a pid that left the group via setpgid is no evidence).
+		const leader = readIdentity(pgid);
+		if (leader) {
+			if (leader.pgid !== pgid) return "not-group-member";
+			if (leader.starttime === undefined) return "identity-missing";
+			if (leader.starttime !== expected.starttime) return "starttime-mismatch";
+			if (leader.uid !== undefined && selfUid !== undefined && leader.uid !== selfUid) return "uid-mismatch";
+			return undefined;
+		}
+		// Leader gone: a still-live group means surviving members hold the pgid
+		// (so it cannot have been recycled) ⇒ our old group. An empty group means
+		// there is nothing to justify the kill and nothing to kill.
+		if (groupAlive(pgid)) {
+			// TOCTOU, documented on purpose (MINOR #7): between this probe and the
+			// caller's `signalGroup` the LAST member may exit and the pgid be recycled
+			// by an unrelated group. That window cannot be closed without a pidfd-style
+			// handle (one signal per pid, no group target). It is accepted because the
+			// alternative — re-introducing the snapshot as identity — made the very
+			// rungs above tautological (MAJOR #2).
+			return undefined;
+		}
+		return "identity-missing";
 	}
 	// Rung 5: same uid (a missing uid only happens for injected snapshots; the
 	// live /proc path always carries one — the remaining rungs still hold).
-	const selfUid = typeof process.getuid === "function" ? process.getuid() : undefined;
-	if (identity.uid !== undefined && selfUid !== undefined && identity.uid !== selfUid) return "uid-mismatch";
+	if (live.uid !== undefined && selfUid !== undefined && live.uid !== selfUid) return "uid-mismatch";
 	// Rung 6: PID reuse — the candidate must actually belong to that group.
-	if (identity.pgid !== pgid) return "not-group-member";
+	if (live.pgid !== pgid) return "not-group-member";
 	// Rung 7: starttime is the field that survives PID reuse.
-	if (identity.starttime === undefined) return "identity-missing";
+	if (live.starttime === undefined) return "identity-missing";
 	// Rung 8: the snapshot and the live process must be the SAME incarnation.
 	const expectedStart = opts.expected?.starttime;
-	if (expectedStart !== undefined && identity.starttime !== expectedStart) return "starttime-mismatch";
+	if (expectedStart !== undefined && live.starttime !== expectedStart) return "starttime-mismatch";
 	return undefined;
 }
 
@@ -225,6 +353,79 @@ function logDebug(scope: string, message: string, opts: ReapGroupOptions): void 
 	logInternalError(scope, new Error(message), `name=${opts.name ?? "-"}`, "debug");
 }
 
+// ── deferred SIGKILL deliveries (wave 11a review, MAJOR #3) ───────────────────
+//
+// `reapGroup` hands the SIGKILL rung back as a promise, and every production
+// caller is SYNCHRONOUS (the stale-run reconciler, `killProcessTree`): they can
+// at most register the promise with a drain owner. The escalation's own poll
+// timers are unref'd (they must not keep a finished run alive), which means an
+// un-awaited escalation is abandoned the moment the host's loop drains — the
+// SIGKILL is silently never delivered (measured: an unsettled top-level await
+// over unref'd timers exits 13).
+//
+// Two owners close that hole:
+//   1. `drainReapEscalations()` (stale-reconciler.ts) awaits the registered
+//      promises while holding a REF'D keep-alive interval.
+//   2. `flushReapEscalationsSync()` (below) is for session shutdown: it
+//      re-validates and delivers the SIGKILL rung synchronously, so the last
+//      rung still happens in a process that is about to exit.
+/** One armed escalation: everything needed to re-validate and signal it later. */
+interface ArmedGroupEscalation {
+	pgid: number;
+	candidatePid: number;
+	opts: ReapGroupOptions;
+	/** Set once {@link flushReapEscalationsSync} delivered the SIGKILL — the async
+	 *  escalation must then never signal a second time. */
+	deliveredSync?: boolean;
+}
+
+const armedEscalations = new Set<ArmedGroupEscalation>();
+
+/**
+ * Deliver the SIGKILL rung of every ARMED escalation SYNCHRONOUSLY — the
+ * session-shutdown path. Each entry is re-validated against the ladder at THIS
+ * instant (the group may have drained, or the pgid been recycled since the
+ * SIGTERM), so a stale entry never becomes a blind kill. Best-effort per entry:
+ * one failure cannot stop the rest. The registry is cleared either way. Returns
+ * the number of groups signalled. Never throws.
+ */
+export function flushReapEscalationsSync(): number {
+	const entries = [...armedEscalations];
+	armedEscalations.clear();
+	let delivered = 0;
+	for (const entry of entries) {
+		try {
+			const refusal = assertSafeGroup(entry.pgid, entry.candidatePid, entry.opts);
+			if (refusal) {
+				logDebug("reap-group.flush-refused", `no deferred SIGKILL for pgid=${entry.pgid} (${refusal})`, entry.opts);
+				continue;
+			}
+			(entry.opts.signalGroup ?? defaultSignalGroup)(entry.pgid, "SIGKILL");
+			entry.deliveredSync = true;
+			delivered++;
+		} catch (err) {
+			logInternalError(
+				"reap-group.flush-error",
+				err instanceof Error ? err : new Error(String(err)),
+				`pgid=${entry.pgid} name=${entry.opts.name ?? "-"}`,
+				"warn",
+			);
+		}
+	}
+	if (delivered > 0) logDebug("reap-group.flush", `delivered ${delivered} deferred group SIGKILL(s) at shutdown`, {});
+	return delivered;
+}
+
+/** Test seam: how many escalations are still armed (registry must empty on flush). */
+export function __armedEscalationCountForTest(): number {
+	return armedEscalations.size;
+}
+
+/** Test seam: drop the armed registry without signalling anything. */
+export function __resetArmedEscalationsForTest(): void {
+	armedEscalations.clear();
+}
+
 /**
  * Reap a whole process group. See the module header for the safety model.
  * Refused ⇒ nothing is signalled. Accepted ⇒ SIGTERM now, escalation in
@@ -244,25 +445,55 @@ export function reapGroup(pgid: number, candidatePid: number, opts: ReapGroupOpt
 	// host that dies right here still leaves SIGTERM delivered.
 	signalGroup(pgid, "SIGTERM");
 	if (!groupAlive(pgid)) return { outcome: "gone", pending: Promise.resolve("gone") };
+	// MINOR #5 (review): the escalation promise is handed to callers who may
+	// `void` it. It must therefore NEVER reject — an unhandled rejection is fatal
+	// on Node 22 — so every rung is wrapped and the worst case is a typed
+	// "stuck" outcome.
+	// MAJOR #3 (review): the escalation is also REGISTERED, so the two owners
+	// above can await it (drain) or deliver it synchronously (shutdown flush).
+	const armed: ArmedGroupEscalation = { pgid, candidatePid, opts };
+	armedEscalations.add(armed);
 	const pending = (async (): Promise<GroupReapOutcome> => {
-		if (await pollUntil(() => !groupAlive(pgid), gracefulMs)) return "gone";
-		// Re-validate immediately before SIGKILL: between the SIGTERM prefix and
-		// here the group may have drained and the pgid been recycled by an
-		// unrelated group. A failure here is a refusal, not an escalation.
-		const recheck = assertSafeGroup(pgid, candidatePid, opts);
-		if (recheck) {
-			logDebug("reap-group.sigkill-refused", `escalation refused for pgid=${pgid} (${recheck})`, opts);
-			return "refused";
+		try {
+			if (await pollUntil(() => !groupAlive(pgid), gracefulMs)) return "gone";
+			// The shutdown flush may already have delivered SIGKILL synchronously —
+			// signalling a second time would be a double kill of a possibly recycled
+			// group, so stop here.
+			if (armed.deliveredSync === true) return "killed-after-escalation";
+			// Re-validate immediately before SIGKILL: between the SIGTERM prefix and
+			// here the group may have drained and the pgid been recycled by an
+			// unrelated group. A failure here is a refusal, not an escalation.
+			const recheck = assertSafeGroup(pgid, candidatePid, opts);
+			if (recheck) {
+				logDebug("reap-group.sigkill-refused", `escalation refused for pgid=${pgid} (${recheck})`, opts);
+				return "refused";
+			}
+			signalGroup(pgid, "SIGKILL");
+			if (await pollUntil(() => !groupAlive(pgid), capMs)) return "killed-after-escalation";
+			logInternalError(
+				"reap-group.stuck",
+				new Error(`process group ${pgid} still alive after SIGKILL cap (${capMs}ms); giving up`),
+				`name=${opts.name ?? "-"}`,
+				"warn",
+			);
+			return "stuck";
+		} catch (err) {
+			logInternalError(
+				"reap-group.escalation-error",
+				err instanceof Error ? err : new Error(String(err)),
+				`pgid=${pgid} name=${opts.name ?? "-"}`,
+				"warn",
+			);
+			return "stuck";
 		}
-		signalGroup(pgid, "SIGKILL");
-		if (await pollUntil(() => !groupAlive(pgid), capMs)) return "killed-after-escalation";
-		logInternalError(
-			"reap-group.stuck",
-			new Error(`process group ${pgid} still alive after SIGKILL cap (${capMs}ms); giving up`),
-			`name=${opts.name ?? "-"}`,
-			"warn",
-		);
-		return "stuck";
 	})();
+	// Retire the entry the moment the escalation settles: a healthy escalation
+	// leaves nothing behind for the shutdown flush (and an empty registry is what
+	// the flush contract promises). Both handlers swallow — this derived promise
+	// must never reject, nothing awaits it.
+	void pending.then(
+		() => armedEscalations.delete(armed),
+		() => armedEscalations.delete(armed),
+	);
 	return { outcome: "killed-after-escalation", pending };
 }

@@ -57,3 +57,16 @@ test("(e4) simulated win32 never requests detached: true", () => {
 	assert.equal(options.detached, false, "Windows has no process groups — no detached spawn");
 	assert.deepEqual(options.stdio, ["pipe", "pipe", "pipe"]);
 });
+
+test("(e5) frameClientSpawnOptions stays module-internal — the public surface is unchanged", () => {
+	// Wave 11a must not widen the package export surface: the option builder is a
+	// seam for src/ + tests, not a public API.
+	const root = path.join(import.meta.dirname, "..", "..", "..", "..");
+	const indexSource = fs.readFileSync(path.join(root, "index.ts"), "utf-8");
+	assert.ok(!indexSource.includes("frame-client"), "the root index must not re-export frame-client");
+	const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf-8")) as { exports?: Record<string, unknown> };
+	assert.ok(
+		!Object.keys(pkg.exports ?? {}).some((key) => key.includes("frame-client")),
+		"package.json exports must not expose the rpc frame client module",
+	);
+});

@@ -268,7 +268,14 @@ export function killProcessTree(pid: number | undefined, child?: ChildProcess): 
 		// nothing logged above debug).
 		const identity = identityByPid.get(pid);
 		if (identity?.pgid === pid && resolveReapGroupEnabled()) {
-			reapGroupImpl(pid, pid, { name: `child-pi:exited-root:${pid}`, expected: identity });
+			const result = reapGroupImpl(pid, pid, { name: `child-pi:exited-root:${pid}`, expected: identity });
+			// MINOR #5 (review): the SIGKILL escalation is fire-and-forget here (this
+			// caller is sync), so it must be explicitly swallowed — `reapGroup` never
+			// rejects by contract, but a `void` promise is exactly what turns an
+			// unexpected rejection into a FATAL unhandled rejection on Node 22.
+			void result.pending.catch(() => {
+				/* settle-only: the escalation verdict is not actionable here */
+			});
 			identityByPid.delete(pid);
 		} else {
 			logInternalError(

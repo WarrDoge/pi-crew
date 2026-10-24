@@ -27,6 +27,7 @@ import type { ManifestCache } from "../manifest-cache.ts";
 import { checkProcessLiveness } from "../process-status.ts";
 import { mapConcurrent } from "../scheduling/parallel-utils.ts";
 import {
+	drainReapEscalations,
 	hasLiveRunClaim,
 	isIntentionalWait,
 	isPlanApprovalPendingEffective,
@@ -1123,6 +1124,11 @@ export async function reconcileAllStaleRuns(
 					out.push(result);
 				}
 			});
+			// Wave 11a review (MAJOR #3): the SYNC reconcile arms a group SIGKILL
+			// escalation it cannot await. This async owner awaits it OUTSIDE the run
+			// lock (so the lock hold time is unchanged) — the sweep must not resolve
+			// while a SIGKILL is still pending delivery.
+			await drainReapEscalations();
 			return out;
 		} catch (error) {
 			logInternalError("crash-recovery.reconcileStaleRuns", error, `runId=${runId}`, "warn");

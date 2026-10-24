@@ -225,10 +225,10 @@ const CREW_ENV_FORWARDING_DECL: Record<string, CrewEnvForwardDecision> = {
 		kind: "gap",
 		reason: "v0.11.36 sandbox network profile (share|off) read in the PARENT spawn path only — deliberately never forwarded to children",
 	},
-	PI_CREW_REAP_GROUP: {
-		kind: "gap",
-		reason: "fix-wave 11a process-group reap kill switch — read in the HOST kill/reap paths only (reap-group.ts resolveReapGroupEnabled); deliberately never forwarded to children (a child must not be able to disable its own reaping)",
-	},
+	PI_CREW_REAP_GROUP: allowlist(
+		["background-runner"],
+		"fix-wave 11a process-group reap kill switch — read by the reaping code (reap-group.ts resolveReapGroupEnabled) which ALSO runs inside the detached background runner; unforwarded it would be silently inert there (wave 11a review MINOR #7). Not forwarded to children: a worker must not be able to disable its own reaping",
+	),
 	PI_CREW_STEERING_FILE: { kind: "child-write", reason: "child-pi-spawn per-run steering JSONL" },
 	PI_CREW_MAX_OUTPUT: { kind: "child-write", reason: "pi-args emits agent.maxTokens into built.env" },
 	PI_CREW_RPC_SECRET: { kind: "child-write", reason: "shared HMAC secret handed to the child at spawn — secret name, never allowlisted" },
@@ -465,9 +465,13 @@ const BG_CREW_CORE_ORDER = [
 const BG_CREW_MODEL_ORDER = ["PI_CREW_MODEL", "PI_CREW_MODEL_FALLBACK_ORDER"] as const;
 const BG_CREW_STATE_ORDER = ["PI_CREW_STATE_BACKEND", "PI_CREW_CHILD_PI_MODE", "PI_CREW_CHILD_PI_POOL"] as const;
 const BG_CREW_TOOLS_ORDER = ["PI_CREW_TOOLS_MODIFIERS"] as const;
+// Wave 11a review (MINOR #7): the reap kill switch must be honoured by the
+// detached runner too — the runner (and the surface workers it spawns) own
+// kill/reap paths, so an unforwarded switch was silently inert there.
+const BG_CREW_REAP_ORDER = ["PI_CREW_REAP_GROUP"] as const;
 const CHILD_CREW_DEPTH_ORDER = ["PI_CREW_DEPTH"] as const;
 
-const BG_CREW_GROUPS = [BG_CREW_CORE_ORDER, BG_CREW_MODEL_ORDER, BG_CREW_STATE_ORDER, BG_CREW_TOOLS_ORDER] as const;
+const BG_CREW_GROUPS = [BG_CREW_CORE_ORDER, BG_CREW_MODEL_ORDER, BG_CREW_STATE_ORDER, BG_CREW_TOOLS_ORDER, BG_CREW_REAP_ORDER] as const;
 
 /**
  * Generate the detached background-runner allowlist (exported AS
@@ -492,6 +496,7 @@ export function backgroundRunnerEnvAllowlist(): string[] {
 		...BG_CREW_MODEL_ORDER,
 		...BG_CREW_STATE_ORDER,
 		...BG_CREW_TOOLS_ORDER,
+		...BG_CREW_REAP_ORDER,
 	];
 }
 

@@ -38,9 +38,11 @@ import { sanitizeEnvSecrets } from "../../../src/utils/env-filter.ts";
 /**
  * FROZEN pre-registry content (v0.11.16 literals). Order matters — the
  * generators must reproduce the historical order exactly so downstream
- * consumers (spec-sandbox, worktree/*, tests) see no drift. The single
- * permitted delta vs v0.11.16: PI_CREW_TOOLS_MODIFIERS appended (L2-3 opt-in
- * flag — a NEW control var, absent from the old literal by construction).
+ * consumers (spec-sandbox, worktree/*, tests) see no drift. The permitted
+ * deltas vs v0.11.16: PI_CREW_TOOLS_MODIFIERS appended (L2-3 opt-in flag — a
+ * NEW control var, absent from the old literal by construction) and, from the
+ * wave 11a review (MINOR #7), PI_CREW_REAP_GROUP appended (the reap kill switch
+ * had to be forwarded to the detached runner, where the reap code also runs).
  */
 const FROZEN_BACKGROUND_RUNNER = [
 	"PATH",
@@ -117,6 +119,10 @@ const FROZEN_BACKGROUND_RUNNER = [
 	"PI_CREW_CHILD_PI_POOL",
 	// ── the ONE documented addition (L2-3, shipped with this registry) ──
 	"PI_CREW_TOOLS_MODIFIERS",
+	// ── wave 11a review (MINOR #7): documented addition #2 — the process-group
+	// reap kill switch must reach the detached runner, which owns kill/reap
+	// paths of its own; unforwarded it was silently inert there.
+	"PI_CREW_REAP_GROUP",
 ];
 
 /** FROZEN pre-registry BASE_ALLOWLIST (v0.11.16) — plus the wave-2b TMPDIR addition. */
@@ -160,7 +166,7 @@ const FROZEN_BASE = [
 
 const CREW_FAMILY_RE = /^(PI_CREW_|PI_TEAMS_)/;
 
-test("behavior preservation: BACKGROUND_RUNNER_ENV_ALLOWLIST is the frozen v0.11.16 literal + the one documented addition", () => {
+test("behavior preservation: BACKGROUND_RUNNER_ENV_ALLOWLIST is the frozen v0.11.16 literal + the documented additions", () => {
 	assert.deepEqual(BACKGROUND_RUNNER_ENV_ALLOWLIST, FROZEN_BACKGROUND_RUNNER);
 	assert.deepEqual(backgroundRunnerEnvAllowlist(), FROZEN_BACKGROUND_RUNNER, "the generator must be the live source of the export");
 });

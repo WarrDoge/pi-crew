@@ -42,6 +42,7 @@ import { tryRegisterSessionCleanup } from "../../runtime/session-resources.ts";
 import { createSessionSnapshot } from "../../runtime/session-snapshot.ts";
 import { applyCrewSettingsTiersToConfig, loadCrewSettingsTiers, scheduledJobsHiddenCountOf } from "../../runtime/settings-store.ts";
 import type { ReconcileResult } from "../../runtime/stale-reconciler.ts";
+import { flushReapEscalationsSync } from "../../runtime/stale-reconciler.ts";
 import { loadRunManifestById, saveRunManifest } from "../../state/stores/state-store.ts";
 import type { TeamRunManifest } from "../../state/types.ts";
 import { installInlinePanel } from "../../ui/inline-panel/index.ts";
@@ -166,6 +167,17 @@ function installSessionShutdownHandler(pi: ExtensionAPI, ctx: RegistrationContex
 		if (reason === "quit" || reason === "reload") {
 			// Actual shutdown — abort foreground runs and cleanup everything
 			ctx.cleanupRuntime();
+			// Wave 11a review (MAJOR #3): the group-reap SIGKILL rung is a chain of
+			// UNREF'd timers owned by an async escalation, and this handler is SYNC —
+			// without this flush the last rung is abandoned the moment the process
+			// exits. Delivered AFTER `cleanupRuntime()` so escalations armed by that
+			// cleanup are included. Each entry re-validates before signalling and the
+			// call never throws.
+			try {
+				flushReapEscalationsSync();
+			} catch (error) {
+				logInternalError("register.session-shutdown.flush-reap-escalations", error);
+			}
 		} else {
 			// Session switch (resume/new/fork) — cleanup resources but preserve foreground runs
 			ctx.cleanupSessionResourcesOnly();
