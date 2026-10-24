@@ -47,6 +47,27 @@ const STRANGER_PROOF_REFUSALS: ReadonlySet<GroupRefusalReason> = new Set<GroupRe
 	"not-group-member",
 ]);
 
+/**
+ * Handles that have already been handed to a reap — teardown idempotency state,
+ * tracked on the handle and NOT inferred from process liveness: macOS keeps
+ * `kill(pid, 0)` successful for a zombie the parent has not `waitpid`ed yet, so a
+ * liveness probe cannot tell "already reaped" from "still running".
+ *
+ * A module-level `WeakSet` (rather than an interface field) is deliberate: a
+ * spread copy of a handle (`{ ...handle }`, see the h4 stranger case) must NOT
+ * inherit the flag — a copy is a fresh teardown attempt that still has to run
+ * the identity ladder against the same pgid.
+ */
+const reaped = new WeakSet<FixtureHandle>();
+
+/**
+ * Handles whose reap reported `ok: true` — nothing of the fixture is left. Used by
+ * the `process.on("exit")` last chance to skip a group that is provably empty,
+ * while still allowing that last chance to RETRY a handle whose reap failed
+ * (refusal, stuck group): a failed reap must not silently disable the safety net.
+ */
+const cleared = new WeakSet<FixtureHandle>();
+
 /** Everything teardown needs about one spawned fixture. */
 export interface FixtureHandle {
 	/** The fixture's pid (= its pgid: a detached child is its own group leader). */
@@ -167,9 +188,15 @@ function awaitEscalation<T>(promise: Promise<T>): Promise<T> {
  *    reused pid.
  *
  * Never throws: it is called from `finally` bodies, where a throw would mask the
- * failure under test. Safe to call twice (the second call reports `ok: false`).
+ * failure under test. Idempotent per handle: a second call signals NOTHING and
+ * reports `{ ok: false, reason: "already-reaped" }` on every platform.
  */
 export async function reapFixture(handle: FixtureHandle, opts: ReapFixtureOptions = {}): Promise<ReapFixtureResult> {
+	if (reaped.has(handle)) return { ok: false, reason: "already-reaped" };
+	// Mark on the FIRST attempt, before any signal and regardless of its outcome:
+	// the point of the flag is "this pgid/pid has already been signalled by us",
+	// so a retry must never risk hitting a reused pid (see the WeakSet comment).
+	reaped.add(handle);
 	const result = reapGroup(handle.pgid, handle.pid, {
 		expected: handle.identity,
 		gracefulMs: opts.gracefulMs ?? DEFAULT_GRACEFUL_MS,
@@ -183,6 +210,7 @@ export async function reapFixture(handle: FixtureHandle, opts: ReapFixtureOption
 	}
 	const outcome = await awaitEscalation(result.pending);
 	if (outcome === "stuck") return { ok: killPidQuietly(handle.pid, "SIGKILL"), reason: "stuck (pid fallback)" };
+	cleared.add(handle);
 	return { ok: true };
 }
 
@@ -217,6 +245,11 @@ export function registerFixtureTrap(handles: FixtureHandle[]): void {
 	});
 	process.on("exit", () => {
 		for (const handle of trapped) {
+			// A handle whose reap already reported `ok: true` has an empty group: never
+			// signal it again (the pid/pgid may have been reused since). A handle whose
+			// reap FAILED still gets this last chance — the ladder re-validates identity,
+			// so retrying is safe and is the orphan net this hook exists for.
+			if (cleared.has(handle)) continue;
 			try {
 				// Sync SIGTERM prefix; the flush below delivers the escalation.
 				reapGroup(handle.pgid, handle.pid, { expected: handle.identity, gracefulMs: 0, capMs: 0, name: `fixture:${handle.pid}` });

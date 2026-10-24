@@ -6,10 +6,14 @@
  *      it would signal the runner's own group);
  * (h2) a detached tree of SIGTERM-ignoring kids is reaped in < 2000 ms and every
  *      pid is ESRCH afterwards — the shape that leaked two >6 h orphans;
- * (h3) a second `reapFixture` resolves instead of throwing (it runs in `finally`);
+ * (h3) `reapFixture` is idempotent per handle — the second call signals nothing and
+ *      reports `already-reaped` (never throws; runs in `finally` bodies);
  * (h4) a snapshot that no longer matches the live process is refused AND is not
  *      degraded into a pid kill (a reused pid must never be signalled);
- * (h5) `registerFixtureTrap` installs its hooks exactly once.
+ * (h5) `registerFixtureTrap` installs its hooks exactly once;
+ * (h6) `already-reaped` is decided by the HANDLE, not by process liveness: a fixture
+ *      reaped once and then provably dead still reports `already-reaped` (macOS keeps
+ *      `kill(pid, 0)` succeeding for unreaped zombies, so liveness cannot decide it).
  *
  * Real-process cases are Linux-only (`/proc` is what makes the identity snapshot
  * reusable) and are gated per test, with the platform constant at the top.
@@ -105,14 +109,17 @@ test("(h2) reaps a detached tree of SIGTERM-ignoring kids in < 2000 ms", { skip:
 	}
 });
 
-test("(h3) reapFixture is idempotent — a second reap resolves, never throws", async () => {
+test("(h3) reapFixture is idempotent — a second reap signals nothing and says so", async () => {
 	const handle = spawnFixture([process.execPath, ...LONG_LIVED]);
 	try {
 		const first = await reapFixture(handle, { gracefulMs: 100, capMs: 1_000 });
 		assert.equal(first.ok, true, `first reap must succeed, reason=${first.reason ?? "-"}`);
 		const second = await reapFixture(handle, { gracefulMs: 100, capMs: 1_000 });
 		assert.equal(second.ok, false, "a second reap has nothing left to kill");
-		assert.ok(second.reason, "the second reap must explain itself");
+		assert.equal(second.reason, "already-reaped", "the second reap must report handle-tracked idempotency, not an OS guess");
+		// Third call: still handle-tracked, still no throw (it runs in `finally`).
+		const third = await reapFixture(handle);
+		assert.deepEqual(third, { ok: false, reason: "already-reaped" });
 	} finally {
 		killQuietly(handle.pid, "SIGKILL");
 	}
@@ -153,6 +160,30 @@ test("(h5) registerFixtureTrap installs its hooks exactly once", async () => {
 		assert.equal(process.listenerCount("exit") - exitListenersBefore, 1, "exactly one exit listener");
 	} finally {
 		await reapFixture(handle, { gracefulMs: 100, capMs: 1_000 });
+		killQuietly(handle.pid, "SIGKILL");
+	}
+});
+
+test("(h6) `already-reaped` is a property of the handle, not of process liveness", async () => {
+	// Simulates the macOS zombie shape without needing macOS: the handle is reaped
+	// while the child may still be un-`waitpid`ed (kill(pid, 0) would still say
+	// "alive"), and it is reaped again once the process is provably gone. Both
+	// calls must report the same handle-tracked verdict — a liveness probe would
+	// report different things.
+	const handle = spawnFixture([process.execPath, "-e", "process.exit(0)"]);
+	try {
+		const first = await reapFixture(handle, { gracefulMs: 100, capMs: 500 });
+		assert.notEqual(first.reason, "already-reaped", "the first attempt must actually run the ladder");
+		// Let the child exit AND be reaped by libuv: the pid is now definitely dead.
+		await new Promise<void>((resolve) => {
+			if (handle.child.exitCode !== null || handle.child.signalCode !== null) return resolve();
+			handle.child.once("exit", () => resolve());
+		});
+		const second = await reapFixture(handle, { gracefulMs: 100, capMs: 500 });
+		assert.deepEqual(second, { ok: false, reason: "already-reaped" }, "a dead fixture must still be `already-reaped`, not re-laddered");
+		const third = await reapFixture(handle);
+		assert.deepEqual(third, { ok: false, reason: "already-reaped" });
+	} finally {
 		killQuietly(handle.pid, "SIGKILL");
 	}
 });
