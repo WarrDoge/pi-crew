@@ -28,7 +28,7 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
 import * as path from "node:path";
-import test, { beforeEach } from "node:test";
+import test, { after, beforeEach } from "node:test";
 import {
 	__armedEscalationCountForTest,
 	__resetArmedEscalationsForTest,
@@ -42,7 +42,23 @@ import {
 	reapGroup,
 } from "../../../../src/runtime/process/reap-group.ts";
 
-const isPosix = process.platform !== "win32";
+const isLinux = process.platform === "linux";
+
+/**
+ * Windows has no `process.getuid`, so the ladder's uid rungs (b5 and the
+ * dead-path uid proof) would silently pass on win32 — an unreachable
+ * combination in production (the platform rung refuses win32 first). Define a
+ * synthetic uid for the lifetime of this FILE only (node:test isolates every
+ * file in its own process) so the guard ladder is exercised identically on
+ * every OS. Restored in `after()`; a no-op wherever a real getuid exists.
+ */
+const hadRealGetuid = typeof process.getuid === "function";
+if (!hadRealGetuid) {
+	(process as { getuid?: () => number }).getuid = () => 0;
+}
+after(() => {
+	if (!hadRealGetuid) delete (process as { getuid?: () => number }).getuid;
+});
 
 /**
  * MINOR #4 consequence: rungs 1/3 read OUR identity from /proc, never from the
@@ -153,7 +169,7 @@ async function reapAfterLeaderKill(
 	return { pending: result.pending, tree };
 }
 
-test("(a1) real tree: group reaped after the leader is SIGKILLed (kids ESRCH)", { skip: !isPosix }, async () => {
+test("(a1) real tree: group reaped after the leader is SIGKILLed (kids ESRCH)", { skip: !isLinux }, async () => {
 	const { pending, tree } = await reapAfterLeaderKill([], 2_000);
 	try {
 		const outcome = await awaitWithKeepalive(pending);
@@ -167,7 +183,7 @@ test("(a1) real tree: group reaped after the leader is SIGKILLed (kids ESRCH)", 
 	}
 });
 
-test("(a2) real tree: SIGTERM-ignoring kids force the SIGKILL rung", { skip: !isPosix }, async () => {
+test("(a2) real tree: SIGTERM-ignoring kids force the SIGKILL rung", { skip: !isLinux }, async () => {
 	const { pending, tree } = await reapAfterLeaderKill(["ignore-term"], 400);
 	try {
 		const outcome = await awaitWithKeepalive(pending);
@@ -203,7 +219,9 @@ function refusalCase(
 			const opts2 = {
 				readIdentity: opts.readIdentity,
 				expected: opts.expected,
-				platform: opts.platform,
+				// Exercise the ladder identically on every OS: without the pin a real
+				// win32 host trips the platform rung first and masks every later rung.
+				platform: opts.platform ?? "linux",
 				signalGroup: (pgid: number, signal: NodeJS.Signals) => signals.push(`${pgid}:${signal}`),
 				groupAlive: () => true,
 			};
@@ -301,6 +319,7 @@ test("(b4) invalid pgids (0, 1, -5, 1.5, NaN) are refused before any identity re
 	for (const pgid of [0, 1, -5, 1.5, Number.NaN]) {
 		let identityReads = 0;
 		const reason = assertSafeGroup(pgid, 4242, {
+			platform: "linux",
 			readIdentity: (pid) => {
 				identityReads++;
 				return pid === process.pid ? { pid, pgid: process.pid, starttime: "1", uid: uid() } : undefined;
@@ -320,6 +339,7 @@ test("(b4b) our own group / our parent's group is refused", () => {
 	for (const pgid of [process.pid, process.ppid]) {
 		const signals: string[] = [];
 		const result = reapGroup(pgid, 4242, {
+			platform: "linux",
 			readIdentity: (pid) => ({ pid, pgid, starttime: "1", uid: uid() }),
 			signalGroup: (g, s) => signals.push(`${g}:${s}`),
 		});
@@ -332,6 +352,7 @@ test("(b4b) our own group / our parent's group is refused", () => {
 test("(b7) a passing ladder sends SIGTERM synchronously, then reports gone", async () => {
 	const signals: string[] = [];
 	const result = reapGroup(FAKE_PGID, 4242, {
+		platform: "linux",
 		readIdentity: reader({ pid: 4242, pgid: FAKE_PGID, starttime: "11", uid: uid() }),
 		signalGroup: (g, s) => signals.push(`${g}:${s}`),
 		groupAlive: () => false, // the group died from the SIGTERM prefix
@@ -359,6 +380,7 @@ test("(b4c) CRITICAL #1: our REAL pgrp is refused even when it is neither pid no
 	try {
 		const signals: string[] = [];
 		const opts = {
+			platform: "linux" as const,
 			readIdentity: selfOnlyReader({ 4242: { pid: 4242, pgid: selfPgrp, starttime: "11", uid: uid() } }),
 			signalGroup: (g: number, s: NodeJS.Signals) => signals.push(`${g}:${s}`),
 			groupAlive: () => true,
@@ -378,6 +400,7 @@ test("(b4d) CRITICAL #1 / MINOR #3: an unreadable self identity is a fail-safe r
 	try {
 		const signals: string[] = [];
 		const reason = assertSafeGroup(FAKE_PGID, 4242, {
+			platform: "linux",
 			readIdentity: selfOnlyReader({ 4242: { pid: 4242, pgid: FAKE_PGID, starttime: "11", uid: uid() } }),
 			signalGroup: (g, s) => signals.push(`${g}:${s}`),
 		});
@@ -394,6 +417,7 @@ test("(b4e) MINOR #3: a read we can parse but without a pgrp is identity-missing
 	__setSelfIdentityForTest({ pid: process.pid, pgid: undefined, starttime: "1", uid: uid() });
 	try {
 		const reason = assertSafeGroup(FAKE_PGID, 4242, {
+			platform: "linux",
 			readIdentity: selfOnlyReader({ 4242: { pid: 4242, pgid: FAKE_PGID, starttime: "11", uid: uid() } }),
 		});
 		assert.equal(reason, "identity-missing");
@@ -415,17 +439,17 @@ test("(b4f) MINOR #3: a FAILED self read is NOT cached — the next evaluation r
 			return undefined;
 		});
 		const candidateGone = () => undefined;
-		assert.equal(assertSafeGroup(FAKE_PGID, 4242, { readIdentity: candidateGone }), "proc-unavailable");
-		assert.equal(assertSafeGroup(FAKE_PGID, 4242, { readIdentity: candidateGone }), "proc-unavailable");
+		assert.equal(assertSafeGroup(FAKE_PGID, 4242, { platform: "linux", readIdentity: candidateGone }), "proc-unavailable");
+		assert.equal(assertSafeGroup(FAKE_PGID, 4242, { platform: "linux", readIdentity: candidateGone }), "proc-unavailable");
 		assert.equal(failedReads, 2, "the failed read must be retried on the next call, not replayed from cache");
 
 		__setSelfIdentityReaderForTest((): ReturnType<typeof readProcIdentity> => {
 			okReads++;
 			return { pid: process.pid, pgid: 313_131, starttime: "1", uid: uid() };
 		});
-		assert.equal(assertSafeGroup(FAKE_PGID, 4242, { readIdentity: candidateGone }), "identity-missing");
+		assert.equal(assertSafeGroup(FAKE_PGID, 4242, { platform: "linux", readIdentity: candidateGone }), "identity-missing");
 		assert.equal(okReads, 1, "a successful read is used immediately");
-		assert.equal(assertSafeGroup(FAKE_PGID, 4242, { readIdentity: candidateGone }), "identity-missing");
+		assert.equal(assertSafeGroup(FAKE_PGID, 4242, { platform: "linux", readIdentity: candidateGone }), "identity-missing");
 		assert.equal(okReads, 1, "and then cached (no second read)");
 	} finally {
 		__resetSelfIdentityForTest();
@@ -437,6 +461,7 @@ test("(b10) MAJOR #2: dead candidate + leader starttime mismatch ⇒ starttime-m
 	// whose starttime differs from the snapshot ⇒ the pgid was recycled.
 	const signals: string[] = [];
 	const opts = {
+		platform: "linux" as const,
 		readIdentity: selfOnlyReader({ [FAKE_PGID]: { pid: FAKE_PGID, pgid: FAKE_PGID, starttime: "999", uid: uid() } }),
 		signalGroup: (g: number, s: NodeJS.Signals) => signals.push(`${g}:${s}`),
 		groupAlive: () => true,
@@ -454,6 +479,7 @@ test("(b11) MAJOR #2: leader dead but the group still has members ⇒ one group 
 	const signals: string[] = [];
 	let aliveCalls = 0;
 	const opts = {
+		platform: "linux" as const,
 		readIdentity: selfOnlyReader(), // candidate + leader both gone
 		signalGroup: (g: number, s: NodeJS.Signals) => signals.push(`${g}:${s}`),
 		// call 1 = the guard's leader-gone probe (alive), call 2 = post-SIGTERM (drained).
@@ -473,6 +499,7 @@ test("(b12) MAJOR #2: dead candidate + non-leader-proof snapshot ⇒ refused", (
 	// rungs 4/6/7/8 tautological and killed blindly).
 	const signatures: string[] = [];
 	const reason = assertSafeGroup(4242, 4242, {
+		platform: "linux",
 		readIdentity: selfOnlyReader(),
 		signalGroup: (g, s) => signatures.push(`${g}:${s}`),
 		groupAlive: () => true,
@@ -489,6 +516,7 @@ test("(b13) recycle between SIGTERM and SIGKILL ⇒ refused, NEVER a SIGKILL", a
 	const signals: string[] = [];
 	let leaderReads = 0;
 	const opts = {
+		platform: "linux" as const,
 		readIdentity: (pid: number): ReturnType<typeof readProcIdentity> => {
 			if (pid === process.pid) return { pid, pgid: process.pid, starttime: "1", uid: uid() };
 			if (pid === FAKE_PGID) {
@@ -528,6 +556,7 @@ test("(b15) the escalation promise never rejects (fatal unhandled rejection on N
 	// degrade to `stuck`, not to a rejected promise the caller `void`s.
 	let aliveCalls = 0;
 	const result = reapGroup(FAKE_PGID, 4242, {
+		platform: "linux",
 		readIdentity: reader({ pid: 4242, pgid: FAKE_PGID, starttime: "11", uid: uid() }),
 		signalGroup: () => {
 			/* the SIGTERM prefix is delivered */
@@ -551,6 +580,7 @@ test("(b16) MINOR #1: dead candidate whose pid is NOT the requested pgid ⇒ ref
 	// group we are about to signal — a non-leader pid cannot prove a group.
 	const signals: string[] = [];
 	const opts = {
+		platform: "linux" as const,
 		readIdentity: selfOnlyReader(),
 		signalGroup: (g: number, s: NodeJS.Signals) => signals.push(`${g}:${s}`),
 		groupAlive: () => true,
@@ -566,6 +596,7 @@ test("(b17) MINOR #1: a leader pid that left its group is not evidence ⇒ refus
 	// setpgid): the snapshot proves nothing about `pgid`.
 	const signals: string[] = [];
 	const opts = {
+		platform: "linux" as const,
 		readIdentity: selfOnlyReader({ [FAKE_PGID]: { pid: FAKE_PGID, pgid: OTHER_PGID, starttime: "111", uid: uid() } }),
 		signalGroup: (g: number, s: NodeJS.Signals) => signals.push(`${g}:${s}`),
 		groupAlive: () => true,
@@ -582,6 +613,7 @@ test("(b18) MINOR #2: dead candidate + snapshot WITHOUT uid ⇒ refused (no EPER
 	// the escalation would then be reported as a false `stuck`.
 	const signals: string[] = [];
 	const opts = {
+		platform: "linux" as const,
 		readIdentity: selfOnlyReader(),
 		signalGroup: (g: number, s: NodeJS.Signals) => signals.push(`${g}:${s}`),
 		groupAlive: () => true,
@@ -599,6 +631,7 @@ test("(b19) MAJOR #3: flushReapEscalationsSync delivers the SIGKILL rung synchro
 	__resetArmedEscalationsForTest();
 	const signals: string[] = [];
 	const result = reapGroup(FAKE_PGID, 4242, {
+		platform: "linux",
 		readIdentity: reader({ pid: 4242, pgid: FAKE_PGID, starttime: "11", uid: uid() }),
 		signalGroup: (g, s) => signals.push(`${g}:${s}`),
 		groupAlive: () => true, // group survives SIGTERM ⇒ an escalation is armed
@@ -628,6 +661,7 @@ test("(b20) MAJOR #3: the flush RE-VALIDATES — a pgid recycled since arming is
 	const signals: string[] = [];
 	let live: ReturnType<typeof readProcIdentity> = { pid: 4242, pgid: FAKE_PGID, starttime: "11", uid: uid() };
 	const opts = {
+		platform: "linux" as const,
 		readIdentity: (pid: number) => (pid === 4242 ? live : selfOnlyReader()(pid)),
 		signalGroup: (g: number, s: NodeJS.Signals) => signals.push(`${g}:${s}`),
 		groupAlive: () => true,

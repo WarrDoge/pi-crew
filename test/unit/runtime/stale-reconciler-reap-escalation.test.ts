@@ -31,8 +31,15 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, describe, it } from "node:test";
-import { __armedEscalationCountForTest, __resetArmedEscalationsForTest, reapGroup } from "../../../src/runtime/process/reap-group.ts";
+import { afterEach, beforeEach, describe, it } from "node:test";
+import {
+	__armedEscalationCountForTest,
+	__resetArmedEscalationsForTest,
+	__resetSelfIdentityForTest,
+	__setSelfIdentityForTest,
+	readProcIdentity,
+	reapGroup,
+} from "../../../src/runtime/process/reap-group.ts";
 import { __test, drainReapEscalations, flushReapEscalationsSync, reconcileStaleRun } from "../../../src/runtime/stale-reconciler.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
 
@@ -161,9 +168,22 @@ function identity(
 }
 
 describe("stale-reconciler — the drain pins the loop, the flush delivers the SIGKILL", () => {
+	// reap-group's ladder reads OUR OWN identity from /proc (rung 1 — never the
+	// injected candidate reader). On a platform without /proc (macOS, Windows)
+	// that read is undefined and (ii)'s arming calls would be refused at
+	// `proc-unavailable` before any escalation exists. Seed a synthetic self
+	// identity on exactly those platforms (a no-op on Linux).
+	beforeEach(() => {
+		__resetSelfIdentityForTest();
+		if (readProcIdentity(process.pid) === undefined) {
+			__setSelfIdentityForTest({ pid: process.pid, pgid: 4_000_001, starttime: "1", uid: PROC_IDENTITY_UID() });
+		}
+	});
+
 	afterEach(() => {
 		__test.reset();
 		__resetArmedEscalationsForTest();
+		__resetSelfIdentityForTest();
 	});
 
 	it("(i) holds a REF'D keep-alive while an escalation is in flight — proven in a child process", () => {
@@ -232,6 +252,7 @@ describe("stale-reconciler — the drain pins the loop, the flush delivers the S
 			[4343, pgidB],
 		] as const) {
 			const result = reapGroup(pgid, candidatePid, {
+				platform: "linux", // exercise the ladder identically on every OS (win32 would refuse at the platform rung)
 				readIdentity: (pid) => identities.get(pid),
 				signalGroup: (g, s) => signals.push(`${g}:${s}`),
 				groupAlive: () => true,

@@ -24,7 +24,7 @@ import { once } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { after, afterEach, beforeEach, describe, it } from "node:test";
 import { __resetSelfIdentityForTest, __setSelfIdentityForTest, readProcIdentity } from "../../../src/runtime/process/reap-group.ts";
 import {
 	__resetSignalledGroupsForTest,
@@ -44,6 +44,24 @@ const DEAD_RUNNER_PID = 999_997;
 /** A pid that is provably not in use — the recorded sync-run spawner (11c). */
 const DEAD_SESSION_PID = 999_995;
 const selfUid = (): number => (typeof process.getuid === "function" ? process.getuid() : 0);
+
+/**
+ * The sweep's same-uid rung compares candidates against OUR real uid — there
+ * is no seam for it. Windows has no getuid, so the src-side read is undefined
+ * there and every candidate is rejected as unprovable (an unreachable
+ * combination in production: the platform gate returns [] first on any
+ * non-Linux host, but the fixtures inject `platform: "linux"`). Define a
+ * synthetic uid for the lifetime of this FILE only (node:test isolates every
+ * file in its own process) so the rung is exercised identically on every OS.
+ * Restored in `after()`; a no-op where a real getuid exists.
+ */
+const hadRealGetuid = typeof process.getuid === "function";
+if (!hadRealGetuid) {
+	(process as { getuid?: () => number }).getuid = () => 0;
+}
+after(() => {
+	if (!hadRealGetuid) delete (process as { getuid?: () => number }).getuid;
+});
 
 /** Env keys the sweep's guards read; a worker shell leaks all of them. */
 const GUARD_ENV_KEYS = ["PI_CREW_KIND", "PI_CREW_DEPTH", "PI_TEAMS_DEPTH", "PI_CREW_REAP_RUN_DESCENDANTS"] as const;

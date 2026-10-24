@@ -7,8 +7,9 @@
  */
 
 import assert from "node:assert/strict";
-import test from "node:test";
+import { afterEach, beforeEach, test } from "node:test";
 import { collectWorkerPidEvidence, reapOrphanWorkers, reapRecordedWorkerOrphans } from "../../../../src/runtime/process/orphan-reaper.ts";
+import { __resetSelfIdentityForTest, __setSelfIdentityForTest, readProcIdentity } from "../../../../src/runtime/process/reap-group.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 
 function task(overrides: Partial<TeamTaskState> & { id: string; status: TeamTaskState["status"] }): TeamTaskState {
@@ -106,6 +107,24 @@ test("reapRecordedWorkerOrphans: no recorded pid → no-op", () => {
 
 const selfUid = (): number | undefined => (typeof process.getuid === "function" ? process.getuid() : undefined);
 
+// The group path routes through reap-group's guard ladder, whose rung 1 reads
+// OUR OWN identity from /proc — deliberately NOT the injected candidate reader
+// (CRITICAL #1). On a platform without /proc (macOS, Windows) that read is
+// undefined and every group case would short-circuit at `proc-unavailable`
+// before the rung under test. Seed a synthetic self identity on exactly those
+// platforms (a no-op on Linux) — the same pattern the reap-group and sweep
+// suites use.
+beforeEach(() => {
+	__resetSelfIdentityForTest();
+	if (readProcIdentity(process.pid) === undefined) {
+		__setSelfIdentityForTest({ pid: process.pid, pgid: 4_000_001, starttime: "1", uid: selfUid() });
+	}
+});
+
+afterEach(() => {
+	__resetSelfIdentityForTest();
+});
+
 interface SignalLog {
 	pidSignals: Array<{ pid: number; signal: string }>;
 	groupSignals: string[];
@@ -140,6 +159,7 @@ test("(c1) legacy record without pgid/starttime keeps the pid-only SIGTERM path"
 test("(c2) identity-proven pid uses the GROUP path and bypasses the allowed-pid gate", () => {
 	const log = newLog();
 	const result = reapOrphanWorkers([{ taskId: "a", pid: 4000, pgid: 4000, starttime: "555", uid: selfUid() }], {
+		platform: "linux", // exercise the ladder identically on every OS (win32 would trip the platform rung first)
 		isAlive: () => true,
 		readIdentity: (pid) => ({ pid, pgid: 4000, starttime: "555", uid: selfUid() }),
 		groupAlive: () => false, // group died from the synchronous SIGTERM prefix
@@ -154,6 +174,7 @@ test("(c2) identity-proven pid uses the GROUP path and bypasses the allowed-pid 
 test("(c3) a refused group falls back to the pid-only path — recorded in ONE array only (MINOR #6)", () => {
 	const log = newLog();
 	const result = reapOrphanWorkers([{ taskId: "a", pid: 4000, pgid: 4000, starttime: "555", uid: selfUid() }], {
+		platform: "linux", // the refusal under test is `not-group-member`, not the platform rung
 		isAlive: () => true,
 		// Live identity says the candidate belongs to a DIFFERENT group ⇒ ladder refuses.
 		readIdentity: (pid) => ({ pid, pgid: 7777, starttime: "555", uid: selfUid() }),
@@ -181,6 +202,7 @@ test("(c4) zombie-scan throw is fail-open: identity-proven pids reap, unproven o
 			task({ id: "unproven", status: "running", heartbeat: { pid: 5000 } as TeamTaskState["heartbeat"] }),
 		],
 		{
+			platform: "linux", // the identity-proven GROUP path must be reachable on every OS
 			isAlive: () => true,
 			readIdentity: (pid) => ({ pid, pgid: pid, starttime: "555", uid: selfUid() }),
 			groupAlive: () => false,
@@ -258,6 +280,7 @@ test("(c7) identity proof requires LEADER proof — a non-leader pgid is never a
 test("(c8) dead candidate + non-leader snapshot ⇒ group refused, skipped exactly once", () => {
 	const log = newLog();
 	const result = reapOrphanWorkers([{ taskId: "a", pid: 4000, pgid: 5000, starttime: "555", uid: selfUid() }], {
+		platform: "linux", // the refusal under test is `identity-missing`, not `platform-not-posix`
 		isAlive: () => false,
 		// self readable (rung 1), candidate + leader gone from /proc
 		readIdentity: (pid) => (pid === process.pid ? { pid, pgid: process.pid, starttime: "1", uid: selfUid() } : undefined),
@@ -277,6 +300,7 @@ test("(c8) dead candidate + non-leader snapshot ⇒ group refused, skipped exact
 test("(c9) escalate:false still COLLECTS the escalation (never dropped, never rejects)", () => {
 	const log = newLog();
 	const result = reapOrphanWorkers([{ taskId: "a", pid: 4000, pgid: 4000, starttime: "555", uid: selfUid() }], {
+		platform: "linux", // the group path must be accepted (not platform-refused) so an escalation is armed
 		isAlive: () => true,
 		readIdentity: (pid) => ({ pid, pgid: 4000, starttime: "555", uid: selfUid() }),
 		groupAlive: () => true, // the group survives SIGTERM ⇒ an escalation is armed

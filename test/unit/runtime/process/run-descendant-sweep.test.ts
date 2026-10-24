@@ -36,6 +36,25 @@ import {
 
 const isLinux = process.platform === "linux";
 const selfUid = (): number => (typeof process.getuid === "function" ? process.getuid() : 0);
+
+/**
+ * The sweep's same-uid rung compares every candidate against OUR real uid
+ * (`process.getuid`) — there is no injectable seam for it. Windows has no
+ * getuid, so on win32 the src-side read is `undefined` and every candidate is
+ * rejected as unprovable — an unreachable combination in production (the
+ * platform gate returns [] before the uid rung on any non-Linux host), but it
+ * would blank every discovery assertion here once `platform: "linux"` is
+ * injected. Define a synthetic uid for the lifetime of this FILE only
+ * (node:test isolates every file in its own process) so the rung is exercised
+ * identically on every OS. Restored in `after()`; a no-op where getuid exists.
+ */
+const hadRealGetuid = typeof process.getuid === "function";
+if (!hadRealGetuid) {
+	(process as { getuid?: () => number }).getuid = () => 0;
+}
+after(() => {
+	if (!hadRealGetuid) delete (process as { getuid?: () => number }).getuid;
+});
 /** A pid that is certainly not in use — the "recorded parent is dead" fixture. */
 const DEAD_PID = 999_999;
 /** A pid that is certainly not in use — the "dead surface pane" fixture (11b.4). */

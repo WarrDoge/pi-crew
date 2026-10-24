@@ -314,7 +314,16 @@ test("cleanupOrphanWorkers prunes registry entries that no longer match the sche
 	assert.ok(result.pruned >= 1, "invalid entry pruned");
 });
 
-test("cleanupOrphanWorkers prunes (not kills) when startTime mismatches (PID recycling detection)", async () => {
+// The PID-recycling detection needs a readable process startTime: /proc on
+// Linux, `ps -o lstart=` on macOS. The win32 path shells out to PowerShell,
+// which is environment-dependent (it TIMED OUT on the windows CI runner —
+// run 40100328377 — so `getProcessStartTime` returned undefined and the src
+// took its documented fail-safe "cannot verify ⇒ trust the registry" branch:
+// stale entry ⇒ SIGKILL, pruned=0). There is no seam to inject the startTime,
+// so the pin simply cannot be deterministic on win32.
+test("cleanupOrphanWorkers prunes (not kills) when startTime mismatches (PID recycling detection)", {
+	skip: process.platform === "win32",
+}, async () => {
 	const tmp = mkdtemp("pi-crew-recycle-");
 	try {
 		// Spawn a long-running process so the PID stays alive during cleanup.
