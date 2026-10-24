@@ -85,7 +85,14 @@ test("dormant gate: shouldRegisterMessageTool honors PI_CREW_MSG_ENABLED", () =>
 
 test("dormant without env + production-like no broker env → structured notice, no hang", async () => {
 	// Dormant: env off, no injected client.
-	const dormant = await createMessageTool().execute({ to: "parent", kind: "notify", body: "x" });
+	// HERMETICITY (wave 12c-F3): `createMessageTool()` with NO `env` reads the
+	// REAL `process.env` (see `get()` in src/prompt/message-tool.ts), so running
+	// this file from inside a pi-crew worker shell — where the harness exports
+	// PI_CREW_MSG_ENABLED=1 + PI_CREW_BROKER_SOCKET/TOKEN/RUN_ID — built a REAL
+	// CrewBrokerClient whose unref'd connect timer let node:test cancel the file
+	// (`cancelledByParent`) instead of asserting dormancy. An empty injected env
+	// pins the dormant branch on every host: injected env is read EXCLUSIVELY.
+	const dormant = await createMessageTool({ env: {} }).execute({ to: "parent", kind: "notify", body: "x" });
 	assert.equal(dormant.status, "unavailable");
 	assert.match(dormant.text, /dormant/);
 	// Env on but broker creds absent (scaffold/mock worker) → broker unavailable,

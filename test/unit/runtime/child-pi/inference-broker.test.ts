@@ -46,6 +46,8 @@ import {
 	stopInferenceBroker,
 } from "../../../../src/runtime/child-pi/inference-broker.ts";
 import { getPiSpawnCommand } from "../../../../src/runtime/pi-spawn.ts";
+import { readProcIdentity } from "../../../../src/runtime/process/reap-group.ts";
+import { type FixtureHandle, reapFixture, registerFixtureTrap } from "../../../helpers/fixture-process.ts";
 
 const REAL_KEY = "sk-ant-realkey-do-not-leak-0123456789";
 
@@ -577,6 +579,95 @@ test("(i1) both providers route by path prefix; openai gets Bearer, anthropic ge
 
 // ── (g) LIVE e2e — REAL pi binary through the broker (linux) ────────────
 
+/**
+ * Safety-net SIGKILL for a LIVE `pi` run that never exits (ms).
+ *
+ * GAP-3 (fix-wave 12c-F3): this used to BE the teardown — `setTimeout(() =>
+ * child.kill("SIGKILL"), 90_000).unref?.()` fired-and-forgotten inside the promise,
+ * with no retained handle and no `finally`. Two holes: an `unref`'d timer never
+ * fires if the host drains first (watchdog / CI timeout / suite abort leaves `pi`
+ * running), and a pid-only kill never reaches `pi`'s bash-tool children. It is now
+ * ARMED (ref'd), tracked and cleared in `finally`, and it is only a net — the
+ * teardown is the group reap in {@link runLivePi}.
+ */
+const PI_RUN_SAFETY_NET_MS = 90_000;
+
+/** `true` when `pid` is still a live process we can signal (EPERM counts as alive). */
+function pidAlive(pid: number): boolean {
+	if (!Number.isInteger(pid) || pid <= 1) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err) {
+		return (err as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/** What one LIVE `pi` invocation reports back. */
+interface LivePiResult {
+	code: number | null;
+	stdout: string;
+	stderr: string;
+}
+
+/**
+ * Spawn the REAL `pi` for a LIVE case and OWN its teardown.
+ *
+ * `pi` is spawned `detached` (it becomes a session/group leader ⇒ `pgid === pid`)
+ * and its `/proc` identity is snapshotted immediately, so `finally` can reap the
+ * whole group through {@link reapFixture}: SIGTERM → SIGKILL escalation, every
+ * signal re-validated against the spawn-time identity (pgid-reuse proof).
+ *
+ * `registerFixtureTrap` covers the abort window that a `finally` cannot: a throw
+ * between spawn and teardown, or a file-level abort (`after()` + `process.on("exit")`).
+ *
+ * RESIDUAL, documented rather than faked (SPEC §3.3): `pi`'s bash-tool children
+ * are spawned in their OWN groups (wave-11 GAP-0), so this group reap cannot reach
+ * them. That is a src-level group-topology problem (tracked children / cgroup) and
+ * out of scope for test teardown.
+ */
+async function runLivePi(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<LivePiResult> {
+	const child = spawn(command, args, { detached: true, env, stdio: ["ignore", "pipe", "pipe"] });
+	const pid = child.pid;
+	if (!pid) throw new Error(`failed to spawn ${command} (spawn returned no pid)`);
+	// Snapshot NOW (only readable while the pid is ours) and normalise `pgid`: a
+	// detached child leads its own group, but an immediate /proc read can land
+	// before its setsid and report the RUNNER's pgid instead.
+	const raw = readProcIdentity(pid);
+	const handle: FixtureHandle = { pid, pgid: pid, child, identity: raw ? { ...raw, pgid: pid } : undefined };
+	registerFixtureTrap([handle]);
+	let safetyNet: NodeJS.Timeout | undefined;
+	try {
+		return await new Promise<LivePiResult>((resolve) => {
+			let settled = false;
+			let stdout = "";
+			let stderr = "";
+			const settle = (result: LivePiResult): void => {
+				if (settled) return;
+				settled = true;
+				resolve(result);
+			};
+			child.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
+			child.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
+			child.on("exit", (code) => settle({ code, stdout, stderr }));
+			// Spawn failure (missing binary, EACCES) must not hang the case.
+			child.on("error", (err) => settle({ code: null, stdout, stderr: `${stderr}${String(err)}` }));
+			safetyNet = setTimeout(() => child.kill("SIGKILL"), PI_RUN_SAFETY_NET_MS);
+		});
+	} finally {
+		if (safetyNet !== undefined) clearTimeout(safetyNet);
+		const reaped = await reapFixture(handle);
+		// `ok: false` is EXPECTED on the happy path: a run that exited cleanly leaves
+		// an empty group, which reapGroup reports as `identity-missing` (nothing to
+		// signal) and reapFixture then degrades to a pid kill on a pid that is
+		// already gone. Warn only when a process is ACTUALLY still there — that is
+		// the leak this teardown exists for.
+		if (!reaped.ok && pidAlive(pid)) {
+			console.warn(`[inference-broker] pi fixture pid=${pid} still alive after reap (${reaped.reason ?? "unknown"})`);
+		}
+	}
+}
+
 test("(g1) LIVE: real `pi -p` completes via scoped dir + broker + mock upstream; upstream saw the real key; worker env had no real key", {
 	skip: process.platform !== "linux",
 }, async () => {
@@ -587,24 +678,13 @@ test("(g1) LIVE: real `pi -p` completes via scoped dir + broker + mock upstream;
 	}
 	await withBroker(async (fn) => {
 		const snap = getInferenceBrokerSnapshot();
-		const res = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
-			const child = spawn(piCmd.command, [...piCmd.args, "--mode", "json", "-p", "Reply with exactly BROKER-LIVE-OK"], {
-				env: {
-					PATH: process.env.PATH ?? "/usr/bin",
-					HOME: process.env.HOME ?? "/home",
-					[PI_AGENT_DIR_ENV]: snap.scopedAgentDir ?? "",
-					[INFERENCE_TOKEN_ENV]: fn.token,
-					// NOTE: deliberately NO ANTHROPIC_API_KEY — the worker must
-					// authenticate solely through the broker token.
-				},
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-			let stdout = "";
-			let stderr = "";
-			child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
-			child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
-			child.on("exit", (code) => resolve({ code, stdout, stderr }));
-			setTimeout(() => child.kill("SIGKILL"), 90_000).unref?.();
+		const res = await runLivePi(piCmd.command, [...piCmd.args, "--mode", "json", "-p", "Reply with exactly BROKER-LIVE-OK"], {
+			PATH: process.env.PATH ?? "/usr/bin",
+			HOME: process.env.HOME ?? "/home",
+			[PI_AGENT_DIR_ENV]: snap.scopedAgentDir ?? "",
+			[INFERENCE_TOKEN_ENV]: fn.token,
+			// NOTE: deliberately NO ANTHROPIC_API_KEY — the worker must
+			// authenticate solely through the broker token.
 		});
 		// The run must complete and the model reply must have come through.
 		assert.equal(res.code, 0, `pi exited code=${res.code}\nstdout=${res.stdout.slice(0, 800)}\nstderr=${res.stderr.slice(0, 800)}`);
@@ -653,27 +733,16 @@ test("(g2) LIVE: real `pi -p` on an openai-completions model through the broker;
 		models.providers.openai.models = [{ id: "broker-openai-live", api: "openai-completions" }];
 		fs.writeFileSync(modelsPath, JSON.stringify(models, null, "\t"));
 		const token = registerInferenceWorker("openai-live");
-		const res = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
-			const child = spawn(
-				piCmd.command,
-				[...piCmd.args, "--mode", "json", "-p", "Reply with exactly OPENAI-LIVE-OK", "--model", "openai/broker-openai-live"],
-				{
-					env: {
-						PATH: process.env.PATH ?? "/usr/bin",
-						HOME: process.env.HOME ?? "/home",
-						PI_CODING_AGENT_DIR: snap.scopedAgentDir ?? "",
-						[INFERENCE_TOKEN_ENV]: token,
-					},
-					stdio: ["ignore", "pipe", "pipe"],
-				},
-			);
-			let stdout = "";
-			let stderr = "";
-			child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
-			child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
-			child.on("exit", (code) => resolve({ code, stdout, stderr }));
-			setTimeout(() => child.kill("SIGKILL"), 90_000).unref?.();
-		});
+		const res = await runLivePi(
+			piCmd.command,
+			[...piCmd.args, "--mode", "json", "-p", "Reply with exactly OPENAI-LIVE-OK", "--model", "openai/broker-openai-live"],
+			{
+				PATH: process.env.PATH ?? "/usr/bin",
+				HOME: process.env.HOME ?? "/home",
+				PI_CODING_AGENT_DIR: snap.scopedAgentDir ?? "",
+				[INFERENCE_TOKEN_ENV]: token,
+			},
+		);
 		assert.equal(res.code, 0, `pi exited code=${res.code}\nstdout=${res.stdout.slice(0, 800)}\nstderr=${res.stderr.slice(0, 800)}`);
 		assert.ok(res.stdout.includes("OPENAI-LIVE-OK"), "openai reply must relay through the broker");
 		assert.ok(openaiUp.captures.length >= 1, "openai mock upstream received the request");

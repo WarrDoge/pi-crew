@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
+import { readProcIdentity, reapGroup } from "../../src/runtime/process/reap-group.ts";
 import { scoreRelevance } from "../../src/runtime/task-runner/context-retrieval.ts";
 import {
 	__test_resetDiscoveredCache,
@@ -27,6 +28,94 @@ import {
  * in-memory walk. We exercise both paths in the same fixture so the
  * test is robust on Windows CI runners without rg.
  */
+
+/** How long the fake-`rg` teardown polls for the pid to disappear after SIGKILL (ms). */
+const FAKE_RG_GONE_MS = 2_000;
+
+/** `true` when `pid` is still a live process we can signal (EPERM counts as alive). */
+function pidAlive(pid: number): boolean {
+	if (!Number.isInteger(pid) || pid <= 1) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err) {
+		return (err as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/**
+ * GAP-2 (fix-wave 12c-F3) teardown for the fake `rg` the SUT spawns.
+ *
+ * The fake binary runs `setInterval(...)` forever and the test holds NO handle on
+ * it: it is a grandchild created by `detectRipgrep()` (see
+ * `src/runtime/task-runner/retrieval-orchestrator.ts` — `spawn("rg", ["--version"])`,
+ * deliberately NOT the test), and the only killer used to be the SUT's own 3 s
+ * SIGKILL deadline. Any throw before that deadline (or a future SUT change that
+ * stops arming it) wedged a `node` process forever with an already-deleted script.
+ *
+ * The script therefore writes `{pid, pgid}` on startup and this function reaps it:
+ *  - group reap (`reapGroup`, reuse-proof identity snapshot) when the fixture
+ *    proves it leads its own group (`pgid === pid`, Linux);
+ *  - otherwise a pid-only `SIGKILL` fallback. That is the real production shape of
+ *    this fixture: the SUT does not pass `detached`, so `pgid` IS the test runner's
+ *    group — a group kill there would signal this file and every sibling test.
+ *    `reapGroup` refuses that by itself (rung 3 `pgid-init-or-self`); we do not
+ *    even ask, which is why the `pgid === pid` guard exists.
+ *
+ * NEVER throws: it runs in `finally`, where a throw would mask the failure under
+ * test. A fixture that survives SIGKILL is reported with a warning, not a throw.
+ */
+async function reapFakeRg(pidFile: string): Promise<void> {
+	try {
+		let recorded: { pid: number; pgid: number } | undefined;
+		try {
+			const parsed = JSON.parse(fs.readFileSync(pidFile, "utf-8")) as { pid?: number; pgid?: number };
+			if (Number.isInteger(parsed.pid)) {
+				recorded = {
+					pid: parsed.pid as number,
+					pgid: Number.isInteger(parsed.pgid) ? (parsed.pgid as number) : (parsed.pid as number),
+				};
+			}
+		} catch {
+			/* never spawned (or the tmp dir is gone) — nothing to reap */
+		}
+		if (!recorded || !pidAlive(recorded.pid)) return;
+		if (process.platform === "linux" && recorded.pgid === recorded.pid) {
+			const result = reapGroup(recorded.pgid, recorded.pid, {
+				expected: readProcIdentity(recorded.pid),
+				gracefulMs: 100,
+				capMs: 1_000,
+				name: "fake-rg",
+			});
+			if (result.outcome !== "refused") {
+				// keep-alive: the escalation's own poll timers are unref'd on purpose
+				const keepAlive = setInterval(() => {
+					/* ref'd no-op */
+				}, 25);
+				try {
+					await result.pending;
+				} finally {
+					clearInterval(keepAlive);
+				}
+				if (!pidAlive(recorded.pid)) return;
+			}
+		}
+		try {
+			process.kill(recorded.pid, "SIGKILL");
+		} catch {
+			/* already gone */
+		}
+		const deadline = Date.now() + FAKE_RG_GONE_MS;
+		while (pidAlive(recorded.pid) && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		if (pidAlive(recorded.pid)) {
+			console.warn(`[retrieval-orchestrator] fake rg pid=${recorded.pid} still alive after SIGKILL — leaving it to the OS`);
+		}
+	} catch (err) {
+		console.warn(`[retrieval-orchestrator] fake rg teardown failed: ${String(err)}`);
+	}
+}
 
 function makeFixtureDir(): string {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-m3-fixture-"));
@@ -227,14 +316,27 @@ test("RR-021 WI-1.3: wedged rg → 3s SIGKILL deadline + in-flight memoization",
 	skip: process.platform === "win32",
 	timeout: 20_000,
 }, async () => {
-	// A fake rg that spawns, marks its launch, and then never exits.
+	// A fake rg that spawns, marks its launch, announces its pid/pgid, and then
+	// never exits. Teardown is `reapFakeRg` in the `finally` below — NOT the SUT's
+	// 3 s SIGKILL deadline (that deadline would leave the process behind if any
+	// assertion between the spawn and the deadline throws).
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rg-wedge-"));
 	const marker = path.join(tmp, "spawns.txt");
+	const pidFile = path.join(tmp, "rg-pids.json");
 	const fakeRg = path.join(tmp, "rg");
 	fs.writeFileSync(
 		fakeRg,
 		`#!/usr/bin/env node
-require("fs").appendFileSync(${JSON.stringify(marker)}, "1\\n");
+const fs = require("fs");
+fs.appendFileSync(${JSON.stringify(marker)}, "1\\n");
+// Announce pid/pgid so the test can reap us even if it throws before the SUT's
+// deadline fires. /proc/self/stat field 5 (index 4) is the process group id.
+let pgid = process.pid;
+try {
+  pgid = Number(fs.readFileSync("/proc/self/stat", "utf8").split(" ")[4]);
+} catch {}
+if (!Number.isInteger(pgid) || pgid <= 1) pgid = process.pid;
+fs.writeFileSync(${JSON.stringify(pidFile)}, JSON.stringify({ pid: process.pid, pgid }));
 setInterval(() => {}, 1000);
 `,
 	);
@@ -255,6 +357,7 @@ setInterval(() => {}, 1000);
 		const spawnCount = fs.existsSync(marker) ? fs.readFileSync(marker, "utf-8").trim().length : 0;
 		assert.equal(spawnCount, 1, `concurrent first calls must spawn rg once, saw ${spawnCount}`);
 	} finally {
+		await reapFakeRg(pidFile);
 		process.env.PATH = prevPath;
 		__test_resetRipgrepCache();
 		fs.rmSync(tmp, { recursive: true, force: true });
