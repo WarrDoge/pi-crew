@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-### Unreleased — fix wave 11 (worker descendant reaping)
+## [0.11.39] — fix wave 11: worker descendant reaping (2026-10-24)
 
 Closes the leak that motivated the wave: run `team_20261022110510_cefb9164af126460` reached `completed` on
 2026-10-22 and six grandchild processes (`dpi-backend` ×5 + `caddy`, ~390 MB RSS) were still alive 24 h later.
