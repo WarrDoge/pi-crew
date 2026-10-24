@@ -368,6 +368,18 @@ export interface TeamRunManifest {
 	eventsPath: string;
 	artifacts: ArtifactDescriptor[];
 	async?: AsyncRunState;
+	/** Wave 11c (battery 2026-10-24 F2): pid of the process that CREATED the
+	 *  run — `process.pid` at createRunManifest time (the session pi for a
+	 *  foreground team-tool dispatch; the detached runner itself when it
+	 *  creates sub-runs). A SYNC (foreground) run records no `async.pid`, so a
+	 *  leaked descendant carrying `PI_CREW_PARENT_PID=<session pi pid>` could
+	 *  never satisfy the run-descendant sweep's descent proof and was skipped
+	 *  forever; `sweepTerminalRunDescendants` now accepts this pid as a
+	 *  recorded proof parent (DEAD-only, like every other proof parent — a
+	 *  live session is never proof, the operator may still be using it).
+	 *  Purely additive/optional: absent on every manifest written before 11c,
+	 *  and async runs keep `async.pid` as their primary recorded runner. */
+	sessionPid?: number;
 	/** @deprecated-plan-pointer T2/R4 (ADR-4 §2): dual-write era — PlanRecord at
 	 *  `<stateRoot>/plans/plans.json` is authoritative; this field is kept (never
 	 *  dropped) as the pre-v2 fallback and legacy UI surface. Deprecate-only. */

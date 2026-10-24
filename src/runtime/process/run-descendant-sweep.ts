@@ -68,11 +68,12 @@
  *      run": an operator shell opened inside a worker's pane, or a dev server a
  *      worker started and left running, carries the same env after the spawn
  *      session is long gone. The `run-id` branch therefore also demands a
- *      `PI_CREW_PARENT_PID` the run actually RECORDED (runner / worker / surface
- *      pane pid) that is ALREADY DEAD — the same descent proof the `task-id` and
- *      `parent-pid` branches have always required. A same-uid process that
- *      inherited the env but has no such parent is not reaped (a documented
- *      miss, never a wrong kill).
+ *      `PI_CREW_PARENT_PID` the run actually RECORDED (runner / worker /
+ *      surface pane / session pid — the last added by 11c for SYNC runs, which
+ *      record no runner) that is ALREADY DEAD — the same descent proof the
+ *      `task-id` and `parent-pid` branches have always required. A same-uid
+ *      process that inherited the env but has no such parent is not reaped
+ *      (a documented miss, never a wrong kill).
  *  12. (11b.4) A candidate holding a CONTROLLING TERMINAL (`/proc/<pid>/stat`
  *      field 7 `tty_nr !== 0`) is an INTERACTIVE process — typically the shell
  *      the operator is typing into. It is skipped with reason `interactive-tty`
@@ -150,6 +151,18 @@ export interface RunMarkers {
 	workerPids: number[];
 	/** Task ids of the run (PI_CREW_TASK_ID values its workers carried). */
 	taskIds: string[];
+	/**
+	 * Wave 11c (battery 2026-10-24 F2): `manifest.sessionPid` — the pid of the
+	 * process that created the run. A SYNC (foreground) run has no async
+	 * runner, so its leaked bash grandchildren carry
+	 * `PI_CREW_PARENT_PID=<session pi pid>` — a pid NO other field records,
+	 * which made the descent proof unsatisfiable and the leak a permanent
+	 * documented miss. Accepted as a proof parent for the run-id branch with
+	 * the SAME dead-only guard as every other parent: while the session pi is
+	 * ALIVE it is not proof of anything (the operator may still be typing in
+	 * it) — the leak is only reaped once that session is gone.
+	 */
+	sessionPid?: number;
 	/**
 	 * 11b.3: pids recorded in `manifest.surface.workerPids` (the mux-surface
 	 * controller's view of each worker). A pane pid the operator can still see
@@ -486,6 +499,15 @@ export function collectRunDescendants(markers: RunMarkers, opts: SweepOptions = 
 	// diverge from what the tasks recorded. Defence in depth, no added risk: a
 	// proof parent must still be DEAD, and every other rung still applies.
 	const proofParents = new Set<number>([...recordedParents, ...surfacePids]);
+	// Wave 11c (battery F2): the run's SPAWNER pid (`manifest.sessionPid`) is a
+	// recorded parent too — for a SYNC run it is the only pid its leaked
+	// descendants can name. Proof-parent only (NOT a recorded ancestor for the
+	// candidate-exclusion set): the session pi hosts the run, it is not a worker
+	// of it. The dead-only guard inside matchMarkers keeps a LIVE session from
+	// ever serving as proof — the operator may still be using that very pi.
+	if (markers.sessionPid !== undefined && Number.isInteger(markers.sessionPid) && markers.sessionPid > 1) {
+		proofParents.add(markers.sessionPid);
+	}
 	const taskIds = new Set<string>(markers.taskIds);
 	const ancestors = selfAncestors();
 	const descendants: RunDescendant[] = [];

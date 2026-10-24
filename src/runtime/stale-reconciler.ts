@@ -758,11 +758,23 @@ export function sweepTerminalRunDescendants(
 		if (!resolveRunDescendantSweepEnabled()) return;
 		const runnerPid = manifest.async?.pid;
 		const workerPids = collectRecordedWorkerPids(tasks);
+		// Wave 11c (battery 2026-10-24 F2): the pid that CREATED the run. A SYNC
+		// (foreground) run records no `async.pid`, so its leaked descendants carry
+		// `PI_CREW_PARENT_PID=<session pi pid>` — a pid no other field records, and
+		// the descent proof could never hold, so the leak was skipped forever.
+		// The sweep accepts it as a recorded PROOF parent only; the dead-only
+		// guard inside the sweep keeps a LIVE session from ever serving as proof
+		// (the operator may still be using that very pi — never reap under it).
+		const sessionPid = manifest.sessionPid;
 		// 11b.3: recorded surface pane pids — alive ones are excluded from the
 		// candidate set inside the sweep (safety rung 10), so a run that just went
 		// terminal cannot lose a pane the operator is still watching.
 		const surfacePids = collectSurfacePids(manifest);
-		const recordedPids = runnerPid !== undefined ? [runnerPid, ...workerPids] : workerPids;
+		const recordedPids = [
+			...(sessionPid !== undefined ? [sessionPid] : []),
+			...(runnerPid !== undefined ? [runnerPid] : []),
+			...workerPids,
+		];
 		// No recorded process ⇒ no marker can prove descent for the shapes this
 		// wave targets (the parent-pid / task-id branches both need a recorded
 		// parent), so skip the /proc scan entirely.
@@ -773,6 +785,7 @@ export function sweepTerminalRunDescendants(
 				runId: manifest.runId,
 				...(runnerPid !== undefined ? { runnerPid } : {}),
 				workerPids,
+				...(sessionPid !== undefined ? { sessionPid } : {}),
 				...(surfacePids.length > 0 ? { surfacePids } : {}),
 				taskIds: tasks.map((task) => task.id),
 				startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : 0,

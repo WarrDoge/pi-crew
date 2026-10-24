@@ -41,6 +41,8 @@ const RUN_ID = "team_run_sweep_11b1";
 const DEAD_WORKER_PID = 999_996;
 /** A pid that is provably not in use — the recorded async runner. */
 const DEAD_RUNNER_PID = 999_997;
+/** A pid that is provably not in use — the recorded sync-run spawner (11c). */
+const DEAD_SESSION_PID = 999_995;
 const selfUid = (): number => (typeof process.getuid === "function" ? process.getuid() : 0);
 
 /** Env keys the sweep's guards read; a worker shell leaks all of them. */
@@ -75,6 +77,7 @@ beforeEach(() => {
 	}
 	assert.equal(pidIsAlive(DEAD_WORKER_PID), false, `fixture assumes pid ${DEAD_WORKER_PID} is dead`);
 	assert.equal(pidIsAlive(DEAD_RUNNER_PID), false, `fixture assumes pid ${DEAD_RUNNER_PID} is dead`);
+	assert.equal(pidIsAlive(DEAD_SESSION_PID), false, `fixture assumes pid ${DEAD_SESSION_PID} is dead`);
 });
 
 afterEach(() => {
@@ -510,6 +513,115 @@ describe("wave 11b.4 — the sweep marker separates ATTEMPT TIME from PENDING st
 			const marker = readMarker(manifest);
 			assert.equal(marker.descendantSweepAt, undefined, "a report-only pass must not consume the marker");
 			assert.equal(marker.descendantSweepPending, undefined);
+		} finally {
+			fs.rmSync(stateRoot, { recursive: true, force: true });
+		}
+	});
+});
+
+// ── g8–g10: wave 11c — a SYNC run records its spawner pid (battery F2) ──────
+
+/**
+ * Wave 11c (battery 2026-10-24 finding F2). The E2E probe proved a SYNC
+ * (foreground) run leaks forever: it records no `manifest.async.pid`, and its
+ * leaked bash grandchildren carry `PI_CREW_PARENT_PID=<session pi pid>` — a
+ * pid in NO recorded set, so the descent proof could never hold and the sweep
+ * skipped the leak (safely, but permanently). New manifests record
+ * `manifest.sessionPid` at creation; these pins drive the REAL sweep (fake
+ * /proc, signals recorded) through `reconcileStaleRun` for a manifest with NO
+ * async state — exactly the sync topology.
+ */
+describe("wave 11c — the run's spawner pid closes the sync-run descent-proof gap", () => {
+	/** `markers[0]?.sessionPid` — kept tiny so each pin reads at a glance. */
+	function markersSessionPid(calls: RunMarkers[]): number | undefined {
+		return calls[0]?.sessionPid;
+	}
+
+	it("(g8) a DEAD recorded sessionPid proves descent for a sync run's leak", () => {
+		const stateRoot = makeStateRoot();
+		// SYNC topology: no `async` block at all, only the session pi that spawned
+		// the workers — and it has since exited.
+		const manifest = makeManifest(stateRoot, { sessionPid: DEAD_SESSION_PID });
+		const leakedPid = 800_105;
+		const { opts, kills } = fakeSweep([
+			// The battery's 7b shape: markers of the run + PI_CREW_PARENT_PID naming
+			// the (dead) session pi — pre-11c this candidate was provably NOTHING'S.
+			insideRun(manifest, {
+				pid: leakedPid,
+				pgid: 910_105,
+				env: { PI_CREW_BROKER_RUN_ID: RUN_ID, PI_CREW_PARENT_PID: String(DEAD_SESSION_PID) },
+			}),
+		]);
+		const { calls, results } = installSweepSeam(opts);
+		try {
+			const result = reconcileStaleRun(manifest, [completedTask(DEAD_WORKER_PID)], Date.now());
+			assert.equal(result.verdict, "result_exists");
+			assert.equal(calls.length, 1, "a sync terminal run is swept exactly like an async one");
+			const markers = calls[0];
+			assert.ok(markers !== undefined);
+			assert.equal(markers.sessionPid, DEAD_SESSION_PID, "the manifest's spawner pid reaches the sweep markers");
+			assert.equal(markers.runnerPid, undefined, "sync run — no runner pid to record");
+			assert.deepEqual(
+				results[0]?.reaped.map((descendant) => descendant.pid),
+				[leakedPid],
+				"the sync-run leak naming its dead session pi is reaped, not skipped",
+			);
+			assert.deepEqual(kills, [{ pgid: 910_105, signal: "SIGTERM" }]);
+		} finally {
+			fs.rmSync(stateRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("(g9) a LIVE sessionPid proves nothing — the operator's session is never a reap licence", async () => {
+		const stateRoot = makeStateRoot();
+		const sessionPi: ChildProcess = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+		try {
+			await once(sessionPi, "spawn");
+			const liveSessionPid = sessionPi.pid;
+			assert.ok(typeof liveSessionPid === "number", "the fixture session pi must have a pid");
+			const manifest = makeManifest(stateRoot, { sessionPid: liveSessionPid });
+			const { opts, kills } = fakeSweep([
+				insideRun(manifest, {
+					pid: 800_106,
+					pgid: 910_106,
+					env: { PI_CREW_BROKER_RUN_ID: RUN_ID, PI_CREW_PARENT_PID: String(liveSessionPid) },
+				}),
+			]);
+			const { calls, results } = installSweepSeam(opts);
+			const result = reconcileStaleRun(manifest, [completedTask(DEAD_WORKER_PID)], Date.now());
+			assert.equal(result.verdict, "result_exists");
+			assert.equal(calls.length, 1, "the sweep still runs — it simply proves nothing");
+			assert.equal(markersSessionPid(calls), liveSessionPid);
+			assert.deepEqual(results[0]?.reaped, [], "a live session pi is not proof: the user may still be using that pi");
+			assert.equal(kills.length, 0);
+			assert.equal(pidIsAlive(liveSessionPid), true, "the fixture session survived untouched");
+		} finally {
+			sessionPi.kill("SIGKILL");
+			fs.rmSync(stateRoot, { recursive: true, force: true });
+		}
+	});
+
+	it("(g10) a pre-11c sync manifest without sessionPid behaves exactly as before (skip, no error)", () => {
+		const stateRoot = makeStateRoot();
+		// The exact manifest shape the battery 7b probe used: sync run, no
+		// sessionPid (written before 11c), leak naming an unrecorded session pi.
+		const manifest = makeManifest(stateRoot);
+		const unrecordedSessionPid = 888_777;
+		const { opts, kills } = fakeSweep([
+			insideRun(manifest, {
+				pid: 800_107,
+				pgid: 910_107,
+				env: { PI_CREW_BROKER_RUN_ID: RUN_ID, PI_CREW_PARENT_PID: String(unrecordedSessionPid) },
+			}),
+		]);
+		const { calls, results } = installSweepSeam(opts);
+		try {
+			const result = reconcileStaleRun(manifest, [completedTask(DEAD_WORKER_PID)], Date.now());
+			assert.equal(result.verdict, "result_exists", "the reconcile pass completes — no error for the old shape");
+			assert.equal(calls.length, 1);
+			assert.equal(markersSessionPid(calls), undefined, "no sessionPid on an old manifest");
+			assert.deepEqual(results[0]?.reaped, [], "an unrecorded parent is still not proof (the documented miss)");
+			assert.equal(kills.length, 0);
 		} finally {
 			fs.rmSync(stateRoot, { recursive: true, force: true });
 		}

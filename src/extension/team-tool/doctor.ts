@@ -907,6 +907,10 @@ export function collectRunDescendantReport(cwd: string, limit = RUN_DESCENDANT_S
 		}
 		if (!loaded) continue;
 		const runnerPid = manifest.async?.pid;
+		// Wave 11c (F2): same proof-parent source as the automatic sweep, so the
+		// report lists exactly what the sweep would reap — a SYNC run's leak
+		// naming its dead session pi as parent.
+		const sessionPid = manifest.sessionPid;
 		const workerPids = [
 			...new Set(
 				loaded.tasks
@@ -929,6 +933,7 @@ export function collectRunDescendantReport(cwd: string, limit = RUN_DESCENDANT_S
 				runId: manifest.runId,
 				...(runnerPid !== undefined ? { runnerPid } : {}),
 				workerPids,
+				...(sessionPid !== undefined ? { sessionPid } : {}),
 				...(surfacePids.length > 0 ? { surfacePids } : {}),
 				taskIds: loaded.tasks.map((task) => task.id),
 				startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : 0,

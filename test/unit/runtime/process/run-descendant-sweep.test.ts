@@ -21,7 +21,7 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
 import * as path from "node:path";
-import test, { after, beforeEach } from "node:test";
+import test, { after, afterEach, beforeEach } from "node:test";
 import { __setSelfIdentityForTest, readProcIdentity } from "../../../../src/runtime/process/reap-group.ts";
 import {
 	__resetSignalledGroupsForTest,
@@ -40,16 +40,35 @@ const selfUid = (): number => (typeof process.getuid === "function" ? process.ge
 const DEAD_PID = 999_999;
 /** A pid that is certainly not in use — the "dead surface pane" fixture (11b.4). */
 const MEDIUM_3_PID = 999_998;
+/** A pid that is certainly not in use — the "dead session pi" fixture (11c). */
+const DEAD_SESSION_PID = 999_997;
+
+// The suite's guards read ambient PI_CREW_* env — and `getCrewEnv` has no
+// injectable seam for the kill-switch key. An ambient
+// `PI_CREW_REAP_RUN_DESCENDANTS=0` (left exported by an off-path probe) made 17
+// tests expect reaps that never happened, so the suite was only green on ONE of
+// the two switch states the decision table demands. Pin "1" for every test
+// ((a9) flips it to "0" itself) and restore the ambient value verbatim — the
+// same save/restore pattern the stale-reconciler sweep suite uses for its
+// guard keys (wave 11c battery finding F1).
+let savedReapRunDescendants: string | undefined;
 
 // reap-group's ladder reads OUR identity from /proc. On a platform without
 // /proc (macOS) every group signal would short-circuit at `proc-unavailable`,
 // making the accepted-path cases untestable there. Seed a synthetic self
 // identity on exactly those platforms (a no-op on Linux).
 beforeEach(() => {
+	savedReapRunDescendants = process.env.PI_CREW_REAP_RUN_DESCENDANTS;
+	process.env.PI_CREW_REAP_RUN_DESCENDANTS = "1";
 	__resetSignalledGroupsForTest();
 	if (readProcIdentity(process.pid) === undefined) {
 		__setSelfIdentityForTest({ pid: process.pid, pgid: 4_000_001, starttime: "1", uid: selfUid() });
 	}
+});
+
+afterEach(() => {
+	if (savedReapRunDescendants === undefined) delete process.env.PI_CREW_REAP_RUN_DESCENDANTS;
+	else process.env.PI_CREW_REAP_RUN_DESCENDANTS = savedReapRunDescendants;
 });
 
 /** One synthetic /proc row. */
@@ -585,6 +604,44 @@ test("(a19) one snapshot serves N sweeps in a pass; without a snapshot each swee
 		reapRunDescendants(markers({ runId: run.runId, workerPids: [], runnerPid: DEAD_PID }), counting);
 	}
 	assert.equal(scans, 3, "without a snapshot each sweep builds its own view");
+});
+
+// ── A7. wave 11c — the run's SPAWNER pid is a proof parent for SYNC runs ────
+
+test("(a20) a recorded sessionPid proves descent for a SYNC run's leak — dead only, absent field unchanged", () => {
+	const sessionPid = DEAD_SESSION_PID;
+	// The fixture assumes the pid is not in use (the "session pi already exited"
+	// shape) — same liveness check the other fixture pids get.
+	assert.equal(
+		(() => {
+			try {
+				process.kill(sessionPid, 0);
+				return true;
+			} catch {
+				return false;
+			}
+		})(),
+		false,
+		`fixture assumes pid ${sessionPid} is dead`,
+	);
+	const leak = (pid: number, pgid: number, parentPid: string): FakeProc =>
+		inside({ pid, pgid, env: { PI_CREW_BROKER_RUN_ID: "team_test_11b", PI_CREW_PARENT_PID: parentPid } });
+	// A SYNC run: no runner pid recorded at all — the ONLY parent its leaked
+	// bash grandchildren can name is the session pi that spawned the workers.
+	const syncMarkers = (): RunMarkers => markers({ runnerPid: undefined, workerPids: [], sessionPid });
+	// (i) the session pi is DEAD ⇒ the run-id + parent-pid pair is descent proof.
+	const dead = fakeSweep([leak(751, 900_751, String(sessionPid))], STARTED_AT_MS);
+	const found = collectRunDescendants(syncMarkers(), dead.opts);
+	assert.deepEqual(pids(found), [751]);
+	assert.equal(found[0]?.matchedBy, "run-id");
+	// (ii) the session pi is ALIVE (ourselves — provably alive) ⇒ NOT proof: the
+	// operator may still be typing in that very pi, so its name proves nothing.
+	const alive = fakeSweep([leak(752, 900_752, String(process.pid))], STARTED_AT_MS);
+	assert.deepEqual(collectRunDescendants(markers({ runnerPid: undefined, workerPids: [], sessionPid: process.pid }), alive.opts), []);
+	// (iii) a pre-11c manifest has no sessionPid ⇒ same behaviour as before the
+	// field existed: an unrecorded parent pid is not proof, the leak is skipped.
+	const legacy = fakeSweep([leak(753, 900_753, String(sessionPid))], STARTED_AT_MS);
+	assert.deepEqual(collectRunDescendants(markers({ runnerPid: undefined, workerPids: [] }), legacy.opts), []);
 });
 
 // ── B. real topology (pi bash tool shape) ────────────────────────────────────

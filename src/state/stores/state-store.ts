@@ -475,6 +475,14 @@ export function createRunManifest(params: {
 		tasksPath: paths.tasksPath,
 		eventsPath: paths.eventsPath,
 		artifacts: [],
+		// Wave 11c (battery F2): record the SPAWNING process pid at creation — for
+		// a SYNC/foreground run (no async runner ever spawned) this is the only
+		// recorded parent its leaked descendants can name in PI_CREW_PARENT_PID,
+		// and without it the descendant sweep could never prove their descent.
+		// Sync-vs-async is NOT known at creation time (the async dispatch happens
+		// after this), so every run records it; async runs keep using
+		// `manifest.async.pid` as their primary recorded runner.
+		sessionPid: process.pid,
 		...(params.ownerSessionId ? { ownerSessionId: params.ownerSessionId } : {}),
 		runKind: params.runKind ?? "team-run",
 		...(params.args !== undefined ? { args: params.args } : {}),
