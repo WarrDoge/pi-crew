@@ -26,17 +26,63 @@
  * process.exit(130) instead of process.exitCode = 130, the finally block does
  * NOT run — no cleanup-ran.txt, grandchild stays alive. Test MUST fail.
  *
+ * TEARDOWN (fix-wave 12a, GAP-1): the grandchild is spawned detached by the
+ * harness, so it leads its OWN group — pid-only teardown cannot reach it and it
+ * swallows nothing politely (an incident shape: two such fixtures survived > 6 h
+ * after their run finished). The test-level `finally` therefore reaps the
+ * GRANDCHILD group (identity snapshot from spawn time, SIGKILL escalation) and
+ * kills the HARNESS pid-only. Both must happen after assertion 3, never before:
+ * the assertion checks the PRODUCTION cleanup, the teardown only keeps a red test
+ * from leaving a process behind.
+ *
+ * Residual (documented, not faked): if the readiness poll below times out the pid
+ * file never appeared, the test holds no handle to the grandchild, and the only
+ * bound is the harness's own teardown — the same limit the production code has.
+ *
  * @see src/runtime/background-runner.ts installBackgroundRunnerSigintHandler (RT-2 fix)
  * @see src/runtime/child-pi/child-pi-kill.ts registerActiveChild / terminateActiveChildPiProcesses
  */
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { type ProcIdentity, readProcIdentity, reapGroup } from "../../src/runtime/process/reap-group.ts";
+
+/** Everything the teardown needs about the harness's detached grandchild. */
+interface GrandchildHandle {
+	pid: number;
+	pgid: number;
+	identity: ProcIdentity | undefined;
+}
+
+/** Refusal reasons that prove the pid is a stranger — never pid-kill those. */
+const STRANGER_PROOF_REFUSALS = new Set(["starttime-mismatch", "uid-mismatch", "not-group-member"]);
+
+/**
+ * Await a reap verdict while a REF'd timer keeps the loop alive: the escalation's
+ * own poll timers are unref'd (a reaper must not pin a host shutdown), so a
+ * test-only await would otherwise risk draining the loop mid-poll.
+ */
+function awaitSettled<T>(promise: Promise<T>): Promise<T> {
+	const keepAlive = setInterval(() => {
+		/* ref'd no-op: keeps the loop alive across the escalation's unref'd polls */
+	}, 25);
+	return promise.finally(() => clearInterval(keepAlive));
+}
+
+/** `kill` that never throws. */
+function killQuietly(pid: number, signal: NodeJS.Signals): boolean {
+	try {
+		process.kill(pid, signal);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 function isPidAlive(pid: number): boolean {
 	try {
@@ -138,17 +184,26 @@ test("RT-2: REAL SIGINT handler sets exitCode (not process.exit) — finally run
 	const childPidFile = path.join(markerDir, "child-pid.txt");
 	const cleanupMarker = path.join(markerDir, "cleanup-ran.txt");
 	const harnessPath = path.join(markerDir, "harness.ts");
+	// Teardown state, hoisted OUT of the try so the `finally` closes over it even
+	// when an assertion (notably assertion 3) throws.
+	let harness: ChildProcess | undefined;
+	let grandchild: GrandchildHandle | undefined;
 
 	try {
 		// Write harness to a temp .ts file.
 		fs.writeFileSync(harnessPath, HARNESS_CODE);
 
 		// Spawn the harness subprocess.
+		// `detached: false` on purpose: the harness must share the runner's group so
+		// SIGINT reaches it like a real host. Consequence (see the finally): the
+		// harness may only ever be killed pid-only — a group kill rooted at it would
+		// signal the test runner and every sibling test file.
 		const child = spawn(process.execPath, ["--experimental-strip-types", harnessPath, markerDir, projectRoot], {
 			cwd: projectRoot,
 			stdio: ["ignore", "pipe", "pipe"],
 			detached: false,
 		});
+		harness = child;
 
 		// Collect stderr for diagnostics.
 		const stderrChunks: Buffer[] = [];
@@ -179,6 +234,16 @@ test("RT-2: REAL SIGINT handler sets exitCode (not process.exit) — finally run
 		// Read the grandchild PID.
 		const grandchildPid = Number.parseInt(fs.readFileSync(childPidFile, "utf-8").trim(), 10);
 		assert.ok(grandchildPid > 0, `invalid grandchild PID: ${grandchildPid}`);
+
+		// Capture the grandchild handle IMMEDIATELY — the identity snapshot is only
+		// readable while the pid is provably still ours (pgid reuse defence). The
+		// harness spawned it detached, so it leads its own group: pgid === pid.
+		const grandchildIdentity = readProcIdentity(grandchildPid);
+		grandchild = {
+			pid: grandchildPid,
+			pgid: grandchildPid,
+			identity: grandchildIdentity ? { ...grandchildIdentity, pgid: grandchildPid } : undefined,
+		};
 
 		// Give the harness a moment to settle into its await.
 		await new Promise((resolve) => setTimeout(resolve, 300));
@@ -232,6 +297,41 @@ test("RT-2: REAL SIGINT handler sets exitCode (not process.exit) — finally run
 			`[RT-2] ✓ REAL SIGINT handler → exitCode=130, finally ran cleanup, ` + `child pid=${grandchildPid} terminated (not orphaned)`,
 		);
 	} finally {
+		// ── teardown asymmetry (mandatory) ───────────────────────────────────────
+		// GRANDCHILD: spawned detached by the harness ⇒ own process group, so only a
+		// GROUP reap can reach it, and it must tolerate SIGKILL escalation (this is
+		// the incident shape: a `setInterval` fixture that outlived its run). Reaping
+		// here — AFTER assertion 3 — keeps a red test from leaking a process; it must
+		// never run before the assertion, or it would mask the production behaviour.
+		if (grandchild) {
+			try {
+				const result = reapGroup(grandchild.pgid, grandchild.pid, {
+					expected: grandchild.identity,
+					gracefulMs: 500,
+					capMs: 5_000,
+					name: "rt2-grandchild-teardown",
+				});
+				if (result.outcome === "refused" && !STRANGER_PROOF_REFUSALS.has(result.refusal ?? "")) {
+					// Unverifiable (e.g. /proc gone, or already dead): pid kill is the only
+					// remaining rung. A stranger-proof refusal never gets here on purpose.
+					killQuietly(grandchild.pid, "SIGKILL");
+				} else if (result.outcome !== "refused") {
+					await awaitSettled(result.pending);
+				}
+			} catch {
+				// Never throw from a finally: it would mask the real failure.
+			}
+			if (isPidAlive(grandchild.pid)) {
+				console.warn(`[RT-2] WARNING: grandchild pid=${grandchild.pid} survived the teardown reap`);
+			}
+		} else {
+			console.warn("[RT-2] WARNING: readiness timed out before child-pid.txt — no handle to reap the grandchild");
+		}
+		// HARNESS: pid-only, never a group kill — it is intentionally non-detached
+		// and therefore lives in the RUNNER's group.
+		if (harness?.pid && !killQuietly(harness.pid, "SIGKILL") && isPidAlive(harness.pid)) {
+			console.warn(`[RT-2] WARNING: harness pid=${harness.pid} survived the teardown kill`);
+		}
 		// Clean up temp dir.
 		try {
 			fs.rmSync(markerDir, { recursive: true, force: true });
