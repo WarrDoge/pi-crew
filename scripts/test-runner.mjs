@@ -111,6 +111,7 @@ export const SHARD_DIR_WEIGHTS = {
 	// validating this table. Cumulative shard sums in these units ≈ expected
 	// real seconds × 100.
 	scripts: 602, // 5 files, 30.1s — spawn subprocess runners per test
+	helpers: 180, // 1 file (fixture-process.test.ts, wave-12a) — spawns real node subprocesses; 1.8s measured 2026-10-24
 	teams: 166,
 	extension: 158,
 	prompt: 136,
