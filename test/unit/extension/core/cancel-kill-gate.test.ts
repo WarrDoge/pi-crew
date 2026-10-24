@@ -61,6 +61,10 @@ function patchManifestOnDisk(
 	fs.writeFileSync(manifestPath, `${JSON.stringify(onDisk, null, 2)}\n`, "utf-8");
 }
 
+// Sleeper used to play a live foreign/async runner pid. It is spawned WITHOUT
+// `detached`, so it shares the TEST RUNNER's process group: pid-only kill is
+// correct here (a group kill would signal the runner and every sibling file).
+// Wave 12c F4b — a fixture that ever needs group reaping must spawn detached.
 function spawnDummyRunner(): ChildProcess {
 	return spawn(process.execPath, ["-e", "setInterval(() => {}, 1000);"], { stdio: "ignore" });
 }
@@ -76,6 +80,7 @@ function pidAlive(pid: number): boolean {
 
 function killDummy(child: ChildProcess): void {
 	try {
+		// non-detached: pid-only by design (shares runner's group)
 		child.kill("SIGKILL");
 	} catch {
 		/* already gone */

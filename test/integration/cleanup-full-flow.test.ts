@@ -168,7 +168,7 @@ test("full cleanup flow: orphan temp dirs + legacy /tmp + orphan workers", () =>
 	assert.equal(result.workerResult.scanned, 1, "worker registry scanned 1");
 	assert.equal(result.workerResult.killed, 1, "stale worker killed");
 
-	// Cleanup worker process
+	// Cleanup worker process — non-detached: pid-only by design (shares runner's group)
 	try {
 		worker.kill();
 	} catch {
@@ -202,7 +202,7 @@ test("full cleanup flow: concurrent session protection", () => {
 	assert.equal(result.killed, 0, "no workers killed");
 	assert.equal(result.pruned, 0, "no workers pruned");
 
-	// Cleanup
+	// Cleanup — non-detached: pid-only by design (shares runner's group)
 	try {
 		worker.kill();
 	} catch {
@@ -252,7 +252,8 @@ test("full cleanup flow: dead worker pruned, not killed", async () => {
 	// Register the fake worker with a dead parent
 	registerWorker(fakeWorkerPid, "session-DEAD", "run-dead", 999998);
 
-	// Kill the fake worker process so it becomes a dead PID
+	// Kill the fake worker process so it becomes a dead PID.
+	// non-detached: pid-only by design (shares runner's group) — wave 12c F4b.
 	fakeWorker.kill();
 
 	// Wait for the process to exit

@@ -135,13 +135,16 @@ function makeMergeCtx(manifest: TeamRunManifest, tasks: TeamTaskState[]): Schedu
 
 // ─── 2-writer lock fixtures (REAL lock file, live foreign pid) ─────
 
-/** Spawn a live sleeper process to play the "other writer" pid. */
+/** Spawn a live sleeper process to play the "other writer" pid.
+ *  Non-detached on purpose: it shares the TEST RUNNER's group, so pid-only kill is
+ *  the correct teardown (a group reap here would signal the runner). Wave 12c F4b. */
 function spawnLiveHolder(): { pid: number; stop: () => void } {
 	const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 60000);"], { stdio: "ignore" });
 	return {
 		pid: child.pid ?? -1,
 		stop: () => {
 			try {
+				// non-detached: pid-only by design (shares runner's group)
 				child.kill("SIGKILL");
 			} catch {
 				/* already exited */

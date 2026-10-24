@@ -10,6 +10,7 @@ import {
 	registerScratchpadLifecycle,
 } from "../../../src/prompt/scratchpad-lifecycle.ts";
 import { __test as zombieTest } from "../../../src/runtime/process/zombie-scanner.ts";
+import { reapFixture, spawnFixture } from "../../helpers/fixture-process.ts";
 
 // Phase 2 (D5 — MAJOR-S1): production env wiring. The guest must report the
 // WORKER pid as its parent (not the leader's, which the worker env inherits)
@@ -83,10 +84,10 @@ it("a detached grandchild of the guest inherits the WORKER pid → flagged when 
 	// carries the worker pid as parent.
 	// (Full "guest spawns grandchild" e2e is out of unit-test scope — the
 	// invariant being pinned is env inheritance, asserted structurally here.)
-	const { spawn } = await import("node:child_process");
-	const child = spawn(process.execPath, ["-e", "setInterval(()=>{}, 60000)"], {
-		detached: true,
-		stdio: "ignore",
+	// Wave 12c (GAP-5): the grandchild is DETACHED, so it owns its process group
+	// and `child.kill()` would be a pid-only no-op against a fixture that grew a
+	// child or swallowed SIGTERM — spawn + reap through the shared helper.
+	const handle = spawnFixture([process.execPath, "-e", "setInterval(()=>{}, 60000)"], {
 		env: {
 			...process.env,
 			[PI_CREW_KIND_ENV]: "subagent",
@@ -95,14 +96,11 @@ it("a detached grandchild of the guest inherits the WORKER pid → flagged when 
 		},
 	});
 	try {
-		const childEnv = zombieTest.readProcEnviron(child.pid ?? 0);
+		const childEnv = zombieTest.readProcEnviron(handle.pid);
 		assert.equal(childEnv[PI_CREW_PARENT_PID_ENV], String(process.pid), "grandchild parent must be worker pid");
 		assert.equal(childEnv[PI_CREW_KIND_ENV], "subagent");
 	} finally {
-		try {
-			process.kill(child.pid ?? 0);
-		} catch {
-			/* noop */
-		}
+		// Group reap with the spawn-time identity snapshot: SIGTERM → SIGKILL, never throws.
+		await reapFixture(handle);
 	}
 });

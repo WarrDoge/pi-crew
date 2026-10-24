@@ -358,6 +358,8 @@ test("AC8: a real second process holding the lock blocks this process (`locked`)
 		const readyFile = path.join(dir, "child-ready");
 
 		// Real child process takes the lock (genuine on-disk format) and stays alive.
+		// Non-detached on purpose: it shares the TEST RUNNER's group, so pid-only kill
+		// is the correct teardown (a group reap here would signal the runner). Wave 12c F4b.
 		child = spawn(
 			process.execPath,
 			[
@@ -389,6 +391,7 @@ test("AC8: a real second process holding the lock blocks this process (`locked`)
 		const r = await withRunLock(manifest, async () => "recovered-ok");
 		assert.equal(r, "recovered-ok", "dead cross-process holder must be steal-recoverable");
 	} finally {
+		// non-detached: pid-only by design (shares runner's group)
 		child?.kill("SIGKILL");
 		fs.rmSync(dir, { recursive: true, force: true });
 	}

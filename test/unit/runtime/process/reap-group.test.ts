@@ -9,6 +9,10 @@
  *    leader is SIGKILLed, then `reapGroup()` must reclaim the whole group from
  *    the pre-kill identity snapshot. (a1) cooperative kids → gone;
  *    (a2) SIGTERM-ignoring kids → `killed-after-escalation` (SIGKILL rung).
+ *    Wave 12c (GAP-4): every teardown here goes through `reapTree()` — leader
+ *    identity snapshotted at spawn, group reap FIRST (so kids the fixture never
+ *    reported are reached), known pids killed afterwards; `spawnTree()` reaps the
+ *    group on its own failure path too, where nobody else holds a handle.
  *
  * B. GUARD LADDER (injected identity/signal spies — NO real process is ever
  *    signalled): one case per rung, each asserting the refusal reason AND that
@@ -38,6 +42,7 @@ import {
 	assertSafeGroup as assertSafeGroupRaw,
 	flushReapEscalationsSync,
 	type GroupRefusalReason,
+	type ProcIdentity,
 	type ReapGroupOptions,
 	readProcIdentity,
 	reapGroup as reapGroupRaw,
@@ -86,6 +91,24 @@ interface TreeHandle {
 	leader: ChildProcess;
 	leaderPid: number;
 	kids: number[];
+	/**
+	 * GAP-4 (wave 12c): identity snapshotted the instant the leader is spawned —
+	 * the reuse-proof `expected` for every group reap of this tree, including the
+	 * one on the failure path (where the kids were never reported).
+	 */
+	leaderIdentity: ProcIdentity | undefined;
+}
+
+/**
+ * Snapshot a detached fixture leader's identity, normalising `pgid` to `pid`.
+ * A detached child IS its own group leader by construction, but an immediate
+ * /proc read can land before the child's `setsid` and report the RUNNER's pgid —
+ * which would make every later leader proof fail for a fixture that is entirely
+ * ours.
+ */
+function snapshotLeaderIdentity(pid: number): ProcIdentity | undefined {
+	const raw = readProcIdentity(pid);
+	return raw ? { ...raw, pgid: pid } : undefined;
 }
 
 function spawnTree(extraArgs: string[] = []): Promise<TreeHandle> {
@@ -94,24 +117,41 @@ function spawnTree(extraArgs: string[] = []): Promise<TreeHandle> {
 			detached: true, // own session + group leader (pgid === pid)
 			stdio: ["ignore", "pipe", "ignore"],
 		});
+		const leaderPid = leader.pid;
+		if (leaderPid === undefined) {
+			reject(new Error("fixture spawn returned no pid"));
+			return;
+		}
+		const leaderIdentity = snapshotLeaderIdentity(leaderPid);
 		let buffer = "";
-		const timer = setTimeout(() => reject(new Error("fixture did not report its tree in time")), 15_000);
+		let settled = false;
+		let timer: NodeJS.Timeout | undefined;
+		// GAP-4: the failure path is the one that leaks. Until the JSON line
+		// arrives the tree is known only by its leader pid, so a reject here must
+		// reap the GROUP (the leader leads it: pgid === pid) instead of leaving the
+		// kids to be re-parented to systemd with nobody holding a handle to them.
+		const fail = (err: Error): void => {
+			if (settled) return;
+			settled = true;
+			if (timer) clearTimeout(timer);
+			void reapTree(leaderPid, [], leaderIdentity).finally(() => reject(err));
+		};
+		timer = setTimeout(() => fail(new Error("fixture did not report its tree in time")), 15_000);
 		leader.stdout?.on("data", (chunk: Buffer) => {
 			buffer += chunk.toString();
 			const newline = buffer.indexOf("\n");
 			if (newline === -1) return;
-			clearTimeout(timer);
 			try {
 				const parsed = JSON.parse(buffer.slice(0, newline)) as { leader: number; kids: number[] };
-				resolve({ leader, leaderPid: parsed.leader, kids: parsed.kids });
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve({ leader, leaderPid: parsed.leader, kids: parsed.kids, leaderIdentity });
 			} catch (err) {
-				reject(err instanceof Error ? err : new Error(String(err)));
+				fail(err instanceof Error ? err : new Error(String(err)));
 			}
 		});
-		leader.once("error", (err) => {
-			clearTimeout(timer);
-			reject(err);
-		});
+		leader.once("error", fail);
 	});
 }
 
@@ -154,6 +194,46 @@ function killQuietly(pid: number, signal: NodeJS.Signals): void {
 	}
 }
 
+/**
+ * GAP-4 (wave 12c) teardown for a REAL fixture tree.
+ *
+ * The per-pid loop this replaces could only reach pids the fixture had already
+ * reported, so a tree whose `spawnTree()` died mid-flight (15 s timeout, spawn
+ * error, unparsable line) was orphaned in full: the leader WAS known, its kids
+ * never were. The leader is the group leader (`detached: true` — the (a1)/(a2)
+ * assertions pin `pgid === pid`), so one group reap rooted there reclaims kids
+ * nobody named.
+ *
+ * Order matters and is deliberate: group first (covers the unknown members),
+ * then the known pids pid-only (idempotent and ESRCH-tolerant, and the only rung
+ * that exists off Linux, where `reapGroup` refuses `platform-not-posix` — this
+ * file's REAL-topology half is already linux-gated, so no new skip is added).
+ *
+ * Never throws: it runs in `finally` bodies, where a throw would mask the
+ * assertion under test.
+ */
+async function reapTree(leaderPid: number, kids: readonly number[], leaderIdentity: ProcIdentity | undefined): Promise<void> {
+	if (isLinux) {
+		const result = reapGroup(leaderPid, leaderPid, {
+			expected: leaderIdentity,
+			gracefulMs: 200,
+			capMs: 2_000,
+			name: "reap-group-test.teardown",
+		});
+		if (result.outcome === "refused") {
+			console.warn(`[reap-group-test] teardown group reap refused for pgid=${leaderPid}: ${result.refusal ?? "unknown"}`);
+		} else {
+			try {
+				await awaitWithKeepalive(result.pending);
+			} catch {
+				/* best-effort: the pid kills below still run */
+			}
+		}
+	}
+	for (const kid of kids) killQuietly(kid, "SIGKILL");
+	killQuietly(leaderPid, "SIGKILL");
+}
+
 async function reapAfterLeaderKill(
 	extraArgs: string[],
 	gracefulMs: number,
@@ -182,8 +262,8 @@ test("(a1) real tree: group reaped after the leader is SIGKILLed (kids ESRCH)", 
 			assert.equal(await waitForDeath(kid), true, `kid ${kid} must be gone after the group reap`);
 		}
 	} finally {
-		for (const kid of tree.kids) killQuietly(kid, "SIGKILL");
-		killQuietly(tree.leaderPid, "SIGKILL");
+		// Group reap first (reaches kids we never learned), then the known pids.
+		await reapTree(tree.leaderPid, tree.kids, tree.leaderIdentity);
 	}
 });
 
@@ -196,8 +276,7 @@ test("(a2) real tree: SIGTERM-ignoring kids force the SIGKILL rung", { skip: !is
 			assert.equal(await waitForDeath(kid), true, `kid ${kid} must be gone after SIGKILL escalation`);
 		}
 	} finally {
-		for (const kid of tree.kids) killQuietly(kid, "SIGKILL");
-		killQuietly(tree.leaderPid, "SIGKILL");
+		await reapTree(tree.leaderPid, tree.kids, tree.leaderIdentity);
 	}
 });
 
