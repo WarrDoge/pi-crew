@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { getCrewEnv } from "../config/env-vars.ts";
 import { errors } from "../errors.ts";
 import { atomicWriteFile, atomicWriteJson } from "../state/atomic-write.ts";
+import { isTerminalTaskStatus } from "../state/contracts.ts";
 import { type ActiveRunRegistryEntry, activeRunEntries } from "../state/stores/active-run-registry.ts";
 import { getCurrentPlanRecord } from "../state/stores/plan-store.ts";
 import { loadManifestWithRecovery, loadTasksWithRecovery, saveRunManifest } from "../state/stores/state-store.ts";
@@ -11,7 +12,9 @@ import type { TeamRunManifest, TeamTaskState } from "../state/types.ts";
 import { logInternalError } from "../utils/internal-error.ts";
 import { findRunStateDir } from "../utils/paths.ts";
 import { recordFromTask, upsertCrewAgent } from "./crew-agent-records.ts";
+import { currentCrewDepth } from "./model/pi-args.ts";
 import { reapRecordedWorkerOrphans } from "./process/orphan-reaper.ts";
+import { reapRunDescendants } from "./process/run-descendant-sweep.ts";
 import { checkProcessLiveness } from "./process-status.ts";
 
 /**
@@ -575,8 +578,8 @@ function repairStaleRun(
 	// worker re-parented to PID 1 stayed alive and burned a slot forever. This
 	// reaps only pids confirmed by the AUTHORITATIVE zombie signal (crew-subagent
 	// marker + dead crew-parent), so a live worker is never touched. Best-effort.
+	const reapTargets = onlyTaskIds ? tasks.filter((task) => onlyTaskIds.has(task.id)) : tasks;
 	try {
-		const reapTargets = onlyTaskIds ? tasks.filter((task) => onlyTaskIds.has(task.id)) : tasks;
 		const reapResult = reapRecordedWorkerOrphansImpl(reapTargets);
 		if (reapResult.reaped.length > 0) {
 			logInternalError(
@@ -595,7 +598,90 @@ function repairStaleRun(
 	} catch (reapError) {
 		logInternalError("stale-reconciler", reapError, `orphan reap failed for ${manifest.runId}`, "warn");
 	}
+	// Wave 11b (F7): the worker-level reap above cannot reach pi's bash
+	// grandchildren — the bash tool spawns every command `detached`, so they own
+	// a group nothing rooted at the worker can signal (the 390 MB / 24 h leak
+	// after team_20261022110510 completed). The run-scoped sweep matches the env
+	// markers they INHERITED instead, and only once this run is terminal.
+	sweepRunDescendants(manifest, reapTargets);
 	return repairedTasks;
+}
+
+/** Recorded worker pids of a run's tasks (heartbeat / checkpoint), deduped. */
+function collectRecordedWorkerPids(tasks: TeamTaskState[]): number[] {
+	const pids = new Set<number>();
+	for (const task of tasks) {
+		const pid = task.heartbeat?.pid ?? task.checkpoint?.childPid;
+		if (typeof pid === "number" && Number.isInteger(pid) && pid > 1) pids.add(pid);
+	}
+	return [...pids];
+}
+
+/**
+ * Wave 11b (F7): run-scoped descendant sweep, fired only from `repairStaleRun`
+ * once the run has reached a TERMINAL state. Three preconditions, in order:
+ *
+ *  1. TERMINAL only — a run that still has a live task may legitimately own
+ *     live descendants; sweeping it would kill in-flight work. `repairStaleRun`
+ *     has just cancelled the stale subset, so `tasks.every(isTerminalTaskStatus)`
+ *     is exactly the "nothing left to run" test.
+ *  2. NEVER inside a worker — a worker process carries `PI_CREW_KIND=subagent`
+ *     and/or a non-zero crew depth, and every descendant it can see may belong
+ *     to its OWN (still-running) run. Only the host session / detached runner
+ *     may sweep, which is also why the kill switch is forwarded there.
+ *  3. Every recorded ancestor must be DEAD (runner pid + worker pids). A live
+ *     recorded pid means the tree is still owned by someone: its descendants
+ *     are legitimately alive, and the markers we match would be indistinguishable
+ *     from a still-running run's.
+ *
+ * Best-effort: never throws. When something was reaped the result is logged at
+ * `warn` (logInternalError has no `info` level; this mirrors the F2 reap above,
+ * whose success log is also `warn`), otherwise at `debug`. Escalations are
+ * registered with the existing drain owners.
+ */
+function sweepRunDescendants(manifest: TeamRunManifest, tasks: TeamTaskState[]): void {
+	try {
+		if (!tasks.every((task) => isTerminalTaskStatus(task.status))) return;
+		if (getCrewEnv("PI_CREW_KIND") === "subagent") return;
+		if (currentCrewDepth() !== 0) return;
+		const runnerPid = manifest.async?.pid;
+		const workerPids = collectRecordedWorkerPids(tasks);
+		const recordedPids = runnerPid !== undefined ? [runnerPid, ...workerPids] : workerPids;
+		// No recorded process ⇒ no marker can prove descent (every branch needs a
+		// recorded parent), so skip the /proc scan entirely.
+		if (recordedPids.length === 0) return;
+		if (recordedPids.some((pid) => checkProcessLiveness(pid).alive)) return;
+		const startedAtMs = Date.parse(manifest.async?.spawnedAt ?? manifest.createdAt);
+		const result = reapRunDescendants({
+			runId: manifest.runId,
+			...(runnerPid !== undefined ? { runnerPid } : {}),
+			workerPids,
+			taskIds: tasks.map((task) => task.id),
+			startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : 0,
+		});
+		// Same owner as the F2 escalations above — one drain mechanism, never two.
+		for (const escalation of result.pending) trackReapEscalation(escalation);
+		if (result.reaped.length > 0) {
+			logInternalError(
+				"stale-reconciler.run-descendant-sweep",
+				new Error(
+					`swept ${result.reaped.length} descendant process(es) of terminal run: ${result.reaped.map((descendant) => `${descendant.pid}(${descendant.matchedBy})`).join(",")}`,
+				),
+				manifest.runId,
+				"warn",
+			);
+		} else if (result.skipped.length > 0) {
+			logInternalError(
+				"stale-reconciler.run-descendant-sweep",
+				new Error(`no descendant reaped (${result.skipped.length} skipped)`),
+				manifest.runId,
+				"debug",
+			);
+		}
+	} catch (sweepError) {
+		// The sweep is cleanup, never a reason to fail a reconcile pass.
+		logInternalError("stale-reconciler.run-descendant-sweep", sweepError, manifest.runId, "debug");
+	}
 }
 
 /**

@@ -327,6 +327,12 @@ export const CREW_ENV_VARS: Record<string, CrewEnvVarSpec> = {
 		default: true,
 		doc: "wave 11a kill switch for identity-proven PROCESS-GROUP reaping: '0'/'false' degrades child-pi-kill + orphan-reaper to their pre-wave pid-only paths (resolveReapGroupEnabled, reap-group.ts). FORWARDED to the detached background runner (env-allowlist-registry: PI_CREW_REAP_GROUP → background-runner) because the runner/worker process is the one that reaps its own children — an unforwarded switch would be silently inert there",
 	},
+	PI_CREW_REAP_RUN_DESCENDANTS: {
+		name: "PI_CREW_REAP_RUN_DESCENDANTS",
+		parser: "boolean",
+		default: true,
+		doc: "wave 11b kill switch for the RUN-SCOPED descendant sweep: '0'/'false' makes collectRunDescendants/reapRunDescendants (run-descendant-sweep.ts) a complete no-op. FORWARDED to the detached background runner (env-allowlist-registry: → background-runner) for the same reason as PI_CREW_REAP_GROUP: the reconciler that drives the sweep also runs there. Never forwarded to a worker",
+	},
 	PI_CREW_MAX_WORKERS: {
 		name: "PI_CREW_MAX_WORKERS",
 		parser: "int",

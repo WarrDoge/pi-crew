@@ -123,6 +123,10 @@ const FROZEN_BACKGROUND_RUNNER = [
 	// reap kill switch must reach the detached runner, which owns kill/reap
 	// paths of its own; unforwarded it was silently inert there.
 	"PI_CREW_REAP_GROUP",
+	// ── wave 11b: documented addition #3 — the run-scoped descendant sweep kill
+	// switch, same argument: the reconciler that drives the sweep also runs in
+	// the detached runner.
+	"PI_CREW_REAP_RUN_DESCENDANTS",
 ];
 
 /** FROZEN pre-registry BASE_ALLOWLIST (v0.11.16) — plus the wave-2b TMPDIR addition. */

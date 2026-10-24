@@ -10,6 +10,7 @@ import { getPiTempBase } from "../../runtime/model/pi-args.ts";
 import { getRuntimeWarmupStatus } from "../../runtime/model/runtime-warmup.ts";
 import { currentSessionModel, sessionModelSnapshot } from "../../runtime/model/session-model.ts";
 import { getPiSpawnCommand } from "../../runtime/pi-spawn.ts";
+import { type RunDescendant, reapRunDescendants } from "../../runtime/process/run-descendant-sweep.ts";
 import { formatZombieReport, scanZombieSubagents, type ZombieScanResult } from "../../runtime/process/zombie-scanner.ts";
 import { launchScriptRegistry, sweepLaunchScripts, sweepOrphanLaunchScriptFiles } from "../../runtime/surface/launch-script.ts";
 import { surfaceProviderForCleanup } from "../../runtime/surface/resolve-surface.ts";
@@ -18,10 +19,12 @@ import type { TeamToolParamsValue } from "../../schema/team-tool-schema.ts";
 import { TeamToolParams } from "../../schema/team-tool-schema.ts";
 import { atomicWriteFile, atomicWriteJson } from "../../state/atomic-write.ts";
 import { TEAM_TERMINAL_RUN_STATUSES } from "../../state/contracts.ts";
+import { loadRunManifestById } from "../../state/stores/state-store.ts";
 import { allTeams, discoverTeams } from "../../teams/discover-teams.ts";
 import { type FatalFsCause, fsFailureLabel } from "../../utils/fs-errno.ts";
 import { projectCrewRoot, userCrewRoot } from "../../utils/paths.ts";
 import { allWorkflows, discoverWorkflows } from "../../workflows/discover-workflows.ts";
+import { listRecentRuns } from "../run-index.ts";
 import type { PiTeamsToolResult } from "../tool-result.ts";
 import { validateResources } from "../validate-resources.ts";
 import { configRecord, result, type TeamContext } from "./context.ts";
@@ -859,6 +862,101 @@ export function formatOrphanPaneReport(cleanup: DoctorSurfaceCleanupResult): str
 	return lines.join("\n");
 }
 
+/** How many recent TERMINAL runs the report-only descendant sweep inspects. */
+const RUN_DESCENDANT_SCAN_RUN_LIMIT = 5;
+
+/** One terminal run plus the surviving processes that still carry its markers. */
+export interface RunDescendantReport {
+	runId: string;
+	descendants: RunDescendant[];
+}
+
+/**
+ * Wave 11b (F7) — REPORT ONLY. pi's bash tool spawns every command `detached`,
+ * so a worker's grandchildren live in their own process groups and outlive the
+ * run (the 390 MB / 24 h leak after team_20261022110510 completed). This scan
+ * finds the survivors by the pi-crew env markers they inherited and lists them
+ * for the operator.
+ *
+ * Nothing is killed here BY CONSTRUCTION: `reapRunDescendants` is called with
+ * `dryRun: true`, which makes every candidate land in `skipped` with reason
+ * `dry-run` — the candidates themselves arrive in `descendants` for the report.
+ * The automatic reap is the stale reconciler's job (terminal runs only, never
+ * inside a worker), not the doctor's.
+ */
+export function collectRunDescendantReport(cwd: string, limit = RUN_DESCENDANT_SCAN_RUN_LIMIT): RunDescendantReport[] {
+	const reports: RunDescendantReport[] = [];
+	let inspected = 0;
+	let manifests: ReturnType<typeof listRecentRuns>;
+	try {
+		// A generous window: terminal runs are the only ones eligible, and old ones
+		// may dominate the recent list.
+		manifests = listRecentRuns(cwd, ORPHAN_RUN_SCAN_LIMIT * 5);
+	} catch {
+		return reports;
+	}
+	for (const manifest of manifests) {
+		if (inspected >= limit) break;
+		if (!TEAM_TERMINAL_RUN_STATUSES.has(manifest.status)) continue;
+		inspected += 1;
+		let loaded: ReturnType<typeof loadRunManifestById>;
+		try {
+			loaded = loadRunManifestById(cwd, manifest.runId);
+		} catch {
+			continue;
+		}
+		if (!loaded) continue;
+		const runnerPid = manifest.async?.pid;
+		const workerPids = [
+			...new Set(
+				loaded.tasks
+					.map((task) => task.heartbeat?.pid ?? task.checkpoint?.childPid)
+					.filter((pid): pid is number => typeof pid === "number" && Number.isInteger(pid) && pid > 1),
+			),
+		];
+		const startedAtMs = Date.parse(manifest.async?.spawnedAt ?? manifest.createdAt);
+		const result = reapRunDescendants(
+			{
+				runId: manifest.runId,
+				...(runnerPid !== undefined ? { runnerPid } : {}),
+				workerPids,
+				taskIds: loaded.tasks.map((task) => task.id),
+				startedAtMs: Number.isFinite(startedAtMs) ? startedAtMs : 0,
+			},
+			{ dryRun: true },
+		);
+		if (result.descendants.length > 0) reports.push({ runId: manifest.runId, descendants: result.descendants });
+	}
+	return reports;
+}
+
+/** Render {@link collectRunDescendantReport} for the zombies focus of doctor. */
+export function formatRunDescendantReport(reports: RunDescendantReport[]): string {
+	const lines: string[] = [];
+	lines.push("## Run descendants of terminal runs (report-only — nothing killed)");
+	lines.push("");
+	if (reports.length === 0) {
+		lines.push(`No surviving process matched a terminal run's pi-crew markers (last ${RUN_DESCENDANT_SCAN_RUN_LIMIT} terminal runs).`);
+		return lines.join("\n");
+	}
+	const total = reports.reduce((sum, report) => sum + report.descendants.length, 0);
+	lines.push(`Survivors: ${total} process(es) across ${reports.length} terminal run(s).`);
+	lines.push("Matched by inherited marker (run-id → task-id → parent-pid); a descendant that called setsid or runs in its own");
+	lines.push("container cannot be proven and is not listed.");
+	lines.push("");
+	for (const report of reports) {
+		lines.push(`Run ${report.runId} — ${report.descendants.length} process(es):`);
+		for (const descendant of report.descendants) {
+			const rss = descendant.rssKb > 0 ? `${Math.round(descendant.rssKb / 1024)} MB` : "rss ?";
+			lines.push(`  - pid ${descendant.pid} pgid ${descendant.pgid ?? "?"} [${descendant.matchedBy}] ${rss} — ${descendant.cmd}`);
+		}
+	}
+	lines.push("");
+	lines.push("Automatic reaping happens in the stale reconciler, only for terminal runs whose recorded runner/worker pids are");
+	lines.push("all dead and never inside a worker. PI_CREW_REAP_RUN_DESCENDANTS=0 disables it entirely.");
+	return lines.join("\n");
+}
+
 export async function handleDoctor(ctx: TeamContext, params: TeamToolParamsValue = {}): Promise<PiTeamsToolResult> {
 	// Sub-focus: zombie sub-agent scan + orphan surface-pane cleanup (T12). The
 	// process scan itself stays READ-ONLY — never kills a process. The pane
@@ -871,7 +969,11 @@ export async function handleDoctor(ctx: TeamContext, params: TeamToolParamsValue
 	if (params.focus === "zombies") {
 		const scan = scanZombieSubagents();
 		const cleanup = await cleanupOrphanSurfacePanes({ cwd: ctx.cwd, scan });
-		const text = `${formatZombieReport(scan)}\n\n${formatOrphanPaneReport(cleanup)}`;
+		// Wave 11b (F7): the zombie scan cannot see a terminal run's pi-bash
+		// grandchildren (they carry no PI_CREW_SURFACE and their recorded parent is
+		// the dead runner). The run-scoped sweep does — REPORT ONLY, dryRun.
+		const runDescendants = collectRunDescendantReport(ctx.cwd);
+		const text = `${formatZombieReport(scan)}\n\n${formatOrphanPaneReport(cleanup)}\n\n${formatRunDescendantReport(runDescendants)}`;
 		return result(
 			text,
 			{
@@ -884,6 +986,8 @@ export async function handleDoctor(ctx: TeamContext, params: TeamToolParamsValue
 					// never pane-cleaned; see zombie-scanner.ts discriminator notes).
 					foreignPi: scan.foreign.length,
 					errors: scan.errors.length,
+					// Wave 11b: report-only count of a terminal run's surviving descendants.
+					runDescendants: runDescendants.reduce((sum, report) => sum + report.descendants.length, 0),
 					orphanPanes: cleanup.orphans.length,
 					panesClosed: cleanup.closed.length,
 					panesGone: cleanup.gone.length,

@@ -2,6 +2,56 @@
 
 ## [Unreleased]
 
+### Unreleased — fix wave 11 (worker descendant reaping)
+
+Closes the leak that motivated the wave: run `team_20261022110510_cefb9164af126460` reached `completed` on
+2026-10-22 and six grandchild processes (`dpi-backend` ×5 + `caddy`, ~390 MB RSS) were still alive 24 h later.
+Root cause (SPEC `fixwave11-worker-reaping-2026-10-24` GAP-0): pi's bash tool spawns EVERY command with
+`detached: true`, so a worker's bash grandchildren own a process group that a group kill rooted at the worker can
+never reach.
+
+**11a — identity-proven group kill (F1–F4).**
+
+- `src/runtime/process/reap-group.ts` is now the ONE place that may signal a process group: a refusal ladder
+  (POSIX only, `pgid > 1`, never our own real pgrp, live-identity-or-leader-proof, same uid, member of the requested
+  group, starttime present + matching) plus a bounded SIGTERM → SIGKILL escalation. SIGTERM is delivered
+  synchronously; the SIGKILL rung is handed back as `pending` and owned by `drainReapEscalations()`
+  (stale reconciler) or `flushReapEscalationsSync()` (shutdown), never dropped.
+- `child-pi-kill.ts` (F1): an exited ROOT no longer means "nothing left" — when the snapshot proves the root led its
+  own group, the group is reaped.
+- `orphan-reaper.ts` (F2): recorded workers are reaped through the guarded group ladder when a pgid is known,
+  identity-proven candidates bypass the zombie-scan gate, and a scanner throw is now fail-open for proven candidates
+  instead of a blanket no-op.
+- `state/types.ts` + `child-executor.ts` (F3): `pgid`/`starttime`/`uid` are persisted on the checkpoint and worker
+  heartbeat (all optional — old records load unchanged), which is what makes identity proof real on the next run.
+- `frame-client.ts` (F4): the prototype RPC frame client spawns detached. The production RPC path uses the SDK
+  `RpcClient`, which exposes no spawn knob — those workers stay non-leaders.
+
+**11b — run-scoped descendant sweep (F7, the actual cure for GAP-0).**
+
+- New `src/runtime/process/run-descendant-sweep.ts`: `collectRunDescendants()` / `reapRunDescendants()` enumerate
+  `/proc`, match the pi-crew env markers a descendant INHERITED, and reap only through a group that can be proven.
+  Markers used (verified in src, none invented): `PI_CREW_BROKER_RUN_ID` (`child-pi-spawn.ts:382`) ⇒ `run-id`;
+  `PI_CREW_KIND=subagent` + `PI_CREW_TASK_ID` + `PI_CREW_PARENT_PID` in the recorded set ⇒ `task-id`;
+  a `PI_CREW_PARENT_PID` that is a recorded worker pid and is dead ⇒ `parent-pid`. `PI_CREW_RUN_ID` is deliberately
+  NOT matched (registry: `test-only`, no src writer).
+- Guards: Linux `/proc` only (else `[]`, fail-open); never self, never an ancestor, same uid only; the candidate must
+  have started no earlier than the run (> 60 s of pre-run clock skew rejected); the candidate's group must not be ours;
+  one signal per group per leader incarnation (idempotent across reconciler ticks); and an extra rung — a group whose
+  LEADER is alive and carries no marker is skipped (`leader-alive-unmatched`), so a live session's group is never hit.
+- Call sites: `stale-reconciler.ts` sweeps ONLY when the run is terminal, the process is not a worker
+  (`PI_CREW_KIND`/crew depth 0), and every recorded runner/worker pid is dead; `team-tool/doctor.ts` (`focus=zombies`)
+  reports the survivors as `runDescendants` — report-only, `dryRun: true`, nothing killed.
+- Kill switches: `PI_CREW_REAP_GROUP` (11a) and `PI_CREW_REAP_RUN_DESCENDANTS` (11b), both boolean, default ON, both
+  forwarded to the detached background runner (never to a worker) so a disable actually takes effect where the reaping
+  runs.
+
+**Known limitations** (unchanged by design, documented on the module and in the SPEC): a descendant that calls
+`setsid()` or runs inside its own container/init (`docker`, `systemd-run`) has a group we cannot prove and is left
+alone; pi's bash tool remains the primary source of detached grandchildren — the upstream fix (tracked, non-detached
+children for tool commands, or a cgroup/subreaper for the worker tree) is what would make this sweep unnecessary;
+and the sweep can only match processes that still carry the markers (a scrubbed env is invisible).
+
 ## [0.11.38] — Wave 10: pi-subagents lessons (10 ports) + watchdog hung-alert hardening (WD-DEDUP / WD-STALE-RECORD / WD-DELIVER-GUARD)
 
 ### Fixed — watchdog alerts for FINISHED runs: delivery-time guard (WD-DELIVER-GUARD, root-caused 2026-10-23)

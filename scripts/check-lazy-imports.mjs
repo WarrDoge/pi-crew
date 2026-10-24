@@ -157,7 +157,13 @@ const BUDGETS = {
 		// orphan-reaper.ts, both on the KILL path where a dynamic import could
 		// not be awaited before the pid disappears — static is the only correct
 		// shape here).
-		maxFiles: 536,
+		// fix-wave 11b: 536 → 537 — runtime/process/run-descendant-sweep.ts
+		// (run-scoped descendant reaper; statically imported by stale-reconciler.ts
+		// and team-tool/doctor.ts). Static, not lazy: the reconciler is SYNC by
+		// contract and must hand the SIGTERM out before it returns, so an await
+		// point (dynamic import) at the call site is exactly the shape that loses
+		// the pid to a subsequent PID reuse.
+		maxFiles: 537,
 		forbid: ["test/", "scripts/", "docs/", "dist/"],
 	},
 };
