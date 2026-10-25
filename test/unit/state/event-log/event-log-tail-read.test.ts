@@ -26,6 +26,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { readEventsCursor, type TeamEvent } from "../../../../src/state/event-log/event-log.ts";
 import { readJsonlTail } from "../../../../src/utils/incremental-reader.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 /**
  * Spy on fs.readFileSync + fs.readSync to verify the tail path was used.
@@ -98,7 +99,7 @@ function captureInternalErrors(): { calls: string[]; restore: () => void } {
 	};
 }
 
-test("readEventsCursor default path uses tail-read (no full-file readFileSync)", () => {
+test("readEventsCursor default path uses tail-read (no full-file readFileSync)", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-tail-read-"));
 	const eventsPath = path.join(dir, "events.jsonl");
 	try {
@@ -152,11 +153,11 @@ test("readEventsCursor default path uses tail-read (no full-file readFileSync)",
 			spy.restore();
 		}
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
-test("readEventsCursor reports a truncated multi-MB tail and returns the newest contiguous events", () => {
+test("readEventsCursor reports a truncated multi-MB tail and returns the newest contiguous events", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-tail-truncated-"));
 	const eventsPath = path.join(dir, "events.jsonl");
 	try {
@@ -204,11 +205,11 @@ test("readEventsCursor reports a truncated multi-MB tail and returns the newest 
 			captured.restore();
 		}
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
-test("readEventsCursor default path returns all events without a truncation warning when the file fits", () => {
+test("readEventsCursor default path returns all events without a truncation warning when the file fits", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-tail-order-"));
 	const eventsPath = path.join(dir, "events.jsonl");
 	try {
@@ -244,11 +245,11 @@ test("readEventsCursor default path returns all events without a truncation warn
 			captured.restore();
 		}
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
-test("readEventsCursor with sinceSeq filters out older events after the tail read", () => {
+test("readEventsCursor with sinceSeq filters out older events after the tail read", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-tail-sinceseq-"));
 	const eventsPath = path.join(dir, "events.jsonl");
 	try {
@@ -272,6 +273,6 @@ test("readEventsCursor with sinceSeq filters out older events after the tail rea
 		assert.equal(cursor.events.at(-1)?.metadata?.seq, 6000);
 		assert.equal(cursor.total, 500);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });

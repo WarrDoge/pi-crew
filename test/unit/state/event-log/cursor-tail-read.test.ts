@@ -36,6 +36,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { clearEventsCursorTailCache, readEventsCursor, type TeamEvent } from "../../../../src/state/event-log/event-log.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 interface FsReadSpy {
 	readonly readFileSyncCalls: number;
@@ -211,7 +212,7 @@ function tmpDir(prefix: string): string {
 	return dir;
 }
 
-test("repro: out-of-order file [1..200, 5000, 201..1700] delivers seq order and keeps event 5000 reachable (FS3)", () => {
+test("repro: out-of-order file [1..200, 5000, 201..1700] delivers seq order and keeps event 5000 reachable (FS3)", async () => {
 	const dir = tmpDir("pi-crew-cursor-repro-");
 	try {
 		const eventsPath = writeOutOfOrderFixture(dir);
@@ -251,11 +252,11 @@ test("repro: out-of-order file [1..200, 5000, 201..1700] delivers seq order and 
 		const again = readEventsCursor(eventsPath, { sinceSeq: 1600, limit: 50 });
 		assert.deepEqual(again.events, expected, "cached repeat must stay exact");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
-test("unchanged file serves purely from the ring (zero event-byte reads)", () => {
+test("unchanged file serves purely from the ring (zero event-byte reads)", async () => {
 	const dir = tmpDir("pi-crew-cursor-cached-");
 	try {
 		const eventsPath = writeEventsFixture(dir, 10_000);
@@ -290,11 +291,11 @@ test("unchanged file serves purely from the ring (zero event-byte reads)", () =>
 			spy.restore();
 		}
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
-test("append growth takes the delta path: only the appended bytes are read", () => {
+test("append growth takes the delta path: only the appended bytes are read", async () => {
 	const dir = tmpDir("pi-crew-cursor-delta-");
 	try {
 		const eventsPath = writeEventsFixture(dir, 10_000);
@@ -336,11 +337,11 @@ test("append growth takes the delta path: only the appended bytes are read", () 
 			spy2.restore();
 		}
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
-test("file shrink forces a full re-read and stays exact", () => {
+test("file shrink forces a full re-read and stays exact", async () => {
 	const dir = tmpDir("pi-crew-cursor-shrink-");
 	try {
 		const eventsPath = writeEventsFixture(dir, 10_000);
@@ -362,11 +363,11 @@ test("file shrink forces a full re-read and stays exact", () => {
 			spy.restore();
 		}
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
-test("reject: seq-less first delta line rebuilds from a full parse", () => {
+test("reject: seq-less first delta line rebuilds from a full parse", async () => {
 	const dir = tmpDir("pi-crew-cursor-seqless-");
 	try {
 		const eventsPath = writeEventsFixture(dir, 10_000);
@@ -386,11 +387,11 @@ test("reject: seq-less first delta line rebuilds from a full parse", () => {
 		assert.deepEqual(cursor.events, expected, "seq-less delta must rebuild and stay exact");
 		assert.equal(cursor.total, 11);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
-test("reject: mid-delta seq violation (compaction-recovery re-append) rebuilds and stays exact", () => {
+test("reject: mid-delta seq violation (compaction-recovery re-append) rebuilds and stays exact", async () => {
 	const dir = tmpDir("pi-crew-cursor-violation-");
 	try {
 		const eventsPath = writeEventsFixture(dir, 10_000);
@@ -408,11 +409,11 @@ test("reject: mid-delta seq violation (compaction-recovery re-append) rebuilds a
 		const cursor = readEventsCursor(eventsPath, { sinceSeq: 899, limit: 10_000 });
 		assert.deepEqual(cursor.events, expected, "violating delta must rebuild from a full parse and stay exact");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
-test("stale anchor (older than the ring's provable start) falls back to a full parse", () => {
+test("stale anchor (older than the ring's provable start) falls back to a full parse", async () => {
 	const dir = tmpDir("pi-crew-cursor-fallback-");
 	try {
 		// 12k events: the ring bound for limit=50 is 10000, so the cached ring
@@ -436,11 +437,11 @@ test("stale anchor (older than the ring's provable start) falls back to a full p
 			spy.restore();
 		}
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
-test("limit without sinceSeq keeps the head-cap semantics via the wide window", () => {
+test("limit without sinceSeq keeps the head-cap semantics via the wide window", async () => {
 	const dir = tmpDir("pi-crew-cursor-headcap-");
 	try {
 		const eventsPath = writeEventsFixture(dir, 10_000);
@@ -461,11 +462,11 @@ test("limit without sinceSeq keeps the head-cap semantics via the wide window", 
 			spy.restore();
 		}
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
-test("no-limit call still full-reads the file via the wide tail window", () => {
+test("no-limit call still full-reads the file via the wide tail window", async () => {
 	const dir = tmpDir("pi-crew-cursor-nolimit-");
 	try {
 		const eventsPath = writeEventsFixture(dir, 10_000);
@@ -486,11 +487,11 @@ test("no-limit call still full-reads the file via the wide tail window", () => {
 			spy.restore();
 		}
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
-test("repro (fix round 2): rewrite keeping the tail + regrow past the old size equals the full parse", () => {
+test("repro (fix round 2): rewrite keeping the tail + regrow past the old size equals the full parse", async () => {
 	const dir = tmpDir("pi-crew-cursor-regrow-");
 	try {
 		const eventsPath = writeEventsFixture(dir, 10);
@@ -542,11 +543,11 @@ test("repro (fix round 2): rewrite keeping the tail + regrow past the old size e
 		const again = readEventsCursor(eventsPath, { sinceSeq: 5, limit: 100 });
 		assert.deepEqual(again.events, cursor.events, "repeat read after the rebuild must stay exact");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
-test("inode change forces a full re-read even when size and mtimeMs are byte-identical", () => {
+test("inode change forces a full re-read even when size and mtimeMs are byte-identical", async () => {
 	const dir = tmpDir("pi-crew-cursor-inode-");
 	try {
 		const lineBytes = 200;
@@ -596,11 +597,11 @@ test("inode change forces a full re-read even when size and mtimeMs are byte-ide
 		);
 		assert.equal(cursor.total, 2);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
-test("wide-path call drops the watermark entry (mixed call patterns cannot keep stale stamps)", () => {
+test("wide-path call drops the watermark entry (mixed call patterns cannot keep stale stamps)", async () => {
 	const dir = tmpDir("pi-crew-cursor-widedrop-");
 	try {
 		const eventsPath = writeEventsFixture(dir, 10_000);
@@ -635,6 +636,6 @@ test("wide-path call drops the watermark entry (mixed call patterns cannot keep 
 			spy.restore();
 		}
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });

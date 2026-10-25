@@ -33,6 +33,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { withEventLogAppendLockSync, withEventLogLockAsync } from "../../../../src/state/event-log/event-log.ts";
 import { compactEventLog, compactPreparedEventLog, prepareCompaction } from "../../../../src/state/event-log/event-log-rotation.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tmpEventsPath(prefix: string): { dir: string; eventsPath: string } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -145,7 +146,7 @@ test("R4-2: compaction refuses to run while an async-family append is mid-gap (o
 		assert.ok(!fs.existsSync(alockDir), ".alock must be released after compaction");
 		assert.ok(!fs.existsSync(`${eventsPath}.mkdirlock`), ".mkdirlock must be released after compaction");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -187,7 +188,7 @@ test("R4-2(a): sync append-lock acquirer times out while the async family holds 
 		);
 		assert.ok(!fs.existsSync(alockDir), "lock dir must be removed after a clean acquire/release");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -219,11 +220,11 @@ test("R4-2(a): async-family lock attempt cannot complete while the sync acquirer
 		assert.equal(await attempt, "acquired", "async attempt completes after the sync holder releases");
 		assert.ok(!fs.existsSync(`${eventsPath}.alock`), "no lock-dir leak");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
-test("R4-2(b): stale .alock (old mtime + dead pid) is reclaimed by the sync acquirer", () => {
+test("R4-2(b): stale .alock (old mtime + dead pid) is reclaimed by the sync acquirer", async () => {
 	const { dir, eventsPath } = tmpEventsPath("r42-stale-deadpid-");
 	try {
 		const alockDir = `${eventsPath}.alock`;
@@ -245,11 +246,11 @@ test("R4-2(b): stale .alock (old mtime + dead pid) is reclaimed by the sync acqu
 		assert.ok(elapsed < bound, `stale reclaim must be prompt, took ${elapsed}ms (bound ${bound}ms, control ${controlMs}ms)`);
 		assert.ok(!fs.existsSync(alockDir), "reclaimed lock dir must be released after fn");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
-test("R4-2(b): stale .alock with no pid file (crash between mkdir and pid write) is reclaimed", () => {
+test("R4-2(b): stale .alock with no pid file (crash between mkdir and pid write) is reclaimed", async () => {
 	const { dir, eventsPath } = tmpEventsPath("r42-stale-nopid-");
 	try {
 		const alockDir = `${eventsPath}.alock`;
@@ -262,11 +263,11 @@ test("R4-2(b): stale .alock with no pid file (crash between mkdir and pid write)
 		);
 		assert.ok(!fs.existsSync(alockDir), "reclaimed lock dir must be released after fn");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
-test("R4-2(b): fresh .alock with a live pid is NOT stolen — bounded timeout throw instead", () => {
+test("R4-2(b): fresh .alock with a live pid is NOT stolen — bounded timeout throw instead", async () => {
 	const { dir, eventsPath } = tmpEventsPath("r42-fresh-livepid-");
 	try {
 		const alockDir = `${eventsPath}.alock`;
@@ -280,11 +281,11 @@ test("R4-2(b): fresh .alock with a live pid is NOT stolen — bounded timeout th
 		);
 		assert.ok(fs.existsSync(alockDir), "a fresh live holder's lock must never be stolen");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
-test("R4-2(b): fresh .alock with a dead-but-not-stale pid is waited on, NOT stolen", () => {
+test("R4-2(b): fresh .alock with a dead-but-not-stale pid is waited on, NOT stolen", async () => {
 	const { dir, eventsPath } = tmpEventsPath("r42-fresh-deadpid-");
 	try {
 		const alockDir = `${eventsPath}.alock`;
@@ -298,11 +299,11 @@ test("R4-2(b): fresh .alock with a dead-but-not-stale pid is waited on, NOT stol
 		// Dead pid alone must not trigger a steal — only the aged mtime does.
 		assert.ok(fs.existsSync(alockDir), "dead-but-fresh holder's lock must not be stolen");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
-test("R4-2(c): public compactEventLog compacts correctly and leaves no lock dirs behind", () => {
+test("R4-2(c): public compactEventLog compacts correctly and leaves no lock dirs behind", async () => {
 	const { dir, eventsPath } = tmpEventsPath("r42-public-compact-");
 	try {
 		seedEvents(eventsPath, 300);
@@ -320,7 +321,7 @@ test("R4-2(c): public compactEventLog compacts correctly and leaves no lock dirs
 		assert.ok(!fs.existsSync(`${eventsPath}.alock`), "no .alock leak");
 		assert.ok(!fs.existsSync(`${eventsPath}.mkdirlock`), "no .mkdirlock leak");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 

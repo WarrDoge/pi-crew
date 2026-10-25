@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { compactEventLog, getEventLogStats, needsRotation } from "../../../../src/state/event-log/event-log-rotation.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tmpDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-rotation-"));
@@ -30,15 +31,15 @@ describe("needsRotation", () => {
 		assert.equal(needsRotation("/nonexistent/file.jsonl"), false);
 	});
 
-	it("returns false for small files", () => {
+	it("returns false for small files", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		writeEvents(filePath, 10);
 		assert.equal(needsRotation(filePath), false);
-		fs.rmSync(dir, { recursive: true });
+		await cleanupStateRoot(dir, filePath);
 	});
 
-	it("returns true when file exceeds size threshold", () => {
+	it("returns true when file exceeds size threshold", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		// Write enough events to exceed a tiny threshold
@@ -51,10 +52,10 @@ describe("needsRotation", () => {
 			}),
 			true,
 		);
-		fs.rmSync(dir, { recursive: true });
+		await cleanupStateRoot(dir, filePath);
 	});
 
-	it("returns true when event count exceeds threshold", () => {
+	it("returns true when event count exceeds threshold", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		writeEvents(filePath, 200);
@@ -65,7 +66,7 @@ describe("needsRotation", () => {
 			}),
 			true,
 		);
-		fs.rmSync(dir, { recursive: true });
+		await cleanupStateRoot(dir, filePath);
 	});
 });
 
@@ -74,15 +75,15 @@ describe("compactEventLog", () => {
 		assert.equal(compactEventLog("/nonexistent/file.jsonl"), undefined);
 	});
 
-	it("returns undefined when event count is below compactToCount", () => {
+	it("returns undefined when event count is below compactToCount", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		writeEvents(filePath, 5);
 		assert.equal(compactEventLog(filePath, { compactToCount: 100 }), undefined);
-		fs.rmSync(dir, { recursive: true });
+		await cleanupStateRoot(dir, filePath);
 	});
 
-	it("reduces file size", () => {
+	it("reduces file size", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		writeEvents(filePath, 500);
@@ -93,10 +94,10 @@ describe("compactEventLog", () => {
 		assert.equal(result.originalSize, originalSize);
 		assert.equal(result.eventsKept, 50);
 		assert.equal(result.eventsRemoved, 450);
-		fs.rmSync(dir, { recursive: true });
+		await cleanupStateRoot(dir, filePath);
 	});
 
-	it("keeps last N events", () => {
+	it("keeps last N events", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		writeEvents(filePath, 200);
@@ -105,10 +106,10 @@ describe("compactEventLog", () => {
 		assert.equal(content.length, 10);
 		const first = JSON.parse(content[0]) as { metadata: { seq: number } };
 		assert.equal(first.metadata.seq, 191); // events 191-200
-		fs.rmSync(dir, { recursive: true });
+		await cleanupStateRoot(dir, filePath);
 	});
 
-	it("preserves event order", () => {
+	it("preserves event order", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		writeEvents(filePath, 100, "2025-06-01T00:00:00.000Z");
@@ -121,7 +122,7 @@ describe("compactEventLog", () => {
 		for (let i = 1; i < events.length; i++) {
 			assert.ok(events[i].time >= events[i - 1].time, `event ${i} not in order: ${events[i].time} < ${events[i - 1].time}`);
 		}
-		fs.rmSync(dir, { recursive: true });
+		await cleanupStateRoot(dir, filePath);
 	});
 });
 
@@ -130,7 +131,7 @@ describe("getEventLogStats", () => {
 		assert.equal(getEventLogStats("/nonexistent/file.jsonl"), undefined);
 	});
 
-	it("returns correct file size", () => {
+	it("returns correct file size", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		writeEvents(filePath, 10);
@@ -138,10 +139,10 @@ describe("getEventLogStats", () => {
 		assert.ok(stat);
 		assert.equal(stat.fileSizeBytes, fs.statSync(filePath).size);
 		assert.equal(stat.eventCount, 10);
-		fs.rmSync(dir, { recursive: true });
+		await cleanupStateRoot(dir, filePath);
 	});
 
-	it("returns oldest and newest timestamps", () => {
+	it("returns oldest and newest timestamps", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		writeEvents(filePath, 5, "2025-03-15T12:00:00.000Z");
@@ -149,6 +150,6 @@ describe("getEventLogStats", () => {
 		assert.ok(stat);
 		assert.equal(stat.oldestTimestamp, "2025-03-15T12:00:00.000Z");
 		assert.equal(stat.newestTimestamp, "2025-03-15T12:00:04.000Z");
-		fs.rmSync(dir, { recursive: true });
+		await cleanupStateRoot(dir, filePath);
 	});
 });

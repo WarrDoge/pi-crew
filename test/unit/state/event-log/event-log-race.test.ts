@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { appendEvent, appendEventAsync } from "../../../../src/state/event-log/event-log.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 describe("H2: Event log sync/async coordination", () => {
 	let tmpDir: string;
@@ -14,8 +15,8 @@ describe("H2: Event log sync/async coordination", () => {
 		eventsPath = path.join(tmpDir, "events.jsonl");
 	});
 
-	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+	afterEach(async () => {
+		await cleanupStateRoot(tmpDir, eventsPath);
 	});
 
 	it("should route sync appendEvent through async queue after appendEventAsync is called", async () => {

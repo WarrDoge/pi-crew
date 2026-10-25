@@ -20,6 +20,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { applyCompactionUnlocked, compactEventLog, prepareCompaction } from "../../../../src/state/event-log/event-log-rotation.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tmpDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-st11-"));
@@ -53,7 +54,7 @@ function writeEvents(filePath: string, count: number, fromSeq = 1): number[] {
 }
 
 describe("ST-11: streaming compaction correctness", () => {
-	it("keeps exactly compactToCount events (the last N)", () => {
+	it("keeps exactly compactToCount events (the last N)", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -75,11 +76,11 @@ describe("ST-11: streaming compaction correctness", () => {
 			assert.equal(seqs[0], total - keep + 1);
 			assert.equal(seqs[seqs.length - 1], total);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
-	it("returns undefined when count <= compactToCount (no compaction needed)", () => {
+	it("returns undefined when count <= compactToCount (no compaction needed)", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -87,7 +88,7 @@ describe("ST-11: streaming compaction correctness", () => {
 			const result = compactEventLog(filePath, { compactToCount: 100 });
 			assert.equal(result, undefined);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
@@ -96,7 +97,7 @@ describe("ST-11: streaming compaction correctness", () => {
 		assert.equal(prepareCompaction("/nonexistent/file.jsonl"), undefined);
 	});
 
-	it("produces correct output for a file much larger than compactToCount", () => {
+	it("produces correct output for a file much larger than compactToCount", async () => {
 		// This is the core ST-11 scenario: the old code loaded the ENTIRE
 		// file (readFileSync + JSON.parse per line) into a single array before
 		// slicing. The streaming ring buffer keeps only compactToCount events
@@ -125,11 +126,11 @@ describe("ST-11: streaming compaction correctness", () => {
 				assert.equal(seqs[i], seqs[i - 1] + 1, `seq gap at index ${i}`);
 			}
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
-	it("skips corrupt lines without breaking the ring buffer", () => {
+	it("skips corrupt lines without breaking the ring buffer", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -161,13 +162,13 @@ describe("ST-11: streaming compaction correctness", () => {
 			assert.equal(seqs[0], 251);
 			assert.equal(seqs.at(-1), 300);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 });
 
 describe("ST-11: prepareCompaction streaming pre-read", () => {
-	it("returns correct kept events and originalCount for a large file", () => {
+	it("returns correct kept events and originalCount for a large file", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -182,24 +183,24 @@ describe("ST-11: prepareCompaction streaming pre-read", () => {
 			assert.equal(prepared.kept[0]!.metadata?.seq, total - keep + 1, "first kept is the (N-keep+1)th event");
 			assert.equal(prepared.kept[keep - 1]!.metadata?.seq, total, "last kept is the Nth event");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
-	it("returns undefined when originalCount <= compactToCount", () => {
+	it("returns undefined when originalCount <= compactToCount", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
 			writeEvents(filePath, 30, 1);
 			assert.equal(prepareCompaction(filePath, { compactToCount: 100 }), undefined);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 });
 
 describe("ST-11: applyCompactionUnlocked streaming recovery", () => {
-	it("recovers events appended during the compaction write window", () => {
+	it("recovers events appended during the compaction write window", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -224,11 +225,11 @@ describe("ST-11: applyCompactionUnlocked streaming recovery", () => {
 			const lines = fs.readFileSync(filePath, "utf-8").split("\n").filter(Boolean);
 			assert.equal(lines.length, keep + 1, "file has kept + appended event");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
-	it("detects and recovers lost events (afterWrite < kept.length)", () => {
+	it("detects and recovers lost events (afterWrite < kept.length)", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -262,7 +263,7 @@ describe("ST-11: applyCompactionUnlocked streaming recovery", () => {
 			assert.ok(result);
 			assert.equal(result.eventsKept, keep);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 });

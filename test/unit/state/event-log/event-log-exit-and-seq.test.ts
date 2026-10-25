@@ -14,6 +14,7 @@ import {
 	scanSequence,
 	sequencePath,
 } from "../../../../src/state/event-log/event-log.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 test("flushBufferedQueuesSync writes buffered events synchronously and persists the sidecar (EL-2 regression)", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-el2-sync-"));
@@ -50,11 +51,11 @@ test("flushBufferedQueuesSync writes buffered events synchronously and persists 
 		await Promise.allSettled(promises);
 	} finally {
 		clearInterval(keepAlive);
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
-test("nextSequence detects a regressed sidecar and returns max+1 (EL-1 regression)", () => {
+test("nextSequence detects a regressed sidecar and returns max+1 (EL-1 regression)", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-el1-seq-"));
 	const eventsPath = path.join(dir, "events.jsonl");
 	try {
@@ -86,6 +87,6 @@ test("nextSequence detects a regressed sidecar and returns max+1 (EL-1 regressio
 		// File max and sidecar remain unchanged by this read (we only consulted them).
 		assert.equal(scanSequence(eventsPath), 7, "file max seq unchanged");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });

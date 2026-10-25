@@ -22,8 +22,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-
 import { appendEvent, readEventsCursor, type TeamEvent } from "../../../../src/state/event-log/event-log.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function seqsOf(result: { events: TeamEvent[] }): number[] {
 	return result.events.map((event) => event.metadata?.seq ?? 0);
@@ -38,8 +38,8 @@ describe("BR-08: cursor continuation anchors never skip the undelivered tail", (
 		eventsPath = path.join(tmpDir, "events.jsonl");
 	});
 
-	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+	afterEach(async () => {
+		await cleanupStateRoot(tmpDir, eventsPath);
 	});
 
 	function seed(count: number): void {

@@ -44,6 +44,7 @@ import {
 	withEventLogLockAsync,
 } from "../../../../src/state/event-log/event-log.ts";
 import { applyCompactionAppendGuarded, prepareCompaction } from "../../../../src/state/event-log/event-log-rotation.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tmpEventsPath(prefix: string): { dir: string; eventsPath: string } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -115,11 +116,11 @@ test("R7-2(b): holdsAppendLock:true tail-merges sync-family bytes appended after
 		assertValidJsonl(lines);
 		assert.ok(lines.length <= 52, `kept window + spliced tail expected, got ${lines.length}`);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
-test("R7-2(b): default (acquire .alock) also tail-merges bytes appended after prepare", () => {
+test("R7-2(b): default (acquire .alock) also tail-merges bytes appended after prepare", async () => {
 	const { dir, eventsPath } = tmpEventsPath("r72-acquire-");
 	try {
 		seedEvents(eventsPath, 500, 220);
@@ -140,7 +141,7 @@ test("R7-2(b): default (acquire .alock) also tail-merges bytes appended after pr
 		assert.ok(lines.length <= 51, `kept window + spliced tail expected, got ${lines.length}`);
 		assertNoLockLeaks(eventsPath);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -196,7 +197,7 @@ test("R7-2(c): holdsAppendLock:true does NOT re-acquire while .alock is genuinel
 		await holder;
 		assertNoLockLeaks(eventsPath);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -269,7 +270,7 @@ test("R7-2(a): appendEvent rotation-tick compaction does not orphan a parked mid
 		assert.equal(fs.statSync(eventsPath).size > sizeBefore, true, "both appends landed on the current inode");
 		assertNoLockLeaks(eventsPath);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -304,7 +305,7 @@ test("R7-2(c): appendEventAsync rotation-tick compacts fast (no .alock re-acquir
 		assert.equal(lines.length, 1000, `compaction must have run (kept window), got ${lines.length} lines`);
 		assertNoLockLeaks(eventsPath);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -342,7 +343,7 @@ test("R7-2(c): appendEventAsync overflow site compacts a >50MiB log without re-a
 		);
 		assertNoLockLeaks(eventsPath);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -380,6 +381,6 @@ test("R7-2(d): buffered async flush compacts a >50MiB log under its own .alock (
 		);
 		assertNoLockLeaks(eventsPath);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });

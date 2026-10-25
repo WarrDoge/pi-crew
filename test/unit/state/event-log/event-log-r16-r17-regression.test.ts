@@ -35,6 +35,7 @@ import {
 } from "../../../../src/state/event-log/event-log.ts";
 import { currentGeneration, rotateEventLogUnlocked } from "../../../../src/state/event-log/event-log-rotation.ts";
 import { runEventBus } from "../../../../src/ui/run-event-bus.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function makeEvent(runId: string, taskId: string): AppendTeamEvent {
 	return { type: "task.progress", runId, taskId, data: {} };
@@ -60,8 +61,8 @@ describe("R16-B1: .seqlock reservation (W1)", () => {
 		eventsPath = path.join(tmpDir, "events.jsonl");
 	});
 
-	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+	afterEach(async () => {
+		await cleanupStateRoot(tmpDir);
 	});
 
 	it("concurrent sync+async appends produce unique seqs and release the .seqlock", async () => {
@@ -98,8 +99,8 @@ describe("W2: archive-tail readers recover rotation-stranded events (R16-B1 effe
 		eventsPath = path.join(tmpDir, "events.jsonl");
 	});
 
-	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+	afterEach(async () => {
+		await cleanupStateRoot(tmpDir);
 	});
 
 	/** Build the stranding scenario: seqs 1..5 in the live file, then a
@@ -174,8 +175,8 @@ describe("R17-S1: size-limit skip signals (W3)", () => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "r17-size-"));
 	});
 
-	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+	afterEach(async () => {
+		await cleanupStateRoot(tmpDir);
 	});
 
 	/** Build an eventsPath whose ARCHIVE rename deterministically fails: a
@@ -261,7 +262,7 @@ describe("R17-S1: size-limit skip signals (W3)", () => {
 				await new Promise((resolve) => setTimeout(resolve, 20));
 				assert.equal(received.length, 0, "a skipped (non-persisted) event must NOT be emitted to the bus");
 			} finally {
-				fs.rmSync(controlDir, { recursive: true, force: true });
+				await cleanupStateRoot(controlDir, controlPath);
 			}
 		} finally {
 			unsubscribe();

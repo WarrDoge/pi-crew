@@ -44,6 +44,7 @@ import {
 	scanSequence,
 	sequencePath,
 } from "../../../../src/state/event-log/event-log.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const RUN_ID = "st5-cross-process";
 
@@ -86,10 +87,10 @@ describe("ST-5: cross-process seq uniqueness (sync locked append)", () => {
 		clearSeqCounters();
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		clearSequenceCache();
 		clearSeqCounters();
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		await cleanupStateRoot(tmpDir, eventsPath);
 	});
 
 	it("a fresh process (cleared module state) resumes from the persisted sidecar", () => {

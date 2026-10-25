@@ -20,12 +20,13 @@ import * as path from "node:path";
 import { after, test } from "node:test";
 import { appendEventAsync, readEvents } from "../../../../src/state/event-log/event-log.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const createdTmpDirs: string[] = [];
-after(() => {
+after(async () => {
 	for (const d of createdTmpDirs) {
 		try {
-			fs.rmSync(d, { recursive: true, force: true });
+			await removeDirWithRetry(d);
 		} catch {
 			/* best-effort cleanup */
 		}

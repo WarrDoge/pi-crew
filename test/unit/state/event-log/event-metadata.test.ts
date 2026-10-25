@@ -4,12 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test, { after } from "node:test";
 import { appendEvent, computeEventFingerprint, dedupeTerminalEvents, readEvents } from "../../../../src/state/event-log/event-log.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const createdTmpDirs: string[] = [];
-after(() => {
+after(async () => {
 	for (const d of createdTmpDirs) {
 		try {
-			fs.rmSync(d, { recursive: true, force: true });
+			await cleanupStateRoot(d, path.join(d, "events.jsonl"));
 		} catch {
 			/* best-effort cleanup */
 		}

@@ -37,6 +37,7 @@ import {
 	rotateEventLogUnlocked,
 } from "../../../../src/state/event-log/event-log-rotation.ts";
 import { loadPoisonMarkers, poisonMarkerPath } from "../../../../src/state/event-log/poison-marker.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const POISON_LINE = '{"this is not valid json"\n';
 
@@ -68,7 +69,7 @@ function tmpDir(prefix: string): string {
 
 // --- AC 1: torn tail is recoverable and never marked -------------------------
 
-test("torn tail: lines before the cut parse, tornTail=true, no marker written", () => {
+test("torn tail: lines before the cut parse, tornTail=true, no marker written", async () => {
 	const dir = tmpDir("pi-crew-torn-");
 	try {
 		const eventsPath = path.join(dir, "events.jsonl");
@@ -94,13 +95,13 @@ test("torn tail: lines before the cut parse, tornTail=true, no marker written", 
 		assert.deepEqual(seqs(cursor.events), [1, 2, 4]);
 		assert.equal(cursor.tornTail, false);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
 // --- AC 2: poison is sticky and surrounding events survive in order ---------
 
-test("poison: mid-file corrupt line is skipped + marked; second read skips via marker without re-parsing", () => {
+test("poison: mid-file corrupt line is skipped + marked; second read skips via marker without re-parsing", async () => {
 	const dir = tmpDir("pi-crew-poison-");
 	try {
 		const eventsPath = path.join(dir, "events.jsonl");
@@ -139,13 +140,13 @@ test("poison: mid-file corrupt line is skipped + marked; second read skips via m
 		assert.equal(lastLinePoison.integrity.tornTail, false, "terminated corrupt line is NOT torn");
 		assert.equal(lastLinePoison.integrity.parseFailures, 1, "terminated corrupt line IS poison");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
 // --- AC 3: the two read paths classify the same corrupt file identically ----
 
-test("unified: readEvents and readEventsCursor agree on events AND torn/poison classification", () => {
+test("unified: readEvents and readEventsCursor agree on events AND torn/poison classification", async () => {
 	const dir = tmpDir("pi-crew-unified-");
 	try {
 		const eventsPath = path.join(dir, "events.jsonl");
@@ -182,13 +183,13 @@ test("unified: readEvents and readEventsCursor agree on events AND torn/poison c
 		assert.equal(bytePath.poisonSkipped, 1);
 		assert.equal(bytePath.parseFailures, 0);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
 // --- AC 4: marker reset policy (rotate/truncate makes markers stale) --------
 
-test("marker reset: file shorter than the marker's lineIndex → marker ignored and pruned on next write", () => {
+test("marker reset: file shorter than the marker's lineIndex → marker ignored and pruned on next write", async () => {
 	const dir = tmpDir("pi-crew-marker-reset-");
 	try {
 		const eventsPath = path.join(dir, "events.jsonl");
@@ -227,13 +228,13 @@ test("marker reset: file shorter than the marker's lineIndex → marker ignored 
 		assert.equal(pruned.length, 1, "stale entry pruned on write");
 		assert.equal(pruned[0]?.lineIndex, 2, "only the NEW poison line is marked");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
 // --- AC 5: cap 1000 — boundary respected, exceeded files are quarantined ----
 
-test("cap: 1000 markers tolerated; the 1001st poisons the file into quarantine (safe empty, no throw)", () => {
+test("cap: 1000 markers tolerated; the 1001st poisons the file into quarantine (safe empty, no throw)", async () => {
 	const dir = tmpDir("pi-crew-poison-cap-");
 	try {
 		const eventsPath = path.join(dir, "events.jsonl");
@@ -275,13 +276,13 @@ test("cap: 1000 markers tolerated; the 1001st poisons the file into quarantine (
 		assert.deepEqual(seqs(fresh.events), [1]);
 		assert.equal(fresh.integrity.poisonSkipped, 0);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
 // --- AC 6: rotation tail-drain (byte cursor crossing a rotation) -------------
 
-test("rotation drain: stale byte offset drains archive tail then re-reads live head — no skip, no dup", () => {
+test("rotation drain: stale byte offset drains archive tail then re-reads live head — no skip, no dup", async () => {
 	const dir = tmpDir("pi-crew-rotation-drain-");
 	try {
 		const eventsPath = path.join(dir, "events.jsonl");
@@ -318,13 +319,13 @@ test("rotation drain: stale byte offset drains archive tail then re-reads live h
 		const forwardRead = readEventsCursor(eventsPath, { fromByteOffset: 0, sinceSeq: 11, generation: 5 });
 		assert.deepEqual(seqs(forwardRead.events), [12]);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
 // --- AC 7: regression — clean files behave exactly like the old parser -------
 
-test("regression: clean file (shuffled seqs, blanks, multi-byte UTF-8) is bit-for-bit the legacy parse", () => {
+test("regression: clean file (shuffled seqs, blanks, multi-byte UTF-8) is bit-for-bit the legacy parse", async () => {
 	const dir = tmpDir("pi-crew-clean-regression-");
 	try {
 		const eventsPath = path.join(dir, "events.jsonl");
@@ -376,7 +377,7 @@ test("regression: clean file (shuffled seqs, blanks, multi-byte UTF-8) is bit-fo
 		assert.equal(tornCursor.tornTail, true);
 		assert.equal(fs.existsSync(poisonMarkerPath(eventsPath)), false);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
@@ -384,7 +385,7 @@ test("regression: clean file (shuffled seqs, blanks, multi-byte UTF-8) is bit-fo
 // file — the same-path rewrite/rotate+regrow hole the shape-based reset policy
 // cannot see (lineIndex < new lineCount AND byteOffset < new fileSize). -------
 
-test("re-parse guard: marker on a regrown file whose line now parses → event DELIVERED, marker pruned (readEvents + both cursor paths)", () => {
+test("re-parse guard: marker on a regrown file whose line now parses → event DELIVERED, marker pruned (readEvents + both cursor paths)", async () => {
 	const dir = tmpDir("pi-crew-poison-regrow-");
 	try {
 		// Plant the marker on the ORIGINAL file: poison is line #1 (0-based),
@@ -419,11 +420,11 @@ test("re-parse guard: marker on a regrown file whose line now parses → event D
 		assert.equal(again.integrity.poisonSkipped, 0);
 		assert.equal(loadPoisonMarkers(eventsPath).length, 0);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
-test("re-parse guard: readEventsCursor byte-offset path heals the same resurrected marker", () => {
+test("re-parse guard: readEventsCursor byte-offset path heals the same resurrected marker", async () => {
 	const dir = tmpDir("pi-crew-poison-regrow-byte-");
 	try {
 		const eventsPath = path.join(dir, "events.jsonl");
@@ -440,11 +441,11 @@ test("re-parse guard: readEventsCursor byte-offset path heals the same resurrect
 		assert.equal(bytePath.poisonSkipped, 0);
 		assert.equal(loadPoisonMarkers(eventsPath).length, 0, "marker pruned by the byte-offset path read");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
-test("re-parse guard: readEventsCursor cached watermark path heals the same resurrected marker", () => {
+test("re-parse guard: readEventsCursor cached watermark path heals the same resurrected marker", async () => {
 	const dir = tmpDir("pi-crew-poison-regrow-cached-");
 	try {
 		const eventsPath = path.join(dir, "events.jsonl");
@@ -462,13 +463,13 @@ test("re-parse guard: readEventsCursor cached watermark path heals the same resu
 		assert.equal(cached.poisonSkipped, 0);
 		assert.equal(loadPoisonMarkers(eventsPath).length, 0, "marker pruned by the cached-path rebuild");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
 // --- AC 9 (review fix): rotation moves the sidecar alongside its archive -----
 
-test("rotate: sidecar follows the archive; the fresh live file starts with NO marker", () => {
+test("rotate: sidecar follows the archive; the fresh live file starts with NO marker", async () => {
 	const dir = tmpDir("pi-crew-poison-rotate-");
 	try {
 		const eventsPath = path.join(dir, "events.jsonl");
@@ -500,14 +501,14 @@ test("rotate: sidecar follows the archive; the fresh live file starts with NO ma
 		assert.deepEqual(seqs(regrown.events), [1, 3, 5]);
 		assert.ok(!fs.existsSync(sidecar), "no live sidecar reappears for the fresh file");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });
 
 // --- AC 10 (review fix): compaction deletes the sidecar (new content, same
 // path — every old marker is meaningless and must not resurrect on regrow). ---
 
-test("compact: sidecar deleted; regrown content past the old offsets is never skipped", () => {
+test("compact: sidecar deleted; regrown content past the old offsets is never skipped", async () => {
 	const dir = tmpDir("pi-crew-poison-compact-");
 	try {
 		const eventsPath = path.join(dir, "events.jsonl");
@@ -526,6 +527,6 @@ test("compact: sidecar deleted; regrown content past the old offsets is never sk
 		assert.equal(regrown.integrity.poisonSkipped, 0);
 		assert.equal(loadPoisonMarkers(eventsPath).length, 0);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "events.jsonl"));
 	}
 });

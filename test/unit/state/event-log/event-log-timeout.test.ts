@@ -4,9 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { withEventLogLockSync } from "../../../../src/state/event-log/event-log.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 describe("event-log lock timeout is capped", () => {
-	it("should throw quickly when lock is contended (injectable timeout)", () => {
+	it("should throw quickly when lock is contended (injectable timeout)", async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "evlog-timeout-"));
 		const eventsPath = path.join(tmpDir, "events.jsonl");
 		const lockDir = `${eventsPath}.mkdirlock`;
@@ -36,13 +37,13 @@ describe("event-log lock timeout is capped", () => {
 
 		// Cleanup
 		try {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			await cleanupStateRoot(tmpDir, eventsPath);
 		} catch {
 			/* ignore */
 		}
 	});
 
-	it("should succeed when no lock contention", () => {
+	it("should succeed when no lock contention", async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "evlog-nocontention-"));
 		const eventsPath = path.join(tmpDir, "events.jsonl");
 
@@ -51,7 +52,7 @@ describe("event-log lock timeout is capped", () => {
 
 		// Cleanup
 		try {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			await cleanupStateRoot(tmpDir, eventsPath);
 		} catch {
 			/* ignore */
 		}

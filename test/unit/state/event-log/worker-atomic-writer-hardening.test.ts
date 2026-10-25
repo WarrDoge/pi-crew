@@ -27,6 +27,7 @@ import {
 	WorkerRequestBookkeeper,
 	type WorkerWriterReply,
 } from "../../../../src/state/event-log/worker-atomic-writer.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Keep worker ref'd for the WHOLE suite so the test runner doesn't exit before
 // promises resolve (same pattern as worker-atomic-writer.test.ts).
@@ -218,7 +219,7 @@ test("(e) temp-cleanup: terminate removes the cached temp dir; next write recrea
 		assert.equal(fs.readFileSync(file, "utf-8"), "second\n", "respawned worker still writes");
 	} finally {
 		terminateWorkerAtomicWriter();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 		if (saved === undefined) delete process.env.PI_CREW_WORKER_ATOMIC_WRITER;
 		else process.env.PI_CREW_WORKER_ATOMIC_WRITER = saved;
 	}
@@ -247,7 +248,7 @@ test("P3 write: with worker writer ON, atomicWriteFileAsync rejects a symlinked 
 		assert.equal(fs.readFileSync(realTarget, "utf-8"), "untouched\n", "no write may reach the real target");
 	} finally {
 		terminateWorkerAtomicWriter();
-		fs.rmSync(sandbox, { recursive: true, force: true });
+		await removeDirWithRetry(sandbox);
 		if (saved === undefined) delete process.env.PI_CREW_WORKER_ATOMIC_WRITER;
 		else process.env.PI_CREW_WORKER_ATOMIC_WRITER = saved;
 	}
@@ -273,7 +274,7 @@ test("P3 write: with worker writer ON, symlinked DIR into a foreign-uid tree is 
 		assert.ok(!fs.existsSync("/root/stolen.txt"), "must not write through the symlinked dir");
 	} finally {
 		terminateWorkerAtomicWriter();
-		fs.rmSync(sandbox, { recursive: true, force: true });
+		await removeDirWithRetry(sandbox);
 		if (saved === undefined) delete process.env.PI_CREW_WORKER_ATOMIC_WRITER;
 		else process.env.PI_CREW_WORKER_ATOMIC_WRITER = saved;
 	}
@@ -293,7 +294,7 @@ test("P3 append: appendFileViaWorker rejects a symlinked target main-side BEFORE
 		assert.ok(!fs.existsSync(realTarget), "no append may reach the real target through the worker");
 	} finally {
 		terminateWorkerAtomicWriter();
-		fs.rmSync(sandbox, { recursive: true, force: true });
+		await removeDirWithRetry(sandbox);
 	}
 });
 
@@ -320,7 +321,7 @@ test("P3 mode: atomicWriteFileViaWorker applies the requested mode (0o644)", asy
 		);
 	} finally {
 		terminateWorkerAtomicWriter();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 		if (saved === undefined) delete process.env.PI_CREW_WORKER_ATOMIC_WRITER;
 		else process.env.PI_CREW_WORKER_ATOMIC_WRITER = saved;
 	}
@@ -336,7 +337,7 @@ test("P3 mode: atomicWriteFileAsync forwards { mode } through the worker path", 
 		assert.equal(fs.statSync(file).mode & 0o777, process.platform === "win32" ? 0o666 : 0o644 & ~process.umask());
 	} finally {
 		terminateWorkerAtomicWriter();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 		if (saved === undefined) delete process.env.PI_CREW_WORKER_ATOMIC_WRITER;
 		else process.env.PI_CREW_WORKER_ATOMIC_WRITER = saved;
 	}
@@ -437,6 +438,6 @@ test("F3 worker-side: appending through a symlinked target is refused INSIDE the
 		assert.equal(fs.readFileSync(path.join(dir, "normal.jsonl"), "utf-8"), '{"ok":1}\n');
 	} finally {
 		await w.terminate();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });

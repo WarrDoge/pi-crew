@@ -23,6 +23,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import { Worker } from "node:worker_threads";
 import { rotateEventLog, rotateEventLogUnlocked } from "../../../../src/state/event-log/event-log-rotation.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tmpDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-st8-"));
@@ -76,7 +77,7 @@ function collectAllSeqs(dir: string, liveName: string): Set<number> {
 }
 
 describe("ST-8: rotation under concurrent append (no event lost)", () => {
-	it("in-flight writer fd lands in the archive, not orphaned", () => {
+	it("in-flight writer fd lands in the archive, not orphaned", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -117,11 +118,11 @@ describe("ST-8: rotation under concurrent append (no event lost)", () => {
 			const archiveContent = fs.readFileSync(path.join(dir, archives[0]), "utf-8").split("\n").filter(Boolean);
 			assert.equal(archiveContent.length, 11, "archive must have 10 pre-rotation + 1 in-flight append");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
-	it("multiple sequential appends + rotations lose no events", () => {
+	it("multiple sequential appends + rotations lose no events", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -153,11 +154,11 @@ describe("ST-8: rotation under concurrent append (no event lost)", () => {
 				assert.ok(allSeqs.has(s), `event seq ${s} was lost`);
 			}
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
-	it("live log is a fresh empty file after rotation (new inode on POSIX)", () => {
+	it("live log is a fresh empty file after rotation (new inode on POSIX)", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -173,11 +174,11 @@ describe("ST-8: rotation under concurrent append (no event lost)", () => {
 			}
 			assert.equal(statAfter.size, 0, "live log must be empty after rotation");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
-	it("archive preserves ALL pre-rotation content (not a copy-time snapshot)", () => {
+	it("archive preserves ALL pre-rotation content (not a copy-time snapshot)", async () => {
 		// The old copy+truncate took a snapshot at copy time; appends between
 		// copy and truncate were excluded from the archive. With rename, the
 		// archive IS the pre-rotation inode, so it carries every byte.
@@ -204,7 +205,7 @@ describe("ST-8: rotation under concurrent append (no event lost)", () => {
 			assert.equal(archiveSeqs[0], 1);
 			assert.equal(archiveSeqs[20], 21);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 });
@@ -286,7 +287,7 @@ describe("ST-8: rotation under true concurrent append (worker threads)", () => {
 				assert.ok(allSeqs.has(s), `event seq ${s} was lost`);
 			}
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 });

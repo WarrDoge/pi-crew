@@ -15,6 +15,7 @@ import {
 	isWorkerAtomicWriterEnabled,
 	terminateWorkerAtomicWriter,
 } from "../../../../src/state/event-log/worker-atomic-writer.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Keep worker ref'd for the WHOLE suite so the test runner doesn't exit before
 // promises resolve. Production code keeps worker unref'd.
@@ -49,7 +50,7 @@ test("atomicWriteFileViaWorker: writes file content", async () => {
 		assert.equal(fs.readFileSync(file, "utf-8"), "hello world\n");
 	} finally {
 		terminateWorkerAtomicWriter();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -61,7 +62,7 @@ test("atomicWriteFileViaWorker: overwrites existing file", async () => {
 		assert.equal(fs.readFileSync(file, "utf-8"), "second\n");
 	} finally {
 		terminateWorkerAtomicWriter();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -73,7 +74,7 @@ test("atomicWriteFileViaWorker: creates nested dirs", async () => {
 		assert.equal(fs.readFileSync(nested, "utf-8"), "nested content\n");
 	} finally {
 		terminateWorkerAtomicWriter();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -87,7 +88,7 @@ test("atomicWriteFileViaWorker: handles parallel writes to DIFFERENT files", asy
 		}
 	} finally {
 		terminateWorkerAtomicWriter();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -99,7 +100,7 @@ test("appendFileViaWorker: appends to existing file", async () => {
 		assert.equal(fs.readFileSync(file, "utf-8"), "first\nsecond\n");
 	} finally {
 		terminateWorkerAtomicWriter();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -110,7 +111,7 @@ test("appendFileViaWorker: creates file if missing", async () => {
 		assert.equal(fs.readFileSync(file, "utf-8"), "appended\n");
 	} finally {
 		terminateWorkerAtomicWriter();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -123,7 +124,7 @@ test("terminateWorkerAtomicWriter: subsequent write spawns fresh worker", async 
 		assert.equal(fs.readFileSync(file, "utf-8"), "after terminate\n");
 	} finally {
 		terminateWorkerAtomicWriter();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -156,7 +157,7 @@ test("atomicWriteFileViaWorker: accepts tmpdir reached via symlink ancestor (mac
 		if (savedTmpdir === undefined) delete process.env.TMPDIR;
 		else process.env.TMPDIR = savedTmpdir;
 		terminateWorkerAtomicWriter();
-		fs.rmSync(sandbox, { recursive: true, force: true });
+		await removeDirWithRetry(sandbox);
 	}
 });
 
@@ -183,7 +184,7 @@ test("atomicWriteFileViaWorker: rejects symlink escaping tmpdir (symlink attack)
 		if (savedTmpdir === undefined) delete process.env.TMPDIR;
 		else process.env.TMPDIR = savedTmpdir;
 		terminateWorkerAtomicWriter();
-		fs.rmSync(sandbox, { recursive: true, force: true });
-		fs.rmSync(insideTmp, { recursive: true, force: true });
+		await removeDirWithRetry(sandbox);
+		await removeDirWithRetry(insideTmp);
 	}
 });

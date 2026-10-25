@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * US-011 verify-close (2026-09-22) — AC-3 guard.
@@ -50,7 +51,7 @@ fs.rmSync(cwd, { recursive: true, force: true });
 process.stdout.write(JSON.stringify({ delta, ok: Boolean(result), size: 0 }));
 `;
 
-test("US-011: a 50k-event (11 MB) log compacts with a bounded heap footprint", () => {
+test("US-011: a 50k-event (11 MB) log compacts with a bounded heap footprint", async () => {
 	const moduleUrl = new URL("../../../../src/state/event-log/event-log-rotation.ts", import.meta.url).href;
 	const tmpScript = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "us011-src-")), "child.mjs");
 	fs.writeFileSync(tmpScript, CHILD_SRC);
@@ -67,6 +68,6 @@ test("US-011: a 50k-event (11 MB) log compacts with a bounded heap footprint", (
 			`heap grew ${deltaMb.toFixed(1)}MB during compaction of an 11MB log — the streaming reader must stay bounded (whole-file read measured ~22MB)`,
 		);
 	} finally {
-		fs.rmSync(path.dirname(tmpScript), { recursive: true, force: true });
+		await removeDirWithRetry(path.dirname(tmpScript));
 	}
 });

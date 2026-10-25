@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { compactPreparedEventLog, prepareCompaction } from "../../../../src/state/event-log/event-log-rotation.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 /**
  * US-001 (2026-09-22) — AC-1: the read→write race that the lock-scope reduction
@@ -19,7 +20,7 @@ import { compactPreparedEventLog, prepareCompaction } from "../../../../src/stat
  * events vanish → RED.
  */
 
-test("US-001: events appended between prepare and the locked write survive", () => {
+test("US-001: events appended between prepare and the locked write survive", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "us001-race-"));
 	const eventsPath = path.join(cwd, "events.jsonl");
 	try {
@@ -73,11 +74,11 @@ test("US-001: events appended between prepare and the locked write survive", () 
 			assert.doesNotThrow(() => JSON.parse(line), `valid JSONL: ${line.slice(0, 80)}`);
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd, eventsPath);
 	}
 });
 
-test("US-001: no tail appended → no spurious duplication", () => {
+test("US-001: no tail appended → no spurious duplication", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "us001-race-"));
 	const eventsPath = path.join(cwd, "events.jsonl");
 	try {
@@ -100,6 +101,6 @@ test("US-001: no tail appended → no spurious duplication", () => {
 		// Kept window ~20; without a tail, no duplicates are added.
 		assert.ok(after <= 25, `no spurious duplication expected, got ${after} lines`);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd, eventsPath);
 	}
 });

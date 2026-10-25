@@ -17,6 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { appendEvent, appendEventAsync, appendEventBuffered, flushEventLogBuffer } from "../../../../src/state/event-log/event-log.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function makeEvent(taskId: string) {
 	return { type: "task.progress" as const, runId: "b7-test", taskId, data: {} };
@@ -31,8 +32,8 @@ describe("B7: cross-path seq uniqueness", () => {
 		eventsPath = path.join(tmpDir, "events.jsonl");
 	});
 
-	afterEach(() => {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+	afterEach(async () => {
+		await cleanupStateRoot(tmpDir, eventsPath);
 	});
 
 	it("seq numbers are unique across concurrent sync/async/buffered appends", async () => {

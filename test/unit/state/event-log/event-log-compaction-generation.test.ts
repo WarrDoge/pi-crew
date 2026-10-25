@@ -29,6 +29,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import { readEventsCursor } from "../../../../src/state/event-log/event-log.ts";
 import { compactEventLog, currentGeneration, generationPath } from "../../../../src/state/event-log/event-log-rotation.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tmpDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-compact-gen-"));
@@ -58,7 +59,7 @@ function seqsOf(events: readonly { metadata?: { seq?: number } }[]): number[] {
 }
 
 describe("EP4 compaction generation bump", () => {
-	it("bumps the .gen sidecar on every compaction that truncates events", () => {
+	it("bumps the .gen sidecar on every compaction that truncates events", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -77,11 +78,11 @@ describe("EP4 compaction generation bump", () => {
 			assert.ok(second, "second compaction ran (5 events > 2)");
 			assert.equal(currentGeneration(filePath), 2, "second compaction bumps again");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
-	it("stale generation echo re-reads from 0 — kept-window head is never silently skipped", () => {
+	it("stale generation echo re-reads from 0 — kept-window head is never silently skipped", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -112,11 +113,11 @@ describe("EP4 compaction generation bump", () => {
 			assert.deepEqual(seqsOf(stale.events), [4, 5], "kept-window head (seq 4) is NOT skipped — full fresh re-read");
 			assert.equal(stale.nextByteOffset, fs.statSync(filePath).size, "cursor advanced to end of the rewritten file");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
-	it("bumps once per rewrite — the next incremental read does not reset again", () => {
+	it("bumps once per rewrite — the next incremental read does not reset again", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -140,11 +141,11 @@ describe("EP4 compaction generation bump", () => {
 			assert.equal(next.generation, 1, "generation unchanged when no rewrite");
 			assert.deepEqual(seqsOf(next.events), [6, 7], "delta only — the compaction bump is not re-triggered");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
-	it("no-op compaction leaves the generation stable (regression: no-compaction path)", () => {
+	it("no-op compaction leaves the generation stable (regression: no-compaction path)", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -166,7 +167,7 @@ describe("EP4 compaction generation bump", () => {
 			assert.equal(read.generation, 0, "plain appends keep the generation stable");
 			assert.equal(read.events.length, 8);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 });

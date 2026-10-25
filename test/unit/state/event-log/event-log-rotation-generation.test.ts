@@ -19,6 +19,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import { readEventsCursor } from "../../../../src/state/event-log/event-log.ts";
 import { currentGeneration, generationPath, rotateEventLog } from "../../../../src/state/event-log/event-log-rotation.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tmpDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-gen-"));
@@ -43,7 +44,7 @@ function appendEvents(filePath: string, fromSeq: number, count: number): void {
 }
 
 describe("R-03 generation sidecar", () => {
-	it("currentGeneration returns 0 when no .gen sidecar exists (backward-compat)", () => {
+	it("currentGeneration returns 0 when no .gen sidecar exists (backward-compat)", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -51,11 +52,11 @@ describe("R-03 generation sidecar", () => {
 			assert.equal(fs.existsSync(generationPath(filePath)), false, "no sidecar before any rotation");
 			assert.equal(currentGeneration(filePath), 0, "absent sidecar is treated as generation 0");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
-	it("rotateEventLog bumps the generation sidecar monotonically", () => {
+	it("rotateEventLog bumps the generation sidecar monotonically", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -71,13 +72,13 @@ describe("R-03 generation sidecar", () => {
 			assert.equal(rotateEventLog(filePath), true);
 			assert.equal(currentGeneration(filePath), 2);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 });
 
 describe("R-03 readEventsCursor generation-aware reset", () => {
-	it("detects rotation via generation and re-reads from offset 0 (no missed events)", () => {
+	it("detects rotation via generation and re-reads from offset 0 (no missed events)", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -122,11 +123,11 @@ describe("R-03 readEventsCursor generation-aware reset", () => {
 			assert.equal(recovered.generation, 1, "returned generation reflects the post-rotation file");
 			assert.equal(recovered.nextByteOffset, fs.statSync(filePath).size, "cursor advanced to end of new file");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
-	it("does not reset when generation is unchanged (normal incremental read)", () => {
+	it("does not reset when generation is unchanged (normal incremental read)", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -144,11 +145,11 @@ describe("R-03 readEventsCursor generation-aware reset", () => {
 			assert.equal(next.generation, 0, "generation unchanged when no rotation");
 			assert.ok((next.nextByteOffset ?? 0) > (first.nextByteOffset ?? 0), "cursor advanced past only the new bytes (no reset)");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 
-	it("stale generation with empty post-rotation file resets and returns nothing cleanly", () => {
+	it("stale generation with empty post-rotation file resets and returns nothing cleanly", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		try {
@@ -167,7 +168,7 @@ describe("R-03 readEventsCursor generation-aware reset", () => {
 			assert.equal(after.generation, 1, "generation bumped despite empty file");
 			assert.equal(after.nextByteOffset, 0, "cursor reset to 0 for the empty file");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir, filePath);
 		}
 	});
 });

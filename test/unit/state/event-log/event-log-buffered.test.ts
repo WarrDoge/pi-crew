@@ -12,6 +12,7 @@ import {
 	flushEventLogBuffer,
 	readEvents,
 } from "../../../../src/state/event-log/event-log.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 test("appendEventBuffered batches into single lock acquire and preserves seq order (2.2)", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-event-buffer-"));
@@ -45,7 +46,7 @@ test("appendEventBuffered batches into single lock acquire and preserves seq ord
 		assert.equal(events.length, 10);
 	} finally {
 		clearInterval(keepAlive);
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -60,7 +61,7 @@ test("flushEventLogBuffer flushes pending events synchronously (2.2)", async () 
 		await flushEventLogBuffer();
 		assert.equal(readEvents(eventsPath).length, 2, "both events written after explicit flush");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -93,7 +94,7 @@ test("appendEvent and appendEventBuffered share the same seq sequence (2.2)", as
 		assert.equal(diskEvents.length, 3, "3 events on disk");
 	} finally {
 		clearInterval(keepAlive);
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -117,7 +118,7 @@ test("buffered append leaves .seq sidecar at the flushed last seq (2026-08-24 pe
 		const sidecar = fs.readFileSync(`${eventsPath}.seq`, "utf-8").trim();
 		assert.equal(sidecar, String(lastSeq), `.seq sidecar must equal flushed last seq ${lastSeq}, got ${sidecar}`);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -146,7 +147,7 @@ test("buffered append with explicit seq beyond the reservation still advances th
 		const sidecar = fs.readFileSync(`${eventsPath}.seq`, "utf-8").trim();
 		assert.equal(sidecar, "5000", `.seq sidecar must advance to explicit seq 5000, got ${sidecar}`);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -253,7 +254,7 @@ test("T2: buffered flush of an all-non-terminal batch fsyncs the events file 0 t
 	} finally {
 		clearInterval(keepAlive);
 		spy.restore();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -290,7 +291,7 @@ test("T2: buffered flush of a non-terminal batch skips the fsync on the events f
 	} finally {
 		clearInterval(keepAlive);
 		spy.restore();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -313,6 +314,6 @@ test("T2: a buffered batch that contains a terminal event DOES fsync the events 
 		assert.ok(spy.scopeFsyncs >= 1, `mixed batch with a terminal event must fsync the events file (got ${spy.scopeFsyncs})`);
 	} finally {
 		spy.restore();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });

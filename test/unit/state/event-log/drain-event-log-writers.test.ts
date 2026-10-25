@@ -39,7 +39,7 @@ test("d1: drain settles the write chain — bare rmSync right after drain never 
 		await new Promise((resolve) => setTimeout(resolve, 30));
 		assert.equal(fs.existsSync(dir), false, "no dir resurrection after drain + rmSync");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -70,7 +70,7 @@ test("d3: rejected tail — drain still resolves (allSettled contract)", async (
 		// rejection was in flight — the allSettled contract, not a no-op).
 		await assert.rejects(append);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, path.join(dir, "blocker", "run-1", "events.jsonl"));
 	}
 });
 
@@ -87,6 +87,6 @@ test("d4: cleanupStateRoot removes the dir right after a fire-and-forget append 
 		await new Promise((resolve) => setTimeout(resolve, 30));
 		assert.equal(fs.existsSync(dir), false, "no dir resurrection after cleanupStateRoot");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });

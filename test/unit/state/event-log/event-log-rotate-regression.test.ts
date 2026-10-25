@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { compactEventLog, rotateEventLog } from "../../../../src/state/event-log/event-log-rotation.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tmpDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-rotate-"));
@@ -26,7 +27,7 @@ function writeEvents(filePath: string, count: number, baseTime = "2025-01-01T00:
 }
 
 describe("rotateEventLog (Round 12 C1 regression)", () => {
-	it("preserves ALL events in the archive (not empty)", () => {
+	it("preserves ALL events in the archive (not empty)", async () => {
 		// BUG C1: previous code did atomicWriteFile("") THEN rename, so the
 		// archive received an EMPTY file and all events were destroyed.
 		const dir = tmpDir();
@@ -45,10 +46,10 @@ describe("rotateEventLog (Round 12 C1 regression)", () => {
 		const archiveContent = fs.readFileSync(archivePath, "utf-8").split("\n").filter(Boolean);
 		assert.equal(archiveContent.length, 100, `archive must preserve all events, got ${archiveContent.length}`);
 
-		fs.rmSync(dir, { recursive: true });
+		await cleanupStateRoot(dir, filePath);
 	});
 
-	it("creates an empty events.jsonl after rotation", () => {
+	it("creates an empty events.jsonl after rotation", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 		writeEvents(filePath, 50);
@@ -60,14 +61,14 @@ describe("rotateEventLog (Round 12 C1 regression)", () => {
 		const content = fs.readFileSync(filePath, "utf-8");
 		assert.equal(content, "", "eventsPath must be empty after rotation");
 
-		fs.rmSync(dir, { recursive: true });
+		await cleanupStateRoot(dir, filePath);
 	});
 
 	it("returns false for non-existent file", () => {
 		assert.equal(rotateEventLog("/nonexistent/events.jsonl"), false);
 	});
 
-	it("can rotate multiple times (each archive is non-empty)", () => {
+	it("can rotate multiple times (each archive is non-empty)", async () => {
 		const dir = tmpDir();
 		const filePath = path.join(dir, "events.jsonl");
 
@@ -86,12 +87,12 @@ describe("rotateEventLog (Round 12 C1 regression)", () => {
 			assert.ok(content.length > 0, `archive ${archive} should not be empty`);
 		}
 
-		fs.rmSync(dir, { recursive: true });
+		await cleanupStateRoot(dir, filePath);
 	});
 });
 
 describe("compactEventLog recovery (Round 12 C2 regression)", () => {
-	it("does not destroy the compacted log — recovery preserves all kept events", () => {
+	it("does not destroy the compacted log — recovery preserves all kept events", async () => {
 		// This test verifies the happy path is intact after the C2 fix.
 		// The C2 bug (atomicWriteFile-per-event in the recovery loop) only
 		// triggered when afterWrite < kept.length (a rare race). We verify
@@ -112,6 +113,6 @@ describe("compactEventLog recovery (Round 12 C2 regression)", () => {
 		assert.equal(seqs[0], 181);
 		assert.equal(seqs[seqs.length - 1], 200);
 
-		fs.rmSync(dir, { recursive: true });
+		await cleanupStateRoot(dir, filePath);
 	});
 });

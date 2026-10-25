@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { appendEvent } from "../../../../src/state/event-log/event-log.ts";
 import { compactEventLog } from "../../../../src/state/event-log/event-log-rotation.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 /**
  * US-001 (2026-09-22): lock-scope reduction for event-log compaction.
@@ -42,7 +43,7 @@ function readSeqCount(filePath: string): number {
 		.filter((l) => l.trim().length > 0).length;
 }
 
-test("US-001: compaction still preserves events appended around the window (no loss)", () => {
+test("US-001: compaction still preserves events appended around the window (no loss)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "us001-"));
 	const eventsPath = path.join(cwd, "events.jsonl");
 	try {
@@ -56,11 +57,11 @@ test("US-001: compaction still preserves events appended around the window (no l
 		assert.ok(after > 0, "compaction must not empty the log");
 		assert.ok(after <= before, "compaction must not grow the log");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd, eventsPath);
 	}
 });
 
-test("US-001: repeated compaction on the same path stays correct (synchronous serialization)", () => {
+test("US-001: repeated compaction on the same path stays correct (synchronous serialization)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "us001-"));
 	const eventsPath = path.join(cwd, "events.jsonl");
 	try {
@@ -79,11 +80,11 @@ test("US-001: repeated compaction on the same path stays correct (synchronous se
 		assert.ok(afterSecond > 0, "log must not be emptied by a compaction chain");
 		assert.ok(afterSecond <= afterFirst, "a compaction must not grow the log");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd, eventsPath);
 	}
 });
 
-test("US-001: below-threshold logs are untouched (no-op path preserved)", () => {
+test("US-001: below-threshold logs are untouched (no-op path preserved)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "us001-"));
 	const eventsPath = path.join(cwd, "events.jsonl");
 	try {
@@ -93,6 +94,6 @@ test("US-001: below-threshold logs are untouched (no-op path preserved)", () => 
 		assert.equal(result, undefined, "a small log must not compact");
 		assert.equal(fs.readFileSync(eventsPath, "utf-8"), before, "content unchanged");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd, eventsPath);
 	}
 });

@@ -12,8 +12,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-
 import { applyCompactionAppendGuarded, prepareCompaction } from "../../../../src/state/event-log/event-log-rotation.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function makeEventsPath(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pc-r4n1-"));
@@ -24,7 +24,7 @@ function line(seq: number, message: string): string {
 	return `${JSON.stringify({ type: "task.progress", runId: "r", taskId: "t", message, metadata: { seq } })}\n`;
 }
 
-test("R4-N1: foreign rotation (smaller file) aborts compaction — new appends survive", () => {
+test("R4-N1: foreign rotation (smaller file) aborts compaction — new appends survive", async () => {
 	const eventsPath = makeEventsPath();
 	try {
 		// Build a log big enough that prepareCompaction keeps a tail window.
@@ -50,11 +50,11 @@ test("R4-N1: foreign rotation (smaller file) aborts compaction — new appends s
 		assert.ok(after.includes("new-2010"), "post-rotation appends must survive (live file NOT clobbered)");
 		assert.ok(!after.includes("old-"), "stale pre-rotation events must not be resurrected");
 	} finally {
-		fs.rmSync(path.dirname(eventsPath), { recursive: true, force: true });
+		await cleanupStateRoot(path.dirname(eventsPath), eventsPath);
 	}
 });
 
-test("R4-N1: benign case size === offset (no appends) still compacts normally", () => {
+test("R4-N1: benign case size === offset (no appends) still compacts normally", async () => {
 	const eventsPath = makeEventsPath();
 	try {
 		for (let seq = 1; seq <= 1000; seq++) fs.appendFileSync(eventsPath, line(seq, `old-${seq}`));
@@ -64,6 +64,6 @@ test("R4-N1: benign case size === offset (no appends) still compacts normally", 
 		assert.ok(result, "no foreign rotation → compaction proceeds");
 		assert.ok(fs.statSync(eventsPath).size < prepared.originalSize, "compaction shrank the log");
 	} finally {
-		fs.rmSync(path.dirname(eventsPath), { recursive: true, force: true });
+		await cleanupStateRoot(path.dirname(eventsPath), eventsPath);
 	}
 });

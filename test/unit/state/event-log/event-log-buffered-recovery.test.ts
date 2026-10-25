@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { appendEventBuffered, flushEventLogBuffer, readEvents } from "../../../../src/state/event-log/event-log.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * M2a recovery tests (spec §2.1 / docs/archive/m2-targets-and-framework.md §2.1):
@@ -61,7 +62,7 @@ test("appendEventBuffered overflow (>1000 entries) rejects oldest dropped events
 		assert.ok(events.length >= 500, `disk should have ~500 kept events (got ${events.length})`);
 	} finally {
 		clearInterval(keepAlive);
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -108,10 +109,10 @@ test("appendEventBuffered: caller .catch handler pattern works with rejection (p
 		await new Promise((r) => setTimeout(r, 50));
 
 		assert.ok(caughtError instanceof Error && caughtError.message.includes("overflow"), ".catch must receive the overflow rejection");
-		fs.rmSync(dir2, { recursive: true, force: true });
+		await removeDirWithRetry(dir2);
 	} finally {
 		clearInterval(keepAlive);
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -189,7 +190,7 @@ test("U2: SIGTERM mid-run flushes buffered events — no loss on graceful shutdo
 		assert.equal(events.length, 40, `all 40 buffered events must survive SIGTERM (got ${events.length})`);
 		assert.ok(events.every((e) => e.type === "task.progress" && e.runId === "run-sigterm"));
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
-		fs.rmSync(scriptDir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
+		await removeDirWithRetry(scriptDir);
 	}
 });

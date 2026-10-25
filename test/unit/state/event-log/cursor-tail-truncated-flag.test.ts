@@ -12,15 +12,15 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-
 import { readEventsCursor } from "../../../../src/state/event-log/cursor.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function makeEventsPath(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pc-r9n2c-"));
 	return path.join(dir, "events.jsonl");
 }
 
-test("R9-N2: >4MB log → wide path reports truncated:true; small log does not", () => {
+test("R9-N2: >4MB log → wide path reports truncated:true; small log does not", async () => {
 	const eventsPath = makeEventsPath();
 	try {
 		const chunk = "c".repeat(60 * 1024);
@@ -39,6 +39,6 @@ test("R9-N2: >4MB log → wide path reports truncated:true; small log does not",
 		const small = readEventsCursor(smallPath, { sinceSeq: 0, limit: 10 });
 		assert.notEqual(small.truncated, true, "untruncated read must not set the flag");
 	} finally {
-		fs.rmSync(path.dirname(eventsPath), { recursive: true, force: true });
+		await cleanupStateRoot(path.dirname(eventsPath), eventsPath);
 	}
 });
