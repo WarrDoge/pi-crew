@@ -23,14 +23,20 @@
  *     fails (and the stub emits "not available yet", which we assert is absent).
  *
  * Teardown: resume-cancel retry-rmSync helper (ENOTEMPTY race on macOS CI) +
- * best-effort run cancel so the manager's poll loop does not linger.
+ * best-effort run cancel so the manager's poll loop does not linger + wave
+ * 13-F4 deterministic reap of the detached background-runner process itself
+ * (see the "Wave 13-F4" section below — cancel alone does not reach a wedged
+ * runner, and 13 such orphans were killed by hand on 2026-10-24/25).
  */
+
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import test from "node:test";
+import { after, test } from "node:test";
 import { registerSubagentTools } from "../../../../src/extension/registration/subagent-tools.ts";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
+import { readProcIdentity, reapGroup } from "../../../../src/runtime/process/reap-group.ts";
 import type { SubagentRecord } from "../../../../src/runtime/subagent-manager.ts";
 import { SubagentManager, savePersistedSubagentRecord } from "../../../../src/runtime/subagent-manager.ts";
 import { atomicWriteJson } from "../../../../src/state/atomic-write.ts";
@@ -132,6 +138,235 @@ async function cancelRunBestEffort(cwd: string, runId: string | undefined): Prom
 	}
 }
 
+// ── Wave 13-F4: detached background-runner teardown ──────────────────────
+//
+// The dispatch below spawns a REAL background-runner process through the SUT
+// (`handleTeamTool` → `spawnBackgroundTeamRun`): setsid + detached + unref'd,
+// own process group (pgid === pid), deliberately SIGTERM-swallowing, and — in
+// the test env — with NO parent guard (PI_CREW_PARENT_PID is unset, so the env
+// allowlist forwards nothing and the runner never self-terminates when the
+// test process exits). The test holds NO handle on it. The mock run normally
+// completes in seconds and the runner exits on its own; when it wedges instead
+// (live evidence 2026-10-25: pid 809878, run team_20261025040215, stuck 49 min
+// in futex_wait with its tmpdir already deleted; 13 such orphans killed by
+// hand across 2026-10-24/25, 5 of them born AFTER v0.11.40), nothing in the old
+// teardown could reach it — `cancelRunBestEffort` only mutates run state the
+// runner may never read again. Reap it deterministically from the pids the SUT
+// itself persists (wave-12 SUT-spawned pattern, retrieval-orchestrator.test.ts).
+
+/** One fixture's leak candidates for the after() safety net. */
+interface RunnerLeakScope {
+	/** The fixture tmpdir: manifest root, pgrep scope, and /proc cwd proof. */
+	cwd: string;
+	/** Runner pids resolved during the test — re-checked by the after() net. */
+	pids: Set<number>;
+}
+
+const runnerLeakScopes: RunnerLeakScope[] = [];
+
+function trackRunnerLeakScope(cwd: string): RunnerLeakScope {
+	const existing = runnerLeakScopes.find((scope) => scope.cwd === cwd);
+	if (existing) return existing;
+	const scope: RunnerLeakScope = { cwd, pids: new Set() };
+	runnerLeakScopes.push(scope);
+	return scope;
+}
+
+/** `kill(pid, 0)` liveness — EPERM means alive, just not ours. */
+function runnerPidAlive(pid: number): boolean {
+	if (!Number.isInteger(pid) || pid <= 1) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
+/**
+ * Linux reuse guard: the runner is spawned with `cwd` = the fixture tmpdir and
+ * never chdirs, so a live pid whose /proc/<pid>/cwd points elsewhere is a
+ * recycled stranger, never our runner. `undefined` = unreadable (non-Linux or
+ * gone) — no evidence either way; the reap ladder below still applies.
+ */
+function runnerCwdMatches(pid: number, cwd: string): boolean | undefined {
+	try {
+		const procCwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+		if (procCwd === cwd || procCwd === `${cwd} (deleted)`) return true;
+		return false;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Is `pid` a plausible runner pid (integer, not init, not OURSELVES)? */
+function plausibleRunnerPid(pid: unknown): pid is number {
+	// `pid === process.pid` means the inline async seam (PI_CREW_TEST_ASYNC_INLINE)
+	// executed the "runner" in-process — killing it would kill this test file.
+	return Number.isInteger(pid) && (pid as number) > 1 && (pid as number) !== process.pid;
+}
+
+/**
+ * Resolve the runner pid from the state the SUT persists under the fixture cwd
+ * (createTrackedTempDir seeds `.git` ⇒ project state ⇒ `<cwd>/.crew/state/runs`):
+ *  1. `manifest.async.pid` — written by the SPAWNING process the moment
+ *     `spawnBackgroundTeamRun` returns, so it exists even while the runner is
+ *     still booting jiti (before the runner writes its own marker).
+ *  2. the runner's own startup marker `<stateRoot>/async.pid` ({pid, startedAt}).
+ *  3. any run's manifest in the fixture tree — a fresh tmpdir can only contain
+ *     THIS test's runs, which covers the red-test case where the record poll
+ *     timed out and `runIdToCancel` was never linked.
+ */
+function resolveRunnerPidFromState(cwd: string, runId: string | undefined): number | undefined {
+	if (runId) {
+		try {
+			const pid = loadRunManifestById(cwd, runId)?.manifest.async?.pid;
+			if (plausibleRunnerPid(pid)) return pid;
+		} catch {
+			/* best-effort */
+		}
+	}
+	const runsRoot = path.join(cwd, ".crew", "state", "runs");
+	let runDirs: string[];
+	try {
+		runDirs = runId ? [path.join(runsRoot, runId)] : fs.readdirSync(runsRoot).map((entry) => path.join(runsRoot, entry));
+	} catch {
+		return undefined; // tree gone / never created — nothing to read
+	}
+	for (const runDir of runDirs) {
+		// async.pid first: cheaper and it survives a manifest rewrite race.
+		for (const file of ["async.pid", "manifest.json"]) {
+			try {
+				const parsed = JSON.parse(fs.readFileSync(path.join(runDir, file), "utf-8")) as {
+					pid?: unknown;
+					async?: { pid?: unknown };
+				};
+				const pid = file === "async.pid" ? parsed.pid : parsed.async?.pid;
+				if (plausibleRunnerPid(pid)) return pid;
+			} catch {
+				/* best-effort */
+			}
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Last resort when state yields no pid: `pgrep -f` scoped to the fixture's
+ * unique tmpdir name (the runner command line carries `--cwd <tmpdir>`, so the
+ * mkdtemp suffix is collision-proof). Evidence-first: every match is logged
+ * before it is signalled and still has to pass the /proc cwd proof (where
+ * readable). Quiet when nothing matches (pgrep exits 1).
+ */
+function pkillScopedByCwdBestEffort(cwd: string): void {
+	if (process.platform === "win32") return; // no pgrep there
+	const scope = path.basename(cwd);
+	let stdout: string;
+	try {
+		stdout = execFileSync("pgrep", ["-f", scope], { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] });
+	} catch {
+		return; // no match (or pgrep missing) — exactly what we want
+	}
+	const pids = stdout
+		.split("\n")
+		.map((line) => Number(line.trim()))
+		.filter((pid) => Number.isInteger(pid) && pid > 1 && pid !== process.pid);
+	if (pids.length === 0) return;
+	console.warn(`[subagent-steer-live] teardown fallback: pgrep -f ${scope} matched [${pids.join(", ")}] — killing`);
+	for (const pid of pids) {
+		if (runnerCwdMatches(pid, cwd) === false) {
+			console.warn(`[subagent-steer-live] teardown fallback: pid ${pid} cwd mismatch — skipping (pid reuse suspected)`);
+			continue;
+		}
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {
+			/* already gone */
+		}
+	}
+}
+
+/**
+ * Kill the detached background-runner for one dispatch, from state-recorded
+ * pids (wave-12 SUT-spawned pattern): group reap via `reapGroup` when the pid
+ * provably leads its own group (`pgid === pid`, Linux — the setsid spawn
+ * guarantees it), pid-only SIGKILL otherwise. NEVER throws: it runs in
+ * `finally`, where a throw would mask the failure under test.
+ */
+async function reapBackgroundRunnerBestEffort(scope: RunnerLeakScope, runId: string | undefined): Promise<void> {
+	try {
+		const pid = resolveRunnerPidFromState(scope.cwd, runId);
+		if (pid !== undefined) scope.pids.add(pid);
+		if (pid !== undefined && runnerPidAlive(pid)) {
+			const cwdOk = runnerCwdMatches(pid, scope.cwd);
+			if (cwdOk === false) {
+				console.warn(
+					`[subagent-steer-live] teardown: runner pid ${pid} alive but its cwd is not ${scope.cwd} — pid reuse suspected, NOT killing`,
+				);
+				return;
+			}
+			if (process.platform === "linux") {
+				const identity = readProcIdentity(pid);
+				if (identity?.pgid === pid) {
+					const result = reapGroup(pid, pid, {
+						expected: identity,
+						gracefulMs: 250,
+						capMs: 2_000,
+						name: `steer-live-runner:${pid}`,
+					});
+					if (result.outcome !== "refused") {
+						// keep-alive: the escalation's poll timers are unref'd on purpose
+						const keepAlive = setInterval(() => undefined, 25);
+						try {
+							await result.pending;
+						} finally {
+							clearInterval(keepAlive);
+						}
+						if (!runnerPidAlive(pid)) return;
+					}
+				}
+			}
+			try {
+				process.kill(pid, "SIGKILL");
+			} catch {
+				/* already gone */
+			}
+			const deadline = Date.now() + 1_000;
+			while (runnerPidAlive(pid) && Date.now() < deadline) {
+				await new Promise((resolve) => setTimeout(resolve, 25));
+			}
+			if (runnerPidAlive(pid)) {
+				console.warn(`[subagent-steer-live] teardown: runner pid ${pid} still alive after SIGKILL — leaving it to the OS`);
+			}
+			return;
+		}
+		// No live pid from state. Second chance for pids remembered from an
+		// earlier pass (after() runs once the tmp tree is already deleted), then
+		// the pgrep-scoped fallback.
+		for (const remembered of scope.pids) {
+			if (!runnerPidAlive(remembered) || runnerCwdMatches(remembered, scope.cwd) === false) continue;
+			try {
+				process.kill(remembered, "SIGKILL");
+			} catch {
+				/* already gone */
+			}
+		}
+		pkillScopedByCwdBestEffort(scope.cwd);
+	} catch (error) {
+		console.warn(`[subagent-steer-live] teardown: background-runner reap failed: ${String(error)}`);
+	}
+}
+
+// Second net (wave-12 rule: finally AND after()): the finally above runs even
+// on assertion throw, and this hook re-checks every scope after the whole
+// file. By then the tmp trees are deleted, so this pass leans on remembered
+// pids and the pgrep scope — exactly the paths a failed finally leaves open.
+after(async () => {
+	for (const scope of runnerLeakScopes) {
+		await reapBackgroundRunnerBestEffort(scope, undefined);
+	}
+});
+
 // ── Live one-shot steer ───────────────────────────────────────────────────
 
 test("dispatch one-shot → identity link → steer resolves → steering file appended", async () => {
@@ -150,6 +385,7 @@ test("dispatch one-shot → identity link → steer resolves → steering file a
 	delete process.env.PI_TEAMS_ROLE;
 
 	const cwd = createTrackedTempDir("pi-crew-steer-live-");
+	const runnerScope = trackRunnerLeakScope(cwd);
 	const manager = new SubagentManager();
 	let fake: ReturnType<typeof createFakePi> | undefined;
 	let runIdToCancel: string | undefined;
@@ -244,6 +480,12 @@ test("dispatch one-shot → identity link → steer resolves → steering file a
 		assert.equal(typeof entry.ts, "string");
 	} finally {
 		await cancelRunBestEffort(cwd, runIdToCancel);
+		// Wave 13-F4: kill the detached background-runner itself BEFORE the tree
+		// is removed (pid resolution reads manifest.json/async.pid under cwd, and
+		// a live runner keeps writing into the tree the rmSync below deletes).
+		// Cancel alone is NOT enough — the runner may be wedged past the point
+		// where it reads run state (see the module notes above).
+		await reapBackgroundRunnerBestEffort(runnerScope, runIdToCancel);
 		void manager.abortAll();
 		fake?.api.events.emit("session_shutdown", {});
 		// Drain in-flight background-agent I/O before deletion (Windows FS latency).
