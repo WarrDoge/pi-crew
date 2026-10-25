@@ -49,7 +49,7 @@
  * dashboard overlay, so headless sessions never reach it.
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { matchesKey } from "@earendil-works/pi-tui";
@@ -60,13 +60,14 @@ import type { CrewAgentRecord } from "../runtime/crew-agent-runtime.ts";
 import type { LiveAgentHandle } from "../runtime/live-session/live-agent-manager.ts";
 import type { ManifestCache } from "../runtime/manifest-cache.ts";
 import { createManifestCache } from "../runtime/manifest-cache.ts";
-import { isDisplayActiveRun } from "../runtime/process-status.ts";
+import { hasFreshTaskHeartbeatEvidence, isActiveRunStatus, isDisplayActiveRun } from "../runtime/process-status.ts";
 import type { ScheduledJob } from "../runtime/scheduling/scheduler.ts";
 import { surfaceGateEnvSnapshot } from "../runtime/surface/resolve-surface.ts";
 import { getTaskUsage } from "../runtime/usage-tracker.ts";
 import { readJsonFile } from "../state/atomic-write.ts";
 import { loadRunManifestById } from "../state/stores/state-store.ts";
-import type { TeamRunManifest } from "../state/types.ts";
+import type { TeamRunManifest, TeamTaskState } from "../state/types.ts";
+import { readJsonFileCoalesced } from "../utils/file-coalescer.ts";
 import { logInternalError } from "../utils/internal-error.ts";
 import { formatRelativeTime } from "../utils/relative-time.ts";
 import { pad, sanitizeLine, truncate, visibleWidth } from "../utils/visual.ts";
@@ -200,6 +201,28 @@ function watchAgentTranscriptScript(): string | undefined {
 		fileURLToPath(new URL("../scripts/watch-agent-transcript.mjs", import.meta.url)),
 	];
 	return candidates.find((c) => existsSync(c));
+}
+
+/** Tasks-read TTL for the legacy-discovery heartbeat check (coalesced, live-run-sidebar pattern). */
+const LEGACY_TASKS_READ_TTL_MS = 1000;
+
+/**
+ * Wave 15 (F2, GAP-0): coalesced tasks.json read for the legacy-discovery
+ * loop — mirrors run-dashboard/live-run-sidebar's readRunTasks. Returns
+ * undefined on unreadable so a broken tasks.json can NEVER fabricate
+ * liveness evidence (fail-closed).
+ */
+function readLegacyRunTasks(run: TeamRunManifest): TeamTaskState[] | undefined {
+	const parse = (): TeamTaskState[] => {
+		if (!existsSync(run.tasksPath)) return [];
+		const parsed = JSON.parse(readFileSync(run.tasksPath, "utf-8")) as unknown;
+		return Array.isArray(parsed) ? (parsed as TeamTaskState[]) : [];
+	};
+	try {
+		return readJsonFileCoalesced(run.tasksPath, LEGACY_TASKS_READ_TTL_MS, parse);
+	} catch {
+		return undefined;
+	}
 }
 
 /** tok/s for record-based entries (no live handle in this process). */
@@ -476,7 +499,14 @@ export class AgentsJobsBrowser {
 				if (run.status !== "running" && run.status !== "queued") continue;
 				try {
 					const agents = readCrewAgents(run);
-					if (isDisplayActiveRun(run, agents, nowMs)) runs.push({ run, agents });
+					// Wave 15 (F2, GAP-0): tight heartbeat guard — a legacy-uncovered run
+					// whose manifest froze mid-long-tool stays listed while its task
+					// heartbeats are fresh (this loop already does per-run I/O — one more
+					// coalesced read is in-pattern). Terminal/async runs are never
+					// resurrected (isActiveRunStatus && !run.async).
+					const heartbeatLive =
+						isActiveRunStatus(run.status) && !run.async && hasFreshTaskHeartbeatEvidence(readLegacyRunTasks(run), nowMs);
+					if (isDisplayActiveRun(run, agents, nowMs) || heartbeatLive) runs.push({ run, agents });
 				} catch {
 					/* unreadable — skip */
 				}

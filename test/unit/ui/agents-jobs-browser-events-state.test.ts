@@ -23,7 +23,7 @@ import { saveCrewAgents } from "../../../src/runtime/crew-agent-records.ts";
 import type { CrewAgentRecord } from "../../../src/runtime/crew-agent-runtime.ts";
 import { createManifestCache } from "../../../src/runtime/manifest-cache.ts";
 import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../src/state/stores/state-store.ts";
-import type { TeamRunManifest } from "../../../src/state/types.ts";
+import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
 import { AgentsJobsBrowser } from "../../../src/ui/agents-jobs-browser.ts";
 import { createRunSnapshotCache, type RunSnapshotCache } from "../../../src/ui/run-snapshot-cache.ts";
 import { activeWidgetRuns } from "../../../src/ui/widget/widget-model.ts";
@@ -188,6 +188,79 @@ test("dispose leaves injected caches alive (host ownership contract)", async () 
 		browser.dispose();
 		snapshotCache.dispose?.();
 		manifestCache.dispose();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+// ── Wave 15 (F2, GAP-0) — h3: legacy-uncovered runs trust fresh task heartbeats ──
+
+/**
+ * h3 fixture: an ACTIVE-status run whose manifest froze >2 min ago
+ * (isLikelyOrphanedActiveRun fires ⇒ isDisplayActiveRun drops it from the
+ * committed widget pipeline ⇒ it is "legacy-uncovered"), with running agents
+ * that carry NO recent activity evidence. Liveness rides ONLY on
+ * `task.heartbeat.lastSeenAt` — exactly the wave-15 false-stale class.
+ */
+function makeLegacyUncoveredStaleRun(
+	cwd: string,
+	goal: string,
+	heartbeat: { lastSeenAt: string; alive: boolean } | undefined,
+): TeamRunManifest {
+	const { manifest } = makeActiveRun(cwd, goal);
+	const now = Date.now();
+	const frozen: TeamRunManifest = {
+		...manifest,
+		status: "running",
+		updatedAt: new Date(now - 3 * 60 * 1000).toISOString(),
+	};
+	saveRunManifest(frozen, { allowTerminalExit: true });
+	// saveRunManifest may stamp its own updatedAt — pin the frozen stamp on disk
+	// so listRecentRuns (the legacy discovery scan) sees the same manifest.
+	fs.writeFileSync(`${manifest.stateRoot}/manifest.json`, JSON.stringify(frozen, null, "\t"), "utf-8");
+	const tasks = JSON.parse(fs.readFileSync(manifest.tasksPath, "utf-8")) as TeamTaskState[];
+	const stamped = tasks.map((task) => ({
+		...task,
+		status: "running" as TeamTaskState["status"],
+		...(heartbeat ? { heartbeat: { workerId: "w1", ...heartbeat } } : {}),
+	}));
+	saveRunTasks(manifest, stamped);
+	return frozen;
+}
+
+test("h3: legacy-uncovered active run with fresh heartbeat stays listed", async () => {
+	const cwd = tempCwd("pi-crew-w15-h3-live-");
+	const browser = makeBrowser(cwd);
+	try {
+		const manifest = makeLegacyUncoveredStaleRun(cwd, "w15-h3-heartbeat", {
+			lastSeenAt: new Date(Date.now() - 30_000).toISOString(),
+			alive: true,
+		});
+		await waitFor(() => browser.entriesView.some((entry) => entry.kind === "agent" && entry.runId === manifest.runId));
+		const entries = browser.entriesView.filter((entry) => entry.kind === "agent" && entry.runId === manifest.runId);
+		assert.equal(entries.length, 2, "both fixture agents listed via the heartbeat OR-branch");
+	} finally {
+		browser.dispose();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("h3: same fixture WITHOUT a fresh heartbeat stays hidden (old behavior pinned)", async () => {
+	const cwd = tempCwd("pi-crew-w15-h3-stale-");
+	const browser = makeBrowser(cwd);
+	try {
+		const manifest = makeLegacyUncoveredStaleRun(cwd, "w15-h3-control", undefined);
+		// The committed pipeline drops it (stale manifest) and the legacy loop
+		// must NOT resurrect it without heartbeat evidence. Force-refresh to run
+		// the legacy discovery deterministically, then assert absence (scoped to
+		// the fixture runId — ambient user-root runs are environment noise).
+		browser.refreshData(true);
+		browser.refreshData(true);
+		assert.ok(
+			!browser.entriesView.some((entry) => entry.kind === "agent" && entry.runId === manifest.runId),
+			"no heartbeat evidence ⇒ legacy-uncovered run stays hidden",
+		);
+	} finally {
+		browser.dispose();
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}
 });

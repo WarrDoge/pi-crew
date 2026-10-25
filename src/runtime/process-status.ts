@@ -1,4 +1,4 @@
-import type { TeamRunManifest } from "../state/types.ts";
+import type { TeamRunManifest, TeamTaskState } from "../state/types.ts";
 import type { CrewAgentRecord } from "./crew-agent-runtime.ts";
 
 export { hasAsyncStartMarker } from "./async-marker.ts";
@@ -90,6 +90,33 @@ export function hasRecentAgentActivityEvidence(agent: CrewAgentRecord, now = Dat
 	if (TERMINAL_AGENT_STATUSES.has(agent.status)) return false;
 	const at = agentLatestActivityAt(agent);
 	return Number.isFinite(at) && now - at < livenessMs;
+}
+
+/**
+ * Wave 15 (F1, GAP-0): does any running/waiting task carry FRESH live
+ * evidence — a `heartbeat.lastSeenAt` (with `alive !== false`) or the
+ * `agentProgress.lastActivityAt` fallback — within `ttlMs`? Behavioral
+ * mirror of the watchdog's private helper (foreground-watchdog.ts) and
+ * hasRecentActiveEvidence (stale-reconciler.ts), so watchdog, reconciler
+ * and display stop growing a third divergent private copy. PURE (GAP-4:
+ * the shared display predicates keep their signatures — call sites that
+ * already hold the tasks OR this in). Default TTL 5 min keeps the constant
+ * family aligned (AGENT_ACTIVITY_LIVENESS_MS = TASK_HEARTBEAT_EVIDENCE_MS
+ * = ACTIVE_EVIDENCE_TTL_MS). Undefined/empty/all-terminal ⇒ false.
+ */
+export function hasFreshTaskHeartbeatEvidence(
+	tasks: TeamTaskState[] | undefined,
+	now = Date.now(),
+	ttlMs = AGENT_ACTIVITY_LIVENESS_MS,
+): boolean {
+	if (!Array.isArray(tasks)) return false;
+	return tasks.some((task) => {
+		if (task.status !== "running" && task.status !== "waiting") return false;
+		const heartbeatAt = task.heartbeat?.lastSeenAt ? new Date(task.heartbeat.lastSeenAt).getTime() : Number.NaN;
+		if (task.heartbeat?.alive !== false && Number.isFinite(heartbeatAt) && now - heartbeatAt <= ttlMs) return true;
+		const activityAt = task.agentProgress?.lastActivityAt ? new Date(task.agentProgress.lastActivityAt).getTime() : Number.NaN;
+		return Number.isFinite(activityAt) && now - activityAt <= ttlMs;
+	});
 }
 
 export function isLikelyOrphanedActiveRun(

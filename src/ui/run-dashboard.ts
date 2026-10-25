@@ -10,7 +10,12 @@ import { readCrewAgents } from "../runtime/crew-agent-records.ts";
 import type { CrewAgentRecord } from "../runtime/crew-agent-runtime.ts";
 import { getLiveAgentContextPercent } from "../runtime/live-session/live-agent-manager.ts";
 import { isPlanApprovalPending } from "../runtime/plan-approval.ts";
-import { isActiveRunStatus, isDisplayActiveRun, isLikelyOrphanedActiveRun } from "../runtime/process-status.ts";
+import {
+	hasFreshTaskHeartbeatEvidence,
+	isActiveRunStatus,
+	isDisplayActiveRun,
+	isLikelyOrphanedActiveRun,
+} from "../runtime/process-status.ts";
 import type { ScheduledJob } from "../runtime/scheduling/scheduler.ts";
 import type { TeamRunManifest, TeamTaskState, UsageState } from "../state/types.ts";
 import { aggregateUsage } from "../state/usage.ts";
@@ -363,6 +368,19 @@ function taskForAgent(tasks: TeamTaskState[], agent: CrewAgentRecord): TeamTaskS
 	return tasks.find((task) => task.id === agent.taskId);
 }
 
+/**
+ * Wave 15 (F2, GAP-0): tight heartbeat-liveness guard for ACTIVE display —
+ * mirrors the orphan predicate's own preconditions (active status, non-async)
+ * so a terminal or async run is never resurrected by a heartbeat. A healthy
+ * direct run mid-long-tool freezes manifest `updatedAt` and agent progress
+ * (event-driven writes) but keeps stamping `task.heartbeat.lastSeenAt`, so
+ * fresh evidence means the run is alive. Call sites OR this in ONLY — every
+ * non-stale branch and layout stays untouched.
+ */
+function heartbeatLiveForDisplay(run: TeamRunManifest, tasks: TeamTaskState[] | undefined, now = Date.now()): boolean {
+	return isActiveRunStatus(run.status) && !run.async && hasFreshTaskHeartbeatEvidence(tasks, now);
+}
+
 function modelForTask(task: TeamTaskState | undefined): string | undefined {
 	const attempts = task?.modelAttempts;
 	if (!attempts?.length) return undefined;
@@ -467,7 +485,9 @@ function runLabel(
 	resolve?: SnapshotResolver,
 ): string {
 	const agents = agentsFor(run, snapshotCache, resolve);
-	const stale = isLikelyOrphanedActiveRun(run, agents);
+	// Wave 15 (F2): a stale-manifest verdict is VETOED by fresh task-heartbeat
+	// evidence (lazy read — only consulted when the orphan predicate fires).
+	const stale = isLikelyOrphanedActiveRun(run, agents) && !heartbeatLiveForDisplay(run, readRunTasks(run, snapshotCache, resolve));
 	const running = agents.find((agent) => agent.status === "running");
 	const queued = agents.find((agent) => agent.status === "queued");
 	const step = stale
@@ -523,7 +543,12 @@ function resolveRuns(runs: TeamRunManifest[], snapshotCache?: RunSnapshotCache, 
 		const snapshot = resolve ? resolve(run) : snapshotFor(run, snapshotCache);
 		const agents = snapshot?.agents ?? agentsFor(run, snapshotCache, resolve);
 		const displayRun = snapshot?.manifest ?? run;
-		const status: RunStatus = isLikelyOrphanedActiveRun(displayRun, agents) ? "stale" : (displayRun.status as RunStatus);
+		// Wave 15 (F2): fresh task heartbeats veto the "stale" label.
+		const status: RunStatus =
+			isLikelyOrphanedActiveRun(displayRun, agents) &&
+			!heartbeatLiveForDisplay(displayRun, snapshot?.tasks ?? readRunTasks(run, snapshotCache, resolve))
+				? "stale"
+				: (displayRun.status as RunStatus);
 		map.set(run.runId, { manifest: run, snapshot, agents, status });
 	}
 	return map;
@@ -536,12 +561,19 @@ function groupedRuns(
 ): Array<{ label: string; run?: TeamRunManifest }> {
 	const resolved = resolveRuns(runs, snapshotCache, resolve);
 	const rows: Array<{ label: string; run?: TeamRunManifest }> = [];
-	const active = runs.filter((run) =>
-		isDisplayActiveRun(resolved.get(run.runId)?.snapshot?.manifest ?? run, resolved.get(run.runId)?.agents ?? []),
-	);
-	const rest = runs.filter(
-		(run) => !isDisplayActiveRun(resolved.get(run.runId)?.snapshot?.manifest ?? run, resolved.get(run.runId)?.agents ?? []),
-	);
+	// Wave 15 (F2): a run with fresh task-heartbeat evidence stays display-active
+	// even when the manifest froze mid-long-tool (tight guard — never resurrects
+	// terminal/async runs).
+	const displayActive = (run: TeamRunManifest): boolean => {
+		const entry = resolved.get(run.runId);
+		const displayRun = entry?.snapshot?.manifest ?? run;
+		return (
+			isDisplayActiveRun(displayRun, entry?.agents ?? []) ||
+			heartbeatLiveForDisplay(displayRun, entry?.snapshot?.tasks ?? readRunTasks(run, snapshotCache, resolve))
+		);
+	};
+	const active = runs.filter((run) => displayActive(run));
+	const rest = runs.filter((run) => !displayActive(run));
 	if (active.length) rows.push({ label: "Active" }, ...active.map((run) => ({ label: run.runId, run })));
 	if (rest.length) rows.push({ label: "Recent" }, ...rest.map((run) => ({ label: run.runId, run })));
 	return rows;
@@ -754,7 +786,10 @@ export class RunDashboard implements DashboardComponent {
 				const snapshot = resolve ? resolve(run) : snapshotFor(run, this.options.snapshotCache);
 				const displayRun = snapshot?.manifest ?? run;
 				const agents = snapshot?.agents ?? agentsFor(run, this.options.snapshotCache, resolve);
-				const stale = isLikelyOrphanedActiveRun(displayRun, agents);
+				// Wave 15 (F2): fresh task heartbeats veto the "stale" label.
+				const stale =
+					isLikelyOrphanedActiveRun(displayRun, agents) &&
+					!heartbeatLiveForDisplay(displayRun, snapshot?.tasks ?? readRunTasks(run, this.options.snapshotCache, resolve));
 				const status: RunStatus = stale ? "stale" : (displayRun.status as RunStatus);
 				if (status === "running" || agents.some((agent) => agent.status === "running")) hasRunning = true;
 				return snapshot?.signature ?? `${displayRun.runId}:${displayRun.status}:${displayRun.updatedAt}:${status}`;
@@ -963,7 +998,15 @@ export class RunDashboard implements DashboardComponent {
 							const snap = snapshotOnce(rowItem.run);
 							const run = snap?.manifest ?? rowItem.run;
 							const agents = snap?.agents ?? agentsFor(rowItem.run, this.options.snapshotCache, snapshotOnce);
-							const status: RunStatus = isLikelyOrphanedActiveRun(run, agents) ? "stale" : (run.status as RunStatus);
+							// Wave 15 (F2): fresh task heartbeats veto the "stale" label (status line).
+							const status: RunStatus =
+								isLikelyOrphanedActiveRun(run, agents) &&
+								!heartbeatLiveForDisplay(
+									run,
+									snap?.tasks ?? readRunTasks(rowItem.run, this.options.snapshotCache, snapshotOnce),
+								)
+									? "stale"
+									: (run.status as RunStatus);
 							const label = runLabel(run, idx === this.selected, this.options.snapshotCache, budget, snapshotOnce);
 							lines.push(row(applyStatusColor(this.theme, status, label)));
 						}
@@ -977,7 +1020,15 @@ export class RunDashboard implements DashboardComponent {
 							const snap = snapshotOnce(rowItem.run);
 							const run = snap?.manifest ?? rowItem.run;
 							const agents = snap?.agents ?? agentsFor(rowItem.run, this.options.snapshotCache, snapshotOnce);
-							const status: RunStatus = isLikelyOrphanedActiveRun(run, agents) ? "stale" : (run.status as RunStatus);
+							// Wave 15 (F2): fresh task heartbeats veto the "stale" label (windowed status line).
+							const status: RunStatus =
+								isLikelyOrphanedActiveRun(run, agents) &&
+								!heartbeatLiveForDisplay(
+									run,
+									snap?.tasks ?? readRunTasks(rowItem.run, this.options.snapshotCache, snapshotOnce),
+								)
+									? "stale"
+									: (run.status as RunStatus);
 							const label = runLabel(run, gi === this.selected, this.options.snapshotCache, budget, snapshotOnce);
 							lines.push(row(applyStatusColor(this.theme, status, label)));
 						}
@@ -996,8 +1047,12 @@ export class RunDashboard implements DashboardComponent {
 						const snap = snapshotOnce(selectedRun);
 						const r = snap?.manifest ?? selectedRun;
 						const agents = snap?.agents ?? agentsFor(selectedRun, this.options.snapshotCache, snapshotOnce);
-						const statusStr: RunStatus = isLikelyOrphanedActiveRun(r, agents) ? "stale" : (r.status as RunStatus);
 						const selectedTasks = snap?.tasks ?? readRunTasks(r, this.options.snapshotCache, snapshotOnce);
+						// Wave 15 (F2): fresh task heartbeats veto the "stale" label (detail header).
+						const statusStr: RunStatus =
+							isLikelyOrphanedActiveRun(r, agents) && !heartbeatLiveForDisplay(r, selectedTasks)
+								? "stale"
+								: (r.status as RunStatus);
 						lines.push(section("run"));
 						lines.push(row(`${fg("accent", "▸")} ${truncate(sanitizeUntrustedLine(r.goal), budget - 4)}`));
 						// L-2: surface the failure/cancellation reason inline for terminal runs.
