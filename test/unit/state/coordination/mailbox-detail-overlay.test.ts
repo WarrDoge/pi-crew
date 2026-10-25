@@ -6,6 +6,7 @@ import test from "node:test";
 import { appendMailboxMessage } from "../../../../src/state/coordination/mailbox.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import { type MailboxAction, MailboxDetailOverlay } from "../../../../src/ui/overlays/mailbox-detail-overlay.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function createRun(): { cwd: string; runId: string } {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-mailbox-overlay-"));
@@ -35,7 +36,7 @@ function createRun(): { cwd: string; runId: string } {
 	return { cwd, runId: created.manifest.runId };
 }
 
-test("MailboxDetailOverlay renders mailbox and emits ack action", () => {
+test("MailboxDetailOverlay renders mailbox and emits ack action", async () => {
 	const run = createRun();
 	try {
 		const actions: MailboxAction[] = [];
@@ -50,11 +51,11 @@ test("MailboxDetailOverlay renders mailbox and emits ack action", () => {
 		overlay.handleInput("A");
 		assert.equal(actions[0]?.type, "ack");
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });
 
-test("MailboxDetailOverlay supports compose nudge ackAll and close actions", () => {
+test("MailboxDetailOverlay supports compose nudge ackAll and close actions", async () => {
 	const run = createRun();
 	try {
 		const actions: MailboxAction[] = [];
@@ -74,6 +75,6 @@ test("MailboxDetailOverlay supports compose nudge ackAll and close actions", () 
 			["nudge", "compose", "ackAll", "close"],
 		);
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });

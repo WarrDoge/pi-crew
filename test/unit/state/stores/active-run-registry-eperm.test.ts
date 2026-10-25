@@ -18,6 +18,7 @@ import { activeRunEntries, readActiveRunRegistry, registerActiveRun } from "../.
 import { createRunManifest, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot, removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Use realpath to resolve symlinks (macOS /var/folders → /private/var/folders).
 const realTmp = fs.realpathSync(os.tmpdir());
@@ -37,17 +38,17 @@ const workflow: WorkflowConfig = {
 	steps: [{ id: "explore", role: "explorer", task: "Explore" }],
 };
 
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T | Promise<T>): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(realTmp, "pi-crew-eperm-home-"));
 	fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
@@ -82,8 +83,8 @@ function makeAsyncManifest() {
 	return { cwd, manifest: asyncManifest };
 }
 
-test("R7-15: EPERM entry is kept — registerActiveRun succeeds (filterAliveEntries)", () => {
-	withIsolatedHome(() => {
+test("R7-15: EPERM entry is kept — registerActiveRun succeeds (filterAliveEntries)", async () => {
+	await withIsolatedHome(async () => {
 		const { cwd, manifest } = makeAsyncManifest();
 		try {
 			// Before the fix, filterAliveEntries returned false for the EPERM
@@ -95,13 +96,13 @@ test("R7-15: EPERM entry is kept — registerActiveRun succeeds (filterAliveEntr
 			assert.equal(entries.length, 1, "EPERM run stays in the registry");
 			assert.equal(entries[0]?.runId, manifest.runId);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
 
-test("R7-15: EPERM entry is surfaced by activeRunEntries; ESRCH prunes it", () => {
-	withIsolatedHome(() => {
+test("R7-15: EPERM entry is surfaced by activeRunEntries; ESRCH prunes it", async () => {
+	await withIsolatedHome(async () => {
 		const { cwd, manifest } = makeAsyncManifest();
 		try {
 			// Register under EPERM semantics too — without the stub the real probe
@@ -126,7 +127,7 @@ test("R7-15: EPERM entry is surfaced by activeRunEntries; ESRCH prunes it", () =
 				);
 			});
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });

@@ -34,6 +34,7 @@ import { loadTasksWithRecovery } from "../../../src/state/stores/manifest-io.ts"
 import { createRunManifest, loadRunManifestById, saveRunTasksCoalesced } from "../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const envRestorers: Array<() => void> = [];
 after(() => {
@@ -84,7 +85,12 @@ function makeTempProject(): { cwd: string; cleanup(): void } {
 	const cwd = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "pi-crew-fsync-"));
 	fs.mkdirSync(path.join(cwd, ".git")); // project marker → state stays under <tmp>/.crew/
 	fs.mkdirSync(path.join(cwd, ".crew"));
-	return { cwd, cleanup: () => fs.rmSync(cwd, { recursive: true, force: true }) };
+	return {
+		cwd,
+		cleanup: async () => {
+			await removeDirWithRetry(cwd);
+		},
+	};
 }
 
 function makeRun(cwd: string): ReturnType<typeof createRunManifest> {

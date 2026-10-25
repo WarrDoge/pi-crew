@@ -12,10 +12,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-
 import { recoverPendingDelegateResults } from "../../../src/prompt/prompt-runtime.ts";
 import type { MailboxMessage } from "../../../src/state/coordination/mailbox.ts";
 import type { TeamRunManifest } from "../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 function makeManifest(): TeamRunManifest {
 	const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pc-r9f1-"));
@@ -39,7 +39,7 @@ const message = (from: string, body: string): MailboxMessage =>
 		status: "delivered",
 	}) as MailboxMessage;
 
-test("R9-F1: pending subId + durable inbox message + fresh recovery pass → result recovered", () => {
+test("R9-F1: pending subId + durable inbox message + fresh recovery pass → result recovered", async () => {
 	const manifest = makeManifest();
 	const inbox = [message("delegate:gc-1", "the 10,539-char report"), message("other:source", "unrelated")];
 	const pending = new Set(["gc-1"]);
@@ -49,10 +49,10 @@ test("R9-F1: pending subId + durable inbox message + fresh recovery pass → res
 	// Unrelated subIds / senders are ignored.
 	const recovered2 = recoverPendingDelegateResults(manifest, new Set(["gc-2"]), () => inbox);
 	assert.equal(recovered2.size, 0, "non-pending subIds are not recovered");
-	fs.rmSync(manifest.stateRoot, { recursive: true, force: true });
+	await cleanupStateRoot(manifest.stateRoot, manifest.eventsPath);
 });
 
-test("R9-F1: no double-count — a recovered subId is not re-recovered on the next pass", () => {
+test("R9-F1: no double-count — a recovered subId is not re-recovered on the next pass", async () => {
 	const manifest = makeManifest();
 	const inbox = [message("delegate:gc-9", "report")];
 	const pending = new Set(["gc-9"]);
@@ -65,5 +65,5 @@ test("R9-F1: no double-count — a recovered subId is not re-recovered on the ne
 		throw new Error("transient");
 	});
 	assert.equal(failing.size, 0);
-	fs.rmSync(manifest.stateRoot, { recursive: true, force: true });
+	await cleanupStateRoot(manifest.stateRoot, manifest.eventsPath);
 });

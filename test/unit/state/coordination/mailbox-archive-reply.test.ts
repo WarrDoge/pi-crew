@@ -29,6 +29,7 @@ import {
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "archive",
@@ -78,7 +79,7 @@ function rotateFile(livePath: string): string {
 	return archivePath;
 }
 
-test("R7-3: reply to a rotated (archived) message surfaces repliedAt via readMailboxMessage", () => {
+test("R7-3: reply to a rotated (archived) message surfaces repliedAt via readMailboxMessage", async () => {
 	const cwd = setupCwd();
 	try {
 		const { manifest } = createRunManifest({ cwd, team, workflow, goal: "archived reply" });
@@ -117,11 +118,11 @@ test("R7-3: reply to a rotated (archived) message surfaces repliedAt via readMai
 		const withId = readMailbox(manifest, "outbox").filter((m) => m.id === original.id);
 		assert.equal(withId.length, 1, "no duplicate archived+compensating copies surface to readers");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("R7-3: compensating record is appended to the LIVE file (not the archive)", () => {
+test("R7-3: compensating record is appended to the LIVE file (not the archive)", async () => {
 	const cwd = setupCwd();
 	try {
 		const { manifest } = createRunManifest({ cwd, team, workflow, goal: "compensating append" });
@@ -143,11 +144,11 @@ test("R7-3: compensating record is appended to the LIVE file (not the archive)",
 		assert.ok(stored.repliedAt, "compensating record carries repliedAt");
 		assert.equal(stored.replyContent, "answer");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("R7-3: task mailbox archives are scanned too (task-scoped original)", () => {
+test("R7-3: task mailbox archives are scanned too (task-scoped original)", async () => {
 	const cwd = setupCwd();
 	try {
 		const { manifest } = createRunManifest({ cwd, team, workflow, goal: "task archive" });
@@ -174,11 +175,11 @@ test("R7-3: task mailbox archives are scanned too (task-scoped original)", () =>
 		assert.ok(matches[0]?.repliedAt, "task reply metadata visible after merge");
 		assert.equal(matches[0]?.replyContent, "task answer");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("R7-3: live-file originals still get the in-place rewrite (no compensating record)", () => {
+test("R7-3: live-file originals still get the in-place rewrite (no compensating record)", async () => {
 	const cwd = setupCwd();
 	try {
 		const { manifest } = createRunManifest({ cwd, team, workflow, goal: "live rewrite" });
@@ -196,11 +197,11 @@ test("R7-3: live-file originals still get the in-place rewrite (no compensating 
 		const liveLines = fs.readFileSync(path.join(mailboxDir, "outbox.jsonl"), "utf-8").split(/\r?\n/).filter(Boolean);
 		assert.equal(liveLines.length, 1, "no duplicate rows appended for a live original");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("L-9: corrupt line in a TASK mailbox is reported (and repaired) by validateMailbox", () => {
+test("L-9: corrupt line in a TASK mailbox is reported (and repaired) by validateMailbox", async () => {
 	const cwd = setupCwd();
 	try {
 		const { manifest } = createRunManifest({ cwd, team, workflow, goal: "validate task" });
@@ -231,11 +232,11 @@ test("L-9: corrupt line in a TASK mailbox is reported (and repaired) by validate
 			"corrupt line gone after repair",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("L-9: task messages participate in the delivery-entry check", () => {
+test("L-9: task messages participate in the delivery-entry check", async () => {
 	const cwd = setupCwd();
 	try {
 		const { manifest } = createRunManifest({ cwd, team, workflow, goal: "delivery check" });
@@ -280,6 +281,6 @@ test("L-9: task messages participate in the delivery-entry check", () => {
 			"repair backfills the delivery entry (next run is clean)",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

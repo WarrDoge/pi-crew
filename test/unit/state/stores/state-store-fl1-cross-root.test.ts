@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import { projectCrewRoot, userCrewRoot } from "../../../../src/utils/paths.ts";
+import { cleanupStateRoot, removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * F-L1 (2026-09-22): run listing (run-index scopedRunRoots) UNIONS the user
@@ -68,7 +69,7 @@ function makeProjectCwd(): string {
 	return cwd;
 }
 
-test("F-L1: run under USER root resolves by ID from a project cwd (listed ⇒ findable)", () => {
+test("F-L1: run under USER root resolves by ID from a project cwd (listed ⇒ findable)", async () => {
 	const cwd = makeProjectCwd();
 	const runId = "team_20260922_fl1user0123456789";
 	const { stateRoot } = writeRunFixture(path.join(userCrewRoot(), "state", "runs"), runId);
@@ -78,12 +79,12 @@ test("F-L1: run under USER root resolves by ID from a project cwd (listed ⇒ fi
 		assert.equal(loaded.manifest.runId, runId);
 		assert.equal(loaded.manifest.stateRoot, stateRoot);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(path.dirname(path.dirname(path.dirname(stateRoot))), { recursive: true, force: true });
+		await cleanupStateRoot(cwd, path.join(stateRoot, "events.jsonl"));
+		await cleanupStateRoot(path.dirname(path.dirname(path.dirname(stateRoot))), path.join(stateRoot, "events.jsonl"));
 	}
 });
 
-test("F-L1: run under PROJECT root still resolves first (primary path unchanged)", () => {
+test("F-L1: run under PROJECT root still resolves first (primary path unchanged)", async () => {
 	const cwd = makeProjectCwd();
 	const runId = "team_20260922_fl1proj0123456789";
 	writeRunFixture(path.join(projectCrewRoot(cwd), "state", "runs"), runId);
@@ -92,11 +93,11 @@ test("F-L1: run under PROJECT root still resolves first (primary path unchanged)
 		assert.ok(loaded, "primary-root run must keep resolving");
 		assert.equal(loaded.manifest.runId, runId);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F-L1: same runId under BOTH roots — primary (project) wins, no ambiguity", () => {
+test("F-L1: same runId under BOTH roots — primary (project) wins, no ambiguity", async () => {
 	const cwd = makeProjectCwd();
 	const runId = "team_20260922_fl1both0123456789";
 	const projRoot = path.join(projectCrewRoot(cwd), "state", "runs");
@@ -107,18 +108,18 @@ test("F-L1: same runId under BOTH roots — primary (project) wins, no ambiguity
 		assert.ok(loaded, "duplicate-id run must resolve");
 		assert.equal(loaded.manifest.stateRoot, path.join(projRoot, runId), "primary root must take precedence");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(path.join(userCrewRoot(), "state", "runs"), { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
+		await removeDirWithRetry(path.join(userCrewRoot(), "state", "runs"));
 	}
 });
 
-test("F-L1: unknown runId resolves to undefined (fallback miss is a real miss)", () => {
+test("F-L1: unknown runId resolves to undefined (fallback miss is a real miss)", async () => {
 	const cwd = makeProjectCwd();
 	fs.mkdirSync(path.join(userCrewRoot(), "state", "runs"), { recursive: true });
 	try {
 		assert.equal(loadRunManifestById(cwd, "team_20260922_fl1none012345678"), undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(path.join(userCrewRoot(), "state", "runs"), { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
+		await removeDirWithRetry(path.join(userCrewRoot(), "state", "runs"));
 	}
 });

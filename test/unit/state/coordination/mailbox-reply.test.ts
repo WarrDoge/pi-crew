@@ -12,6 +12,7 @@ import {
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "reply",
@@ -38,7 +39,7 @@ function setupCwd(): string {
 	return cwd;
 }
 
-test("mailbox message can have replyTo field", () => {
+test("mailbox message can have replyTo field", async () => {
 	const cwd = setupCwd();
 	try {
 		const { manifest } = createRunManifest({
@@ -68,11 +69,11 @@ test("mailbox message can have replyTo field", () => {
 		assert.equal(reply.replyFrom, "leader");
 		assert.equal(reply.replyDeadline, undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("updateMailboxMessageReply sets repliedAt and replyContent on original", () => {
+test("updateMailboxMessageReply sets repliedAt and replyContent on original", async () => {
 	const cwd = setupCwd();
 	try {
 		const { manifest } = createRunManifest({
@@ -99,11 +100,11 @@ test("updateMailboxMessageReply sets repliedAt and replyContent on original", ()
 		assert.ok(updated.repliedAt, "repliedAt should be set");
 		assert.equal(updated.replyContent, "Here is the answer");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("replyDeadline is preserved on reply messages", () => {
+test("replyDeadline is preserved on reply messages", async () => {
 	const cwd = setupCwd();
 	try {
 		const { manifest } = createRunManifest({
@@ -127,11 +128,11 @@ test("replyDeadline is preserved on reply messages", () => {
 		assert.equal(read.length, 1);
 		assert.equal(read[0]!.replyDeadline, deadline);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("messages without reply fields remain backward compatible", () => {
+test("messages without reply fields remain backward compatible", async () => {
 	const cwd = setupCwd();
 	try {
 		const { manifest } = createRunManifest({
@@ -159,11 +160,11 @@ test("messages without reply fields remain backward compatible", () => {
 		assert.equal(read[0]!.replyTo, undefined);
 		assert.equal(read[0]!.repliedAt, undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("updateMailboxMessageReply is non-fatal for missing message", () => {
+test("updateMailboxMessageReply is non-fatal for missing message", async () => {
 	const cwd = setupCwd();
 	try {
 		const { manifest } = createRunManifest({
@@ -175,11 +176,11 @@ test("updateMailboxMessageReply is non-fatal for missing message", () => {
 		// Should not throw when the original message doesn't exist
 		updateMailboxMessageReply(manifest, "msg_nonexistent", "reply content");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("reply message with all fields round-trips through disk", () => {
+test("reply message with all fields round-trips through disk", async () => {
 	const cwd = setupCwd();
 	try {
 		const { manifest } = createRunManifest({
@@ -228,6 +229,6 @@ test("reply message with all fields round-trips through disk", () => {
 		// Verify original still preserves its own replyDeadline
 		assert.equal(updatedOriginal.replyDeadline, deadline);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

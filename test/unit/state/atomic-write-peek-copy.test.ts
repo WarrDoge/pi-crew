@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { atomicWriteJsonCoalesced, peekPendingCoalescedWrite } from "../../../src/state/atomic-write.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 interface ProbeRecord {
 	id: string;
@@ -29,7 +30,7 @@ test.after(() => {
 	else process.env.PI_TEAMS_HOME = envHome;
 });
 
-test("RM-01: peek returns a deep copy — top-level mutation does not corrupt the buffer", () => {
+test("RM-01: peek returns a deep copy — top-level mutation does not corrupt the buffer", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "rm01-"));
 	const filePath = path.join(cwd, "agents.json");
 	try {
@@ -41,11 +42,11 @@ test("RM-01: peek returns a deep copy — top-level mutation does not corrupt th
 		const peeked2 = peekPendingCoalescedWrite<ProbeRecord[]>(filePath);
 		assert.equal(peeked2?.[0]?.id, "a1", "top-level mutation must not corrupt the pending buffer");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("RM-01: peek returns a deep copy — NESTED mutation does not corrupt the buffer", () => {
+test("RM-01: peek returns a deep copy — NESTED mutation does not corrupt the buffer", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "rm01-"));
 	const filePath = path.join(cwd, "agents.json");
 	try {
@@ -58,11 +59,11 @@ test("RM-01: peek returns a deep copy — NESTED mutation does not corrupt the b
 		const peeked2 = peekPendingCoalescedWrite<ProbeRecord[]>(filePath);
 		assert.equal(peeked2?.[0]?.nested?.usage?.input, 100, "nested mutation must not corrupt the pending buffer");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("RM-01: mutating the returned ARRAY (push) does not corrupt the buffer", () => {
+test("RM-01: mutating the returned ARRAY (push) does not corrupt the buffer", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "rm01-"));
 	const filePath = path.join(cwd, "agents.json");
 	try {
@@ -74,6 +75,6 @@ test("RM-01: mutating the returned ARRAY (push) does not corrupt the buffer", ()
 		const peeked2 = peekPendingCoalescedWrite<ProbeRecord[]>(filePath);
 		assert.equal(peeked2?.length, 1, "array push must not corrupt the pending buffer");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

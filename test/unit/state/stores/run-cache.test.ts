@@ -6,6 +6,7 @@ import { computeRunCacheKey, getCachedRun, getCacheStats } from "../../../../src
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import { projectCrewRoot } from "../../../../src/utils/paths.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Note: saveRunToCache/clearCache were removed (Round 7 R7-5: 0 production
 // callers; getCachedRun is the live read-only consumer). Cache state for these
@@ -65,8 +66,8 @@ function makeTmp(): string {
 	return createTrackedTempDir("pi-crew-run-cache-");
 }
 
-function cleanup(dir: string): void {
-	fs.rmSync(dir, { recursive: true, force: true });
+async function cleanup(dir: string): Promise<void> {
+	await removeDirWithRetry(dir);
 }
 
 test("computeRunCacheKey: deterministic", () => {

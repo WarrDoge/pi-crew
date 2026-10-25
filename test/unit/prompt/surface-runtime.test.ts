@@ -13,7 +13,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
-
 import {
 	AUTO_EXIT_SETTLE_CONFIRM_MS,
 	createAgentEventRecorder,
@@ -30,6 +29,7 @@ import {
 import { readCrewAgentEventsCursor } from "../../../src/runtime/crew-agent-records.ts";
 import { fieldsAfterComm, procStartTimeTicks } from "../../../src/runtime/process/proc-stat.ts";
 import type { TeamRunManifest } from "../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -332,7 +332,7 @@ describe("parentAlive", () => {
 // ── per-agent event recorder ──────────────────────────────────────────────
 
 describe("createAgentEventRecorder — real fs path", () => {
-	it("creates the missing agents dir on first write and appends {seq,time,event}", () => {
+	it("creates the missing agents dir on first write and appends {seq,time,event}", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "surface-recorder-"));
 		try {
 			const eventsPath = path.join(root, "agents", "task-9", "events.jsonl");
@@ -346,7 +346,7 @@ describe("createAgentEventRecorder — real fs path", () => {
 			assert.deepEqual([parsed.seq, parsed.event.type], [1, "message_end"]);
 			assert.ok(parsed.time.startsWith("2026-08-26"));
 		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
+			await removeDirWithRetry(root);
 		}
 	});
 });
@@ -761,7 +761,7 @@ describe("recorder seq seeding", () => {
 		return eventsPath;
 	}
 
-	it("continues after an earlier attempt so readCrewAgentEventsCursor(sinceSeq) still sees new events", () => {
+	it("continues after an earlier attempt so readCrewAgentEventsCursor(sinceSeq) still sees new events", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "surface-seed-"));
 		try {
 			const stateRoot = dir;
@@ -783,7 +783,7 @@ describe("recorder seq seeding", () => {
 			const last = JSON.parse(fs.readFileSync(cursor.path, "utf-8").trim().split("\n").at(-1)!) as { seq: number };
 			assert.equal(last.seq, 7);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 

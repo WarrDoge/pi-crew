@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { discoverRunLockFiles, sweepStaleLocks } from "../../../../src/state/coordination/locks.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * US-002 (2026-09-22): structured stale-lock sweep. Locks whose holder died
@@ -24,7 +25,7 @@ function writeLockFile(dir: string, pid: number, ageMs: number): string {
 	return lockPath;
 }
 
-test("US-002: a dead-holder stale lock is swept", () => {
+test("US-002: a dead-holder stale lock is swept", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "us002-"));
 	try {
 		// PID 2^31-1 is essentially never a live process; combine with staleness.
@@ -33,11 +34,11 @@ test("US-002: a dead-holder stale lock is swept", () => {
 		assert.deepEqual(removed, [lockPath]);
 		assert.equal(fs.existsSync(lockPath), false, "the dead lock must be gone");
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });
 
-test("US-002: a LIVE holder's lock is never swept (even if old)", () => {
+test("US-002: a LIVE holder's lock is never swept (even if old)", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "us002-"));
 	try {
 		// Our own PID is definitely alive; make it older than the stale window so
@@ -47,22 +48,22 @@ test("US-002: a LIVE holder's lock is never swept (even if old)", () => {
 		assert.deepEqual(removed, [], "a live holder must not be swept");
 		assert.ok(fs.existsSync(lockPath), "live lock must remain");
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });
 
-test("US-002: a FRESH lock is never swept (not yet stale)", () => {
+test("US-002: a FRESH lock is never swept (not yet stale)", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "us002-"));
 	try {
 		const lockPath = writeLockFile(path.join(root, "team_fresh"), 2_147_483_647, 10);
 		const { removed } = sweepStaleLocks([lockPath], { staleMs: DEFAULT_STALE_MS });
 		assert.deepEqual(removed, [], "a fresh lock must not be swept even with a dead pid");
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });
 
-test("US-002: sweep is idempotent (second pass finds nothing)", () => {
+test("US-002: sweep is idempotent (second pass finds nothing)", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "us002-"));
 	try {
 		const lockPath = writeLockFile(path.join(root, "team_idem"), 2_147_483_647, DEFAULT_STALE_MS + 60_000);
@@ -71,11 +72,11 @@ test("US-002: sweep is idempotent (second pass finds nothing)", () => {
 		assert.equal(first.removed.length, 1);
 		assert.equal(second.removed.length, 0, "second sweep must be a no-op");
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });
 
-test("US-002: discoverRunLockFiles finds run.lock under each run dir, bounded", () => {
+test("US-002: discoverRunLockFiles finds run.lock under each run dir, bounded", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "us002-"));
 	try {
 		writeLockFile(path.join(root, "team_a"), process.pid, 10);
@@ -87,11 +88,11 @@ test("US-002: discoverRunLockFiles finds run.lock under each run dir, bounded", 
 		// Missing root → empty, no throw.
 		assert.deepEqual(discoverRunLockFiles(path.join(root, "nope")), []);
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });
 
-test("US-002: end-to-end — discover + sweep leaves only the live lock", () => {
+test("US-002: end-to-end — discover + sweep leaves only the live lock", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "us002-"));
 	try {
 		const dead = writeLockFile(path.join(root, "team_dead"), 2_147_483_647, DEFAULT_STALE_MS + 60_000);
@@ -101,6 +102,6 @@ test("US-002: end-to-end — discover + sweep leaves only the live lock", () => 
 		assert.equal(fs.existsSync(dead), false);
 		assert.ok(fs.existsSync(live), "live lock survives the full sweep");
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });

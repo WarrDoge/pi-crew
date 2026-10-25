@@ -32,6 +32,7 @@ import type { ExtensionToolContext } from "../../../src/extension/pi-api.ts";
 import { type AskBrokerClientSurface, type AskToolDefinition, createAskTool } from "../../../src/prompt/prompt-runtime.ts";
 import { appendMailboxMessageAsync } from "../../../src/state/coordination/mailbox.ts";
 import type { TeamRunManifest } from "../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 interface TempAskState {
 	stateRoot: string;
@@ -61,7 +62,9 @@ function makeTempAskState(): TempAskState {
 			PI_CREW_BROKER_SOCKET: "/nonexistent/broker.sock",
 			PI_CREW_BROKER_TOKEN: "test-token",
 		},
-		cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+		cleanup: async () => {
+			await removeDirWithRetry(root);
+		},
 	};
 }
 

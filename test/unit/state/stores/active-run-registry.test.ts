@@ -13,6 +13,7 @@ import {
 import { createRunManifest, updateRunStatus } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot, removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Use realpath to resolve symlinks (macOS /var/folders → /private/var/folders).
 // Several pi-crew code paths refuse to write through untrusted symlink paths.
@@ -33,7 +34,7 @@ const workflow: WorkflowConfig = {
 	steps: [{ id: "explore", role: "explorer", task: "Explore" }],
 };
 
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T | Promise<T>): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(realTmp, "pi-crew-active-reg-home-"));
 	// Create .pi/agent directory structure that userPiRoot() requires
@@ -41,23 +42,23 @@ function withIsolatedHome<T>(fn: () => T): T {
 	fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
-test("active-run registry starts empty", () => {
-	withIsolatedHome(() => {
+test("active-run registry starts empty", async () => {
+	await withIsolatedHome(async () => {
 		assert.deepEqual(readActiveRunRegistry(), []);
 		assert.deepEqual(activeRunRoots(), []);
 	});
 });
 
-test("register and unregister active run", () => {
-	withIsolatedHome(() => {
+test("register and unregister active run", async () => {
+	await withIsolatedHome(async () => {
 		const cwd = fs.mkdtempSync(path.join(realTmp, "pi-crew-active-reg-"));
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 		try {
@@ -77,13 +78,13 @@ test("register and unregister active run", () => {
 			assert.equal(readActiveRunRegistry().length, 0);
 			assert.equal(activeRunRoots().length, 0);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
 
-test("register deduplicates by runId", () => {
-	withIsolatedHome(() => {
+test("register deduplicates by runId", async () => {
+	await withIsolatedHome(async () => {
 		const cwd = fs.mkdtempSync(path.join(realTmp, "pi-crew-active-dedup-"));
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 		try {
@@ -97,13 +98,13 @@ test("register deduplicates by runId", () => {
 			registerActiveRun(created.manifest);
 			assert.equal(readActiveRunRegistry().length, 1);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
 
-test("registry ignores invalid entries", () => {
-	withIsolatedHome(() => {
+test("registry ignores invalid entries", async () => {
+	await withIsolatedHome(async () => {
 		const registryFile = path.join(process.env.PI_TEAMS_HOME!, ".crew", "state", "runs", "active-run-index.json");
 		fs.mkdirSync(path.dirname(registryFile), { recursive: true });
 		// Write garbage entries mixed with valid
@@ -125,8 +126,8 @@ test("registry ignores invalid entries", () => {
 	});
 });
 
-test("activeRunRoots skips entries with missing stateRoot", () => {
-	withIsolatedHome(() => {
+test("activeRunRoots skips entries with missing stateRoot", async () => {
+	await withIsolatedHome(async () => {
 		const cwd = fs.mkdtempSync(path.join(realTmp, "pi-crew-active-missing-"));
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 		try {
@@ -145,13 +146,13 @@ test("activeRunRoots skips entries with missing stateRoot", () => {
 			});
 			assert.equal(activeRunRoots().length, 0);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
 
-test("blocked runs remain visible in active-run registry roots", () => {
-	withIsolatedHome(() => {
+test("blocked runs remain visible in active-run registry roots", async () => {
+	await withIsolatedHome(async () => {
 		const cwd = fs.mkdtempSync(path.join(realTmp, "pi-crew-active-blocked-"));
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 		try {
@@ -167,13 +168,13 @@ test("blocked runs remain visible in active-run registry roots", () => {
 			updateRunStatus(running, "blocked", "blocked terminal state");
 			assert.equal(activeRunRoots().length, 1);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
 
-test("register recovers stale active-run registry lock", () => {
-	withIsolatedHome(() => {
+test("register recovers stale active-run registry lock", async () => {
+	await withIsolatedHome(async () => {
 		const cwd = fs.mkdtempSync(path.join(realTmp, "pi-crew-active-stale-lock-"));
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 		try {
@@ -206,17 +207,17 @@ test("register recovers stale active-run registry lock", () => {
 			assert.equal(readActiveRunRegistry().length, 1);
 			assert.equal(fs.existsSync(lockFile), false);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
 
-test("register retries on Windows EPERM lock contention instead of aborting", (t) => {
+test("register retries on Windows EPERM lock contention instead of aborting", async (t) => {
 	// Regression (2026-09-24, CI run 36019884258): on Windows, openSync(O_EXCL)
 	// surfaces EPERM (not EEXIST) while another handle holds the lock open —
 	// cross-process contention. The registry must treat it like EEXIST: bounded
 	// retry, not an immediate throw.
-	withIsolatedHome(() => {
+	await withIsolatedHome(async () => {
 		const cwd = fs.mkdtempSync(path.join(realTmp, "pi-crew-active-eperm-"));
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 		const realOpenSync = fs.openSync;
@@ -247,13 +248,13 @@ test("register retries on Windows EPERM lock contention instead of aborting", (t
 		} finally {
 			fsDefault.openSync = realOpenSync;
 			nodeModule.syncBuiltinESMExports();
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
 
-test("unregister with invalid runId is a no-op", () => {
-	withIsolatedHome(() => {
+test("unregister with invalid runId is a no-op", async () => {
+	await withIsolatedHome(async () => {
 		unregisterActiveRun("../escape");
 		assert.equal(readActiveRunRegistry().length, 0);
 	});

@@ -15,6 +15,7 @@ import {
 } from "../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -89,7 +90,7 @@ function removeDirectoryLink(linkPath: string): void {
 	}
 }
 
-test("artifacts verdict is memoized across loadRunManifestById calls", () => {
+test("artifacts verdict is memoized across loadRunManifestById calls", async () => {
 	__test__clearManifestCache();
 	__test__clearArtifactsVerdictCache();
 	const cwd = makeProjectTempDir("pi-crew-artifacts-memo-");
@@ -111,11 +112,11 @@ test("artifacts verdict is memoized across loadRunManifestById calls", () => {
 	} finally {
 		__test__clearManifestCache();
 		__test__clearArtifactsVerdictCache();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("negative artifacts verdicts are never cached", (t) => {
+test("negative artifacts verdicts are never cached", async (t) => {
 	__test__clearManifestCache();
 	__test__clearArtifactsVerdictCache();
 	const cwd = makeProjectTempDir("pi-crew-artifacts-neg-");
@@ -123,7 +124,7 @@ test("negative artifacts verdicts are never cached", (t) => {
 		const created = createRunManifest({ cwd, team, workflow, goal: "artifacts negative" });
 		const outside = path.join(cwd, "outside-artifacts");
 		fs.mkdirSync(outside, { recursive: true });
-		fs.rmSync(created.paths.artifactsRoot, { recursive: true, force: true });
+		await removeDirWithRetry(created.paths.artifactsRoot);
 		if (!tryDirectorySymlink(outside, created.paths.artifactsRoot)) {
 			t.skip("directory symlinks unavailable on this platform");
 			return;
@@ -149,11 +150,11 @@ test("negative artifacts verdicts are never cached", (t) => {
 		__test__clearManifestCache();
 		__test__clearArtifactsVerdictCache();
 		flushPendingAtomicWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("saveRunTasksCoalesced keeps the manifest cache entry with zeroed tasks stamps", () => {
+test("saveRunTasksCoalesced keeps the manifest cache entry with zeroed tasks stamps", async () => {
 	__test__clearManifestCache();
 	__test__clearArtifactsVerdictCache();
 	const cwd = makeProjectTempDir("pi-crew-coalesced-keep-");
@@ -189,11 +190,11 @@ test("saveRunTasksCoalesced keeps the manifest cache entry with zeroed tasks sta
 		__test__clearManifestCache();
 		__test__clearArtifactsVerdictCache();
 		flushPendingAtomicWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("load after a coalesced save reuses the cached manifest object — manifest.json is not re-parsed", () => {
+test("load after a coalesced save reuses the cached manifest object — manifest.json is not re-parsed", async () => {
 	__test__clearManifestCache();
 	__test__clearArtifactsVerdictCache();
 	const cwd = makeProjectTempDir("pi-crew-coalesced-reuse-");
@@ -231,11 +232,11 @@ test("load after a coalesced save reuses the cached manifest object — manifest
 		__test__clearManifestCache();
 		__test__clearArtifactsVerdictCache();
 		flushPendingAtomicWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("buffered coalesced save keeps the entry; next load re-reads disk, not the buffered array", () => {
+test("buffered coalesced save keeps the entry; next load re-reads disk, not the buffered array", async () => {
 	__test__clearManifestCache();
 	__test__clearArtifactsVerdictCache();
 	const cwd = makeProjectTempDir("pi-crew-coalesced-buffered-");
@@ -266,6 +267,6 @@ test("buffered coalesced save keeps the entry; next load re-reads disk, not the 
 		__test__clearManifestCache();
 		__test__clearArtifactsVerdictCache();
 		flushPendingAtomicWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

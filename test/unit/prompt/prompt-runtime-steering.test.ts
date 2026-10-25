@@ -23,6 +23,7 @@ import {
 	sanitizeSteerMessage,
 	validateSteeringFile,
 } from "../../../src/prompt/prompt-runtime.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 function trySymlink(target: string, linkPath: string, kind: "file" | "dir" | "junction"): boolean {
 	try {
@@ -133,7 +134,7 @@ test("FIX-02: sanitizeSteerMessage accepts a typical legitimate steer", () => {
 
 // ── FIX-03: validateSteeringFile ──────────────────────────────────────────
 
-test("FIX-03: validateSteeringFile rejects a symlink at the steering file itself", (t) => {
+test("FIX-03: validateSteeringFile rejects a symlink at the steering file itself", async (t) => {
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-steer-f03-"));
 	try {
 		const realFile = path.join(tmpDir, "real.jsonl");
@@ -147,11 +148,11 @@ test("FIX-03: validateSteeringFile rejects a symlink at the steering file itself
 		assert.equal(result.valid, false);
 		assert.match(result.reason ?? "", /symlink/);
 	} finally {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		await removeDirWithRetry(tmpDir);
 	}
 });
 
-test("FIX-03: validateSteeringFile rejects a path whose parent is a symlink (escapes artifacts root)", (t) => {
+test("FIX-03: validateSteeringFile rejects a path whose parent is a symlink (escapes artifacts root)", async (t) => {
 	// Threat model: a malicious parent process sets
 	//   PI_CREW_STEERING_FILE=/tmp/<dir>/sneaky/steering/task.jsonl
 	// where `/tmp/<dir>/sneaky` is a symlink to an unrelated directory.
@@ -179,11 +180,11 @@ test("FIX-03: validateSteeringFile rejects a path whose parent is a symlink (esc
 		// resolveRealContainedPath call fails because baseDir = the symlink.
 		assert.match(result.reason ?? "", /symlink|path-validation-failed/);
 	} finally {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		await removeDirWithRetry(tmpDir);
 	}
 });
 
-test("FIX-03: validateSteeringFile rejects a steering path whose ancestor contains a symlink", (t) => {
+test("FIX-03: validateSteeringFile rejects a steering path whose ancestor contains a symlink", async (t) => {
 	// Another variant: the artifactsRoot itself is real, but an intermediate
 	// directory (artifactsRoot/a/) is a symlink. The walk over ancestors
 	// hits the symlink and fails.
@@ -206,11 +207,11 @@ test("FIX-03: validateSteeringFile rejects a steering path whose ancestor contai
 		const result = validateSteeringFile(steeringFile);
 		assert.equal(result.valid, false);
 	} finally {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		await removeDirWithRetry(tmpDir);
 	}
 });
 
-test("FIX-03: validateSteeringFile accepts the standard artifacts/steering/<taskId>.jsonl layout", () => {
+test("FIX-03: validateSteeringFile accepts the standard artifacts/steering/<taskId>.jsonl layout", async () => {
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-steer-f03-"));
 	try {
 		const artifactsRoot = path.join(tmpDir, "artifacts");
@@ -221,11 +222,11 @@ test("FIX-03: validateSteeringFile accepts the standard artifacts/steering/<task
 		assert.equal(result.valid, true);
 		assert.ok(result.resolvedPath, "valid result must include a resolved path");
 	} finally {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		await removeDirWithRetry(tmpDir);
 	}
 });
 
-test("FIX-03: validateSteeringFile accepts a path whose file does not yet exist (write target)", () => {
+test("FIX-03: validateSteeringFile accepts a path whose file does not yet exist (write target)", async () => {
 	// The parent's task-runner creates the artifacts root and steering dir
 	// before spawning the worker, but the JSONL itself may be created on
 	// first steer write. Non-existent target must NOT fail validation —
@@ -239,6 +240,6 @@ test("FIX-03: validateSteeringFile accepts a path whose file does not yet exist 
 		assert.equal(result.valid, true);
 		assert.ok(result.resolvedPath);
 	} finally {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		await removeDirWithRetry(tmpDir);
 	}
 });

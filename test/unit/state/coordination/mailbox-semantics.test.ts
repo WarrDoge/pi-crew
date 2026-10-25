@@ -13,6 +13,7 @@ import {
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "mb",
@@ -29,7 +30,7 @@ const workflow: WorkflowConfig = {
 	steps: [{ id: "explore", role: "explorer", task: "Explore" }],
 };
 
-test("mailbox preserves steering and follow-up semantics", () => {
+test("mailbox preserves steering and follow-up semantics", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-mailbox-kind-"));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	try {
@@ -55,11 +56,11 @@ test("mailbox preserves steering and follow-up semantics", () => {
 		assert.equal(listMailboxByKind(manifest, "steer", "inbox").length, 1);
 		assert.equal(listMailboxByKind(manifest, "follow-up", "inbox").length, 1);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("legacy mailbox messages without kind remain readable", () => {
+test("legacy mailbox messages without kind remain readable", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-mailbox-legacy-"));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	try {
@@ -80,6 +81,6 @@ test("legacy mailbox messages without kind remain readable", () => {
 		assert.equal(read[0]!.id, legacy.id);
 		assert.equal(read[0]!.kind, undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

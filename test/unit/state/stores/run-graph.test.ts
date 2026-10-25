@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { buildAndSaveRunGraph, buildRunGraph, listRunGraphs, loadRunGraph, saveRunGraph } from "../../../../src/state/stores/run-graph.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeManifest(runId: string): TeamRunManifest {
 	return {
@@ -163,11 +164,11 @@ test("run-graph: saveRunGraph rejects path-traversal runId in graph.runId", () =
 	assert.throws(() => saveRunGraph(graph, os.tmpdir()), /Invalid runId/);
 });
 
-test("run-graph: listRunGraphs does not throw on missing dir (no runId path)", () => {
+test("run-graph: listRunGraphs does not throw on missing dir (no runId path)", async () => {
 	// listRunGraphs has no runId path (lists the directory), so no security check needed.
 	// Just verify it returns empty for a non-existent dir.
 	const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "run-graph-empty-"));
 	const result = listRunGraphs(emptyDir);
 	assert.deepEqual(result, []);
-	fs.rmSync(emptyDir, { recursive: true, force: true });
+	await removeDirWithRetry(emptyDir);
 });

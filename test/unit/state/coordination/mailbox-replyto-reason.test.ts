@@ -26,6 +26,7 @@ import {
 	validateMailbox,
 } from "../../../../src/state/coordination/mailbox.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeStateRoot(): { stateRoot: string; manifest: TeamRunManifest; cleanup: () => void } {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-w10-3-mailbox-"));
@@ -35,7 +36,9 @@ function makeStateRoot(): { stateRoot: string; manifest: TeamRunManifest; cleanu
 		stateRoot,
 		// Mailbox helpers consult only manifest.stateRoot + runId.
 		manifest: { runId: "run-1", stateRoot } as unknown as TeamRunManifest,
-		cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+		cleanup: async () => {
+			await removeDirWithRetry(root);
+		},
 	};
 }
 

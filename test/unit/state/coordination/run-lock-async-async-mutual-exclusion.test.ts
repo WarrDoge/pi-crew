@@ -32,6 +32,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { withRunLock, withRunLockSync } from "../../../../src/state/coordination/locks.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function mkTmp(prefix: string): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -138,7 +139,7 @@ test("AC1: two independent async contexts are mutually excluded (maxActive === 1
 			`critical sections must not interleave (B enters only after A releases), got: ${order.join(",")}`,
 		);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -175,7 +176,7 @@ test("AC2: no lost update — read-modify-write counter under two contending asy
 		const final = Number(fs.readFileSync(counterFile, "utf-8"));
 		assert.equal(final, 2, `both increments must be persisted (no lost update) — expected 2, got ${final}`);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -219,7 +220,7 @@ test("AC5: a finishing context does not delete another live holder's lock file",
 		await p2;
 		assert.equal(fs.existsSync(lockFile), false, "lock file removed only after the last holder exits");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -248,7 +249,7 @@ test("AC3: same-context re-entrance still bypasses and never releases the lock e
 		assert.equal(lockExistsAfterInner, true, "outer acquisition must still hold the lock after nested bypass calls return");
 		assert.equal(fs.existsSync(lockFile), false, "lock released only after the outermost acquisition finishes");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -271,7 +272,7 @@ test("AC6: throwing fn() releases the lock; the original error propagates; next 
 		const next = await withRunLock(manifest, async () => "next-ok");
 		assert.equal(next, "next-ok", "next acquisition must succeed after an errored holder released");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -290,7 +291,7 @@ test("AC7: steal still works for dead / stale / legacy / corpse holders (own-pid
 			const r = await withRunLock(manifest, async () => "dead-ok");
 			assert.equal(r, "dead-ok");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	}
 	// (b) Stale (old createdAt) with OUR pid and a token not held live → steal
@@ -308,7 +309,7 @@ test("AC7: steal still works for dead / stale / legacy / corpse holders (own-pid
 			const r = await withRunLock(manifest, async () => "stale-own-ok");
 			assert.equal(r, "stale-own-ok");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	}
 	// (c) LEGACY token-less payload with OUR pid, fresh → STILL stealable.
@@ -325,7 +326,7 @@ test("AC7: steal still works for dead / stale / legacy / corpse holders (own-pid
 			const r = await withRunLock(manifest, async () => "legacy-ok");
 			assert.equal(r, "legacy-ok", "legacy token-less lock files must remain stealable (CI-flake fix)");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	}
 	// (d) Fresh lock with OUR pid whose token is NOT held live in-process (a
@@ -344,7 +345,7 @@ test("AC7: steal still works for dead / stale / legacy / corpse holders (own-pid
 			const r = await withRunLock(manifest, async () => "corpse-ok");
 			assert.equal(r, "corpse-ok", "a fresh own-pid lock whose token is not live must be stealable (no leaked-set blocking)");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	}
 });
@@ -393,7 +394,7 @@ test("AC8: a real second process holding the lock blocks this process (`locked`)
 	} finally {
 		// non-detached: pid-only by design (shares runner's group)
 		child?.kill("SIGKILL");
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -411,7 +412,7 @@ test("AC9 (CI-flake canary): 50 sequential acquisitions in one process never sur
 		}
 		assert.equal(fs.existsSync(path.join(dir, "run.lock")), false, "no lock file leaked after the sequence");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -456,6 +457,6 @@ test("AC10: distinct holder identity is observable on disk; release removes only
 		assert.equal(tokenWhileBHolds, tokens[1], "lock file during B's critical section carries B's token");
 		assert.notEqual(tokenWhileBHolds, tokens[0], "A's exit must not have replaced or removed B's ownership");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });

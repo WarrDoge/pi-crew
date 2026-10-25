@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { withFileLockSync, withRunLock, withRunLockSync } from "../../../../src/state/coordination/locks.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -39,7 +40,7 @@ test("withRunLock async throws immediately on active (non-stale) lock", async ()
 
 	await assert.rejects(() => withRunLock(manifest, async () => "should-not-reach"), /locked/);
 
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 });
 
 test("withRunLock serializes calls when first releases before second attempts", async () => {
@@ -81,7 +82,7 @@ test("withRunLock serializes calls when first releases before second attempts", 
 	assert.equal(order[2], "run-2-enter");
 	assert.equal(order[3], "run-2-exit");
 
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 });
 
 test("withRunLockSync and withRunLock both recover from a stale lock", async () => {
@@ -134,10 +135,10 @@ test("withRunLockSync and withRunLock both recover from a stale lock", async () 
 	const asyncResult = await withRunLock(manifest, async () => "async-ok");
 	assert.equal(asyncResult, "async-ok");
 
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 });
 
-test("withRunLock writes a token in the lock file", () => {
+test("withRunLock writes a token in the lock file", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-lock-token-"));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	const { manifest } = createRunManifest({
@@ -178,10 +179,10 @@ test("withRunLock writes a token in the lock file", () => {
 	const lockFile = path.join(cwd, ".crew", "state", "runs", manifest.runId, "run.lock");
 	assert.equal(fs.existsSync(lockFile), false, "lock file should be removed after release");
 
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 });
 
-test("withRunLock release does not delete a lock owned by a different token (stolen-lock safety)", () => {
+test("withRunLock release does not delete a lock owned by a different token (stolen-lock safety)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-lock-steal-"));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	const { manifest } = createRunManifest({
@@ -251,10 +252,10 @@ test("withRunLock release does not delete a lock owned by a different token (sto
 	};
 	assert.equal(stillValid.token, T_B, "B's token should be intact");
 
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 });
 
-test("withRunLock auto-recovers when prior holder's lock has a different token (stale-takeover)", () => {
+test("withRunLock auto-recovers when prior holder's lock has a different token (stale-takeover)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-lock-takeover-"));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	const { manifest } = createRunManifest({
@@ -297,10 +298,10 @@ test("withRunLock auto-recovers when prior holder's lock has a different token (
 	assert.equal(result, "ok");
 	assert.equal(fs.existsSync(lockFile), false, "new holder should have cleaned up the lock on release");
 
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 });
 
-test("withRunLock writes kind=run in the lock file (Round 21 forward compat)", () => {
+test("withRunLock writes kind=run in the lock file (Round 21 forward compat)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-lock-kind-"));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	const { manifest } = createRunManifest({
@@ -340,10 +341,10 @@ test("withRunLock writes kind=run in the lock file (Round 21 forward compat)", (
 	});
 	assert.equal(captured.kind, "run", "withRunLock should write kind='run'");
 
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 });
 
-test("withFileLockSync writes kind=file in the lock file (Round 21 forward compat)", () => {
+test("withFileLockSync writes kind=file in the lock file (Round 21 forward compat)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-file-kind-"));
 	const protectedPath = path.join(cwd, "data.json");
 
@@ -357,10 +358,10 @@ test("withFileLockSync writes kind=file in the lock file (Round 21 forward compa
 	});
 	assert.equal(captured.kind, "file", "withFileLockSync should write kind='file'");
 
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 });
 
-test("locks from older versions (no kind field) still work — treated as 'file' (Round 21 back-compat)", () => {
+test("locks from older versions (no kind field) still work — treated as 'file' (Round 21 back-compat)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-lock-legacy-"));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	const { manifest } = createRunManifest({
@@ -403,5 +404,5 @@ test("locks from older versions (no kind field) still work — treated as 'file'
 	assert.equal(result, "ok");
 	assert.equal(fs.existsSync(lockFile), false, "legacy lock should be stolen and cleaned up");
 
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 });

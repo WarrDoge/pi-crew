@@ -36,6 +36,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { withRunLock } from "../../../../src/state/coordination/locks.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function mkManifest(stateRoot: string): TeamRunManifest {
 	return {
@@ -125,6 +126,6 @@ test("staleMs steal of a live in-process holder logs locks.steal-live-holder (wa
 		console.error = originalError;
 		if (savedSocketFlag === undefined) delete process.env.PI_CREW_RUN_LOCK_SOCKET;
 		else process.env.PI_CREW_RUN_LOCK_SOCKET = savedSocketFlag;
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await removeDirWithRetry(stateRoot);
 	}
 });

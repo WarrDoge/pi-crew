@@ -6,6 +6,7 @@ import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("mutating api operations respect run locks", async () => {
 	const cwd = createTrackedTempDir("pi-crew-api-locks-");
@@ -37,6 +38,6 @@ test("mutating api operations respect run locks", async () => {
 		assert.equal(locked.isError, true);
 		assert.match(firstText(locked), /locked/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

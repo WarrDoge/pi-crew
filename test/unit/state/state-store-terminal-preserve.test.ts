@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import { createRunManifest, saveRunManifest, updateRunStatus } from "../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 /**
  * Finding 8 write-layer guard (2026-09-23 live battery, run team_20260923175042):
@@ -41,7 +42,7 @@ function makeWorkflow() {
 }
 
 describe("finding 8 write-layer terminal preserve", () => {
-	it("raw saveRunManifest with in-memory 'running' cannot erase disk 'cancelled' — the live race", () => {
+	it("raw saveRunManifest with in-memory 'running' cannot erase disk 'cancelled' — the live race", async () => {
 		const cwd = fixture("raw");
 		try {
 			const { manifest } = createRunManifest({ cwd, team: makeTeam(), workflow: makeWorkflow(), goal: "f8w raw" });
@@ -54,11 +55,11 @@ describe("finding 8 write-layer terminal preserve", () => {
 			const onDisk = JSON.parse(fs.readFileSync(path.join(manifest.stateRoot, "manifest.json"), "utf-8"));
 			assert.equal(onDisk.status, "cancelled");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("allowTerminalExit bypasses the guard (resume contract)", () => {
+	it("allowTerminalExit bypasses the guard (resume contract)", async () => {
 		const cwd = fixture("bypass");
 		try {
 			const { manifest } = createRunManifest({ cwd, team: makeTeam(), workflow: makeWorkflow(), goal: "f8w bypass" });
@@ -67,11 +68,11 @@ describe("finding 8 write-layer terminal preserve", () => {
 			const saved = saveRunManifest(stale, { allowTerminalExit: true });
 			assert.equal(saved.status, "cancelled");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("updateRunStatus preserves disk terminal, emits run.terminal_preserved, NOT run.<status>", () => {
+	it("updateRunStatus preserves disk terminal, emits run.terminal_preserved, NOT run.<status>", async () => {
 		const cwd = fixture("upd");
 		try {
 			const { manifest } = createRunManifest({ cwd, team: makeTeam(), workflow: makeWorkflow(), goal: "f8w upd" });
@@ -85,11 +86,11 @@ describe("finding 8 write-layer terminal preserve", () => {
 			assert.ok(events.includes("run.terminal_preserved"), "preserve event recorded");
 			assert.ok(!events.includes('"run.running"'), "no false run.running event");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("normal transitions are untouched (running→cancelled writes cancelled + event)", () => {
+	it("normal transitions are untouched (running→cancelled writes cancelled + event)", async () => {
 		const cwd = fixture("norm");
 		try {
 			const { manifest } = createRunManifest({ cwd, team: makeTeam(), workflow: makeWorkflow(), goal: "f8w norm" });
@@ -98,11 +99,11 @@ describe("finding 8 write-layer terminal preserve", () => {
 			const events = fs.readFileSync(manifest.eventsPath, "utf-8");
 			assert.ok(events.includes('"run.cancelled"'));
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("resume bypass: updateRunStatus cancelled→running with allowTerminalExit succeeds", () => {
+	it("resume bypass: updateRunStatus cancelled→running with allowTerminalExit succeeds", async () => {
 		const cwd = fixture("resume");
 		try {
 			const { manifest } = createRunManifest({ cwd, team: makeTeam(), workflow: makeWorkflow(), goal: "f8w resume" });
@@ -113,7 +114,7 @@ describe("finding 8 write-layer terminal preserve", () => {
 			const events = fs.readFileSync(manifest.eventsPath, "utf-8");
 			assert.ok(events.includes('"run.running"'));
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

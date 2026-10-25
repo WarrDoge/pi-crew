@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createWorkerEventsChannel } from "../../../src/prompt/worker-events-channel.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 const ENV = {
 	PI_CREW_EVENTS_PATH: "set-later",
@@ -23,7 +24,7 @@ function isIsoString(value: unknown): boolean {
  * exporting that run produced a bundle the importer rejects wholesale
  * ("events[i].time must be a string" — run-bundle-schema.ts validateEvent).
  */
-test("default appender path: emitted events land on disk with an ISO-string `time`", () => {
+test("default appender path: emitted events land on disk with an ISO-string `time`", async () => {
 	const dir = mkdtempSync(path.join(tmpdir(), "wec-time-"));
 	const eventsPath = path.join(dir, "events.jsonl");
 	try {
@@ -46,7 +47,7 @@ test("default appender path: emitted events land on disk with an ISO-string `tim
 		// The stamp uses the injected clock (deterministic, not wall time).
 		assert.equal(lines[0]?.time, new Date(1_700_000_000_000).toISOString());
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 

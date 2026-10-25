@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { atomicWriteJsonCoalesced, flushPendingAtomicWrites } from "../../../src/state/atomic-write.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 /**
  * R10-2 regression: `flushPendingAtomicWrites(path?)` must flush ONLY the
@@ -14,7 +15,7 @@ import { atomicWriteJsonCoalesced, flushPendingAtomicWrites } from "../../../src
  * flush, so reading file B waited on a pending coalesced write for an
  * unrelated file A no matter how long A's coalesce window was.
  */
-test("scoped flush does not flush an unrelated file's pending coalesced write (R10-2)", () => {
+test("scoped flush does not flush an unrelated file's pending coalesced write (R10-2)", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-scoped-flush-1-"));
 	const fileA = path.join(dir, "a.json");
 	const fileB = path.join(dir, "b.json");
@@ -41,22 +42,22 @@ test("scoped flush does not flush an unrelated file's pending coalesced write (R
 	} finally {
 		// Belt-and-suspenders: never leak a 60s pending timer into other tests.
 		flushPendingAtomicWrites();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });
 
-test("scoped flush for a path with no pending entry is a safe no-op (R10-2)", () => {
+test("scoped flush for a path with no pending entry is a safe no-op (R10-2)", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-scoped-flush-2-"));
 	const fileC = path.join(dir, "c.json");
 	try {
 		assert.doesNotThrow(() => flushPendingAtomicWrites(fileC));
 		assert.equal(fs.existsSync(fileC), false, "no-op must not create the file");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });
 
-test("scoped flush preserves last-write-wins coalescing for the flushed file (R10-2)", () => {
+test("scoped flush preserves last-write-wins coalescing for the flushed file (R10-2)", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-scoped-flush-3-"));
 	const fileA = path.join(dir, "a.json");
 	const fileB = path.join(dir, "b.json");
@@ -69,6 +70,6 @@ test("scoped flush preserves last-write-wins coalescing for the flushed file (R1
 		assert.equal(fs.existsSync(fileB), false, "B untouched by A's scoped flush");
 	} finally {
 		flushPendingAtomicWrites();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });

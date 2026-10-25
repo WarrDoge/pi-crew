@@ -24,6 +24,7 @@ import {
 	saveSpecRecord,
 } from "../../../../src/state/stores/spec-store.ts";
 import type { SpecRecord, TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const REAL_HOME = process.env.HOME;
 const REAL_USERPROFILE = process.env.USERPROFILE;
@@ -42,12 +43,12 @@ function makeCwd(): string {
 	return dir;
 }
 
-function cleanup(cwd: string): void {
+async function cleanup(cwd: string): Promise<void> {
 	if (REAL_HOME === undefined) delete process.env.HOME;
 	else process.env.HOME = REAL_HOME;
 	if (REAL_USERPROFILE === undefined) delete process.env.USERPROFILE;
 	else process.env.USERPROFILE = REAL_USERPROFILE;
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 }
 
 function makeSpec(overrides?: Partial<SpecRecord>): SpecRecord {

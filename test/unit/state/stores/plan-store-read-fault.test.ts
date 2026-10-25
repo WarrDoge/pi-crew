@@ -11,9 +11,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-
 import { appendPlanRevision, planFilePath } from "../../../../src/state/stores/plan-store.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeManifest(): { manifest: TeamRunManifest; stateRoot: string } {
 	const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pc-planb4-"));
@@ -36,7 +36,7 @@ const v1 = {
 	phases: [{ id: "p1", title: "phase", itemIds: ["i1"] }],
 };
 
-test("R5-M-B4: corrupt plans.json → appendPlanRevision throws, file NOT overwritten", () => {
+test("R5-M-B4: corrupt plans.json → appendPlanRevision throws, file NOT overwritten", async () => {
 	const { manifest, stateRoot } = makeManifest();
 	try {
 		fs.mkdirSync(path.dirname(planFilePath(manifest)), { recursive: true });
@@ -46,17 +46,17 @@ test("R5-M-B4: corrupt plans.json → appendPlanRevision throws, file NOT overwr
 		assert.throws(() => appendPlanRevision(manifest, structuredClone(v1) as never), /unreadable/);
 		assert.equal(fs.readFileSync(planFilePath(manifest), "utf-8"), corrupt, "lineage must survive for manual recovery");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await removeDirWithRetry(stateRoot);
 	}
 });
 
-test("R5-M-B4: ENOENT is a legitimate empty store — first append still works", () => {
+test("R5-M-B4: ENOENT is a legitimate empty store — first append still works", async () => {
 	const { manifest, stateRoot } = makeManifest();
 	try {
 		const stored = appendPlanRevision(manifest, structuredClone(v1) as never);
 		assert.equal(stored.version, 1);
 		assert.ok(fs.existsSync(planFilePath(manifest)), "first write must still happen");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await removeDirWithRetry(stateRoot);
 	}
 });

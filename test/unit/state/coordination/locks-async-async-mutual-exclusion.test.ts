@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { withFileLockAsync, withRunLock } from "../../../../src/state/coordination/locks.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * ST-3-FIX regression test.
@@ -84,7 +85,7 @@ test("ST-3-FIX: two concurrent withFileLockAsync callers for the SAME file are m
 	const joined = order.join(",");
 	assert.ok(joined === "a-enter,a-exit,b-enter,b-exit", `critical sections must not interleave, got: ${joined}`);
 
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 });
 
 test("ST-3-FIX: three concurrent withFileLockAsync callers for the SAME file are serialized", async () => {
@@ -123,7 +124,7 @@ test("ST-3-FIX: three concurrent withFileLockAsync callers for the SAME file are
 		`async↔async mutual exclusion must hold for 3 callers — maxConcurrent should be 1, got ${maxConcurrent}`,
 	);
 
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 });
 
 // RR-011 (F02) non-regression: the run-lock family and the file-lock family share
@@ -177,5 +178,5 @@ test("RR-011: a concurrently held run lock does not affect withFileLockAsync mut
 		`file-lock async↔async mutual exclusion must hold independently of run locks — maxConcurrent should be 1, got ${maxConcurrent}`,
 	);
 
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 });

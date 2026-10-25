@@ -7,6 +7,7 @@ import { createRunManifest, saveRunTasks } from "../../../src/state/stores/state
 import type { TeamTaskState } from "../../../src/state/types.ts";
 import type { TeamConfig } from "../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 /**
  * G19 (W-E Phase 1) pin: `controlReservation` and `workerExitStatus` were
@@ -49,7 +50,7 @@ function assertNoDeadFields(label: string, rows: TeamTaskState[]): void {
 	}
 }
 
-test("freshly written tasks.json contains no controlReservation/workerExitStatus", () => {
+test("freshly written tasks.json contains no controlReservation/workerExitStatus", async () => {
 	const cwd = makeTmpCwd("pi-crew-g19-drop-");
 	try {
 		const { manifest, tasks } = createRunManifest({ cwd, team, workflow, goal: "pin dropped dead state fields" });
@@ -72,6 +73,6 @@ test("freshly written tasks.json contains no controlReservation/workerExitStatus
 			assert.equal(task.status, "completed");
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

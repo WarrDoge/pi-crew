@@ -6,6 +6,7 @@ import { test } from "node:test";
 import type { AgentConfig } from "../../../src/agents/agent-config.ts";
 import { shouldRegisterDelegateTool } from "../../../src/prompt/prompt-runtime.ts";
 import { prepareSpawnContext } from "../../../src/runtime/child-pi/child-pi-spawn.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 test("delegate registers for ANY role when env gate on (D8)", () => {
 	assert.equal(shouldRegisterDelegateTool({ PI_CREW_DELEGATE_ENABLED: "1", PI_CREW_ROLE: "analyst" } as NodeJS.ProcessEnv), true);
@@ -13,7 +14,7 @@ test("delegate registers for ANY role when env gate on (D8)", () => {
 	assert.equal(shouldRegisterDelegateTool({} as NodeJS.ProcessEnv), false);
 });
 
-test("D8: PI_CREW_DELEGATE_ENABLED is set for EVERY role and depth (spawn env unconditional)", () => {
+test("D8: PI_CREW_DELEGATE_ENABLED is set for EVERY role and depth (spawn env unconditional)", async () => {
 	const roles = [
 		"executor",
 		"test-engineer",
@@ -45,7 +46,7 @@ test("D8: PI_CREW_DELEGATE_ENABLED is set for EVERY role and depth (spawn env un
 				const env = res.ctx.mergedEnv as Record<string, string | undefined>;
 				assert.equal(env.PI_CREW_DELEGATE_ENABLED, "1", `role=${role} depthEnv=${depthEnv !== undefined}`);
 			} finally {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await removeDirWithRetry(dir);
 			}
 		}
 	}

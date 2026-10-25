@@ -15,6 +15,7 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 const require = createRequire(import.meta.url);
 const fsDefault = require("node:fs") as typeof fs & { __patched?: boolean };
@@ -80,6 +81,6 @@ test("R39-M1: retry exhaustion degrades — no throw, entry dropped, failure rep
 		assert.deepEqual(reported, [target], "subscriber notified of the degradation");
 		unsubscribe();
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });

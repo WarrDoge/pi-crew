@@ -3,8 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-
 import { createWorkerEventsChannel } from "../../../src/prompt/worker-events-channel.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 function setup() {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-wec-"));
@@ -12,7 +12,7 @@ function setup() {
 	return { dir, eventsPath };
 }
 
-test("appends separator when file does not end with newline", () => {
+test("appends separator when file does not end with newline", async () => {
 	const { dir, eventsPath } = setup();
 	try {
 		fs.writeFileSync(eventsPath, '{"a":1}', "utf-8"); // no trailing \n
@@ -29,11 +29,11 @@ test("appends separator when file does not end with newline", () => {
 		assert.equal(lines.length, 2);
 		assert.equal(JSON.parse(lines[1]!).type, "worker.test");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
-test("no separator when file already ends with newline; none for empty or missing file", () => {
+test("no separator when file already ends with newline; none for empty or missing file", async () => {
 	const { dir, eventsPath } = setup();
 	try {
 		fs.writeFileSync(eventsPath, '{"a":1}\n', "utf-8");
@@ -61,6 +61,6 @@ test("no separator when file already ends with newline; none for empty or missin
 		lines = fs.readFileSync(eventsPath, "utf-8").trim().split("\n");
 		assert.equal(lines.length, 1);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });

@@ -5,12 +5,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { readVerifiedArtifact, writeArtifact } from "../../../../src/state/stores/artifact-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Use realpath to resolve symlinks (macOS /var/folders → /private/var/folders).
 // atomicWriteFile refuses to write through untrusted symlink paths.
 const realTmp = fs.realpathSync(os.tmpdir());
 
-test("writeArtifact: contentHash matches sha256 of bytes on disk", () => {
+test("writeArtifact: contentHash matches sha256 of bytes on disk", async () => {
 	const root = fs.mkdtempSync(path.join(realTmp, "pi-crew-art-"));
 	const desc = writeArtifact(root, {
 		kind: "log",
@@ -23,7 +24,7 @@ test("writeArtifact: contentHash matches sha256 of bytes on disk", () => {
 	assert.strictEqual(desc.contentHash, expected);
 	assert.strictEqual(desc.sizeBytes, onDisk.length);
 	assert.ok(!onDisk.toString("utf-8").includes("AKIA0123456789ABCDEF"));
-	fs.rmSync(root, { recursive: true, force: true });
+	await removeDirWithRetry(root);
 });
 
 // STATE-9: the hash must be computed on the in-memory content (post-redaction)
@@ -31,7 +32,7 @@ test("writeArtifact: contentHash matches sha256 of bytes on disk", () => {
 // the hash of the in-memory string == the hash of the on-disk bytes. Verify
 // redaction happens BEFORE hashing (hash covers the redacted content, same as
 // the bytes that actually land on disk — behavior identical to the old read-back).
-test("writeArtifact: contentHash matches post-redaction in-memory content (STATE-9)", () => {
+test("writeArtifact: contentHash matches post-redaction in-memory content (STATE-9)", async () => {
 	const root = fs.mkdtempSync(path.join(realTmp, "pi-crew-art-state9-"));
 	try {
 		const content = '{"api_key":"sk-abc123-not-a-real-key","keep":"visible"}';
@@ -48,11 +49,11 @@ test("writeArtifact: contentHash matches post-redaction in-memory content (STATE
 		assert.strictEqual(desc.contentHash, expected, "hash computed on in-memory content matches on-disk bytes");
 		assert.ok(!onDisk.includes("sk-abc123-not-a-real-key"), "secret redacted before hashing");
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });
 
-test("writeArtifact: rejects path traversal", () => {
+test("writeArtifact: rejects path traversal", async () => {
 	const root = fs.mkdtempSync(path.join(realTmp, "pi-crew-art-"));
 	assert.throws(
 		() =>
@@ -64,10 +65,10 @@ test("writeArtifact: rejects path traversal", () => {
 			}),
 		/Invalid artifact path/,
 	);
-	fs.rmSync(root, { recursive: true, force: true });
+	await removeDirWithRetry(root);
 });
 
-test("writeArtifact: creates nested directories", () => {
+test("writeArtifact: creates nested directories", async () => {
 	const root = fs.mkdtempSync(path.join(realTmp, "pi-crew-art-"));
 	const desc = writeArtifact(root, {
 		kind: "log",
@@ -76,10 +77,10 @@ test("writeArtifact: creates nested directories", () => {
 		producer: "test",
 	});
 	assert.ok(fs.existsSync(desc.path));
-	fs.rmSync(root, { recursive: true, force: true });
+	await removeDirWithRetry(root);
 });
 
-test("M2 regression: writeArtifact redacts quoted-JSON & nested secrets via structural pass", () => {
+test("M2 regression: writeArtifact redacts quoted-JSON & nested secrets via structural pass", async () => {
 	// Flat redactSecretString misses JSON-quoted keys ("api_key":"...") because
 	// the char after the key run is '"' not ':'/'='. The structural JSON pass
 	// added in writeArtifact (security review M2) must catch these.
@@ -101,7 +102,7 @@ test("M2 regression: writeArtifact redacts quoted-JSON & nested secrets via stru
 	assert.ok(!onDisk.includes("c2VjcmV0"), "authorization Basic value must be redacted (M2)");
 	// Structure preserved (still valid JSON).
 	assert.doesNotThrow(() => JSON.parse(onDisk));
-	fs.rmSync(root, { recursive: true, force: true });
+	await removeDirWithRetry(root);
 });
 
 // ── M3-27 / R44-N3: read-side hash verification ──────────────────────────────
@@ -112,7 +113,7 @@ test("M2 regression: writeArtifact redacts quoted-JSON & nested secrets via stru
 // read path; these pins cover the tamper case, the happy case, missing files,
 // descriptors without a pinned hash, and root containment.
 
-test("M3-27/R44-N3: readVerifiedArtifact returns the content when the pinned hash matches", () => {
+test("M3-27/R44-N3: readVerifiedArtifact returns the content when the pinned hash matches", async () => {
 	const root = fs.mkdtempSync(path.join(realTmp, "pi-crew-art-verify-ok-"));
 	try {
 		const desc = writeArtifact(root, {
@@ -128,11 +129,11 @@ test("M3-27/R44-N3: readVerifiedArtifact returns the content when the pinned has
 			assert.equal(read.contentHash, desc.contentHash);
 		}
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });
 
-test("M3-27/R44-N3: a TAMPERED artifact is refused (probe n3 replay: served bytes ≠ pinned hash)", () => {
+test("M3-27/R44-N3: a TAMPERED artifact is refused (probe n3 replay: served bytes ≠ pinned hash)", async () => {
 	const root = fs.mkdtempSync(path.join(realTmp, "pi-crew-art-verify-bad-"));
 	try {
 		const desc = writeArtifact(root, {
@@ -154,11 +155,11 @@ test("M3-27/R44-N3: a TAMPERED artifact is refused (probe n3 replay: served byte
 			assert.match(read.content ?? "", /all gates green/);
 		}
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });
 
-test("M3-27/R44-N3: missing / unreadable / unpinned descriptors fail closed with distinct reasons", () => {
+test("M3-27/R44-N3: missing / unreadable / unpinned descriptors fail closed with distinct reasons", async () => {
 	const root = fs.mkdtempSync(path.join(realTmp, "pi-crew-art-verify-miss-"));
 	try {
 		const desc = writeArtifact(root, { kind: "log", relativePath: "gone.md", content: "x", producer: "t" });
@@ -177,11 +178,11 @@ test("M3-27/R44-N3: missing / unreadable / unpinned descriptors fail closed with
 		assert.equal(strict.ok, false);
 		if (!strict.ok) assert.equal(strict.reason, "no-pinned-hash");
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });
 
-test("M3-27/R44-N3: artifactsRoot containment refuses an out-of-root path (R44-N1 sibling guard)", () => {
+test("M3-27/R44-N3: artifactsRoot containment refuses an out-of-root path (R44-N1 sibling guard)", async () => {
 	const root = fs.mkdtempSync(path.join(realTmp, "pi-crew-art-verify-root-"));
 	const outside = path.join(realTmp, `pi-crew-art-outside-${Date.now()}.md`);
 	try {
@@ -191,6 +192,6 @@ test("M3-27/R44-N3: artifactsRoot containment refuses an out-of-root path (R44-N
 		if (!read.ok) assert.equal(read.reason, "outside-artifacts-root");
 	} finally {
 		fs.rmSync(outside, { force: true });
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });

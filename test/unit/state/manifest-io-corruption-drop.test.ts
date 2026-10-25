@@ -21,6 +21,7 @@ import {
 	loadTasksWithRecovery,
 	salvageTaskIds,
 } from "../../../src/state/stores/manifest-io.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 function writeEvents(eventsPath: string, runId: string): void {
 	const lines = [
@@ -43,7 +44,7 @@ test("salvageTaskIds: returns [] for a payload with no salvageable task objects"
 	assert.deepEqual(salvageTaskIds("{ this is not json }"), []);
 });
 
-test("R39-M2: corrupt tasks.json reports the tasks DROPPED by event-only reconstruction", () => {
+test("R39-M2: corrupt tasks.json reports the tasks DROPPED by event-only reconstruction", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-corrupt-"));
 	try {
 		const runId = "team_20260101000000_drop";
@@ -71,12 +72,12 @@ test("R39-M2: corrupt tasks.json reports the tasks DROPPED by event-only reconst
 		assert.equal(report!.salvagedCount, 3);
 		assert.deepEqual(report!.droppedIds.sort(), ["t1", "t2", "t3"], "dropped task ids are reported");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 		__test__clearTasksCorruptionReports();
 	}
 });
 
-test("R39-M2: non-array ({}) corruption reports 0 salvaged / 0 dropped (total loss is not misreported)", () => {
+test("R39-M2: non-array ({}) corruption reports 0 salvaged / 0 dropped (total loss is not misreported)", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-corrupt-"));
 	try {
 		const runId = "team_20260101000000_allloss";
@@ -94,7 +95,7 @@ test("R39-M2: non-array ({}) corruption reports 0 salvaged / 0 dropped (total lo
 		assert.equal(report!.salvagedCount, 0);
 		assert.deepEqual(report!.droppedIds, []);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 		__test__clearTasksCorruptionReports();
 	}
 });

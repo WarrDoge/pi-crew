@@ -25,6 +25,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { atomicWriteJson, atomicWriteJsonCoalesced, flushPendingAtomicWrites } from "../../../src/state/atomic-write.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 /** Long enough that no coalesce timer fires mid-test — only explicit drains. */
 const HOLD_MS = 60_000;
@@ -133,7 +134,9 @@ const dirFsyncCountSkip =
 // (a) THE grouping case: 4 coalesced files, one dir, one global drain
 // ---------------------------------------------------------------------------
 
-test("coalesced drain of 4 files in one dir → ONE parent-dir fsync, 4 data fsyncs, all content lands", { skip: dirFsyncCountSkip }, () => {
+test("coalesced drain of 4 files in one dir → ONE parent-dir fsync, 4 data fsyncs, all content lands", {
+	skip: dirFsyncCountSkip,
+}, async () => {
 	const stateDir = makeTempDir("drain");
 	const files = ["tasks.json", "manifest.json", "graph.json", "budget.json"].map((name) => path.join(stateDir, name));
 	const spy = makeDirFsyncSpy([stateDir]);
@@ -156,7 +159,7 @@ test("coalesced drain of 4 files in one dir → ONE parent-dir fsync, 4 data fsy
 		);
 	} finally {
 		spy.restore();
-		fs.rmSync(stateDir, { recursive: true, force: true });
+		await cleanupStateRoot(stateDir);
 	}
 });
 
@@ -164,7 +167,7 @@ test("coalesced drain of 4 files in one dir → ONE parent-dir fsync, 4 data fsy
 // (b) single direct write — immediate dir fsync unchanged (no deferral leak)
 // ---------------------------------------------------------------------------
 
-test("direct atomicWriteJson keeps the immediate per-write parent-dir fsync", { skip: dirFsyncCountSkip }, () => {
+test("direct atomicWriteJson keeps the immediate per-write parent-dir fsync", { skip: dirFsyncCountSkip }, async () => {
 	const stateDir = makeTempDir("direct");
 	const spy = makeDirFsyncSpy([stateDir]);
 	try {
@@ -174,7 +177,7 @@ test("direct atomicWriteJson keeps the immediate per-write parent-dir fsync", { 
 		assert.equal(spy.dirFsyncs(stateDir), 1, "direct write (depth 0) must fsync the dir immediately, exactly once");
 	} finally {
 		spy.restore();
-		fs.rmSync(stateDir, { recursive: true, force: true });
+		await cleanupStateRoot(stateDir);
 	}
 });
 
@@ -182,7 +185,7 @@ test("direct atomicWriteJson keeps the immediate per-write parent-dir fsync", { 
 // (c) two distinct dirs → one dir fsync PER DIR
 // ---------------------------------------------------------------------------
 
-test("coalesced drain across TWO dirs → one parent-dir fsync per distinct dir", { skip: dirFsyncCountSkip }, () => {
+test("coalesced drain across TWO dirs → one parent-dir fsync per distinct dir", { skip: dirFsyncCountSkip }, async () => {
 	const dirA = makeTempDir("two-a");
 	const dirB = makeTempDir("two-b");
 	const spy = makeDirFsyncSpy([dirA, dirB]);
@@ -202,8 +205,8 @@ test("coalesced drain across TWO dirs → one parent-dir fsync per distinct dir"
 		assert.equal(spy.dirFsyncs(dirB), 1, `dirB grouped to exactly one fsync (got ${spy.dirFsyncs(dirB)})`);
 	} finally {
 		spy.restore();
-		fs.rmSync(dirA, { recursive: true, force: true });
-		fs.rmSync(dirB, { recursive: true, force: true });
+		await cleanupStateRoot(dirA);
+		await cleanupStateRoot(dirB);
 	}
 });
 
@@ -211,7 +214,9 @@ test("coalesced drain across TWO dirs → one parent-dir fsync per distinct dir"
 // (d) liveness / no-leak guards
 // ---------------------------------------------------------------------------
 
-test("empty drain is a no-op; scoped flush stays immediate; post-drain writes are immediate again", { skip: dirFsyncCountSkip }, () => {
+test("empty drain is a no-op; scoped flush stays immediate; post-drain writes are immediate again", {
+	skip: dirFsyncCountSkip,
+}, async () => {
 	const stateDir = makeTempDir("liveness");
 	const spy = makeDirFsyncSpy([stateDir]);
 	try {
@@ -237,7 +242,7 @@ test("empty drain is a no-op; scoped flush stays immediate; post-drain writes ar
 		assert.equal(spy.dirFsyncs(stateDir), 3, "post-drain direct write must fsync the dir immediately");
 	} finally {
 		spy.restore();
-		fs.rmSync(stateDir, { recursive: true, force: true });
+		await cleanupStateRoot(stateDir);
 	}
 });
 
@@ -245,7 +250,7 @@ test("empty drain is a no-op; scoped flush stays immediate; post-drain writes ar
 // (e) mid-drain failure → the trailing dir fsync must not be skipped
 // ---------------------------------------------------------------------------
 
-test("a failed flush mid-drain does not skip the trailing dir fsync for already-renamed files", { skip: dirFsyncCountSkip }, () => {
+test("a failed flush mid-drain does not skip the trailing dir fsync for already-renamed files", { skip: dirFsyncCountSkip }, async () => {
 	const stateDir = makeTempDir("failure");
 	const good1 = path.join(stateDir, "good1.json");
 	const poison = path.join(stateDir, "poison.json");
@@ -299,13 +304,13 @@ test("a failed flush mid-drain does not skip the trailing dir fsync for already-
 		spy.restore();
 		// Belt-and-suspenders: never leak a 60s pending timer into other tests.
 		flushPendingAtomicWrites();
-		fs.rmSync(stateDir, { recursive: true, force: true });
+		await cleanupStateRoot(stateDir);
 	}
 });
 
 test("a contained write failure mid-drain still groups: other files land and the dir fsyncs exactly once", {
 	skip: dirFsyncCountSkip,
-}, () => {
+}, async () => {
 	const stateDir = makeTempDir("contained");
 	const files = ["good1.json", "poison.json", "good2.json", "good3.json"].map((name) => path.join(stateDir, name));
 	const poison = files[1];
@@ -327,6 +332,6 @@ test("a contained write failure mid-drain still groups: other files land and the
 	} finally {
 		spy.restore();
 		flushPendingAtomicWrites();
-		fs.rmSync(stateDir, { recursive: true, force: true });
+		await cleanupStateRoot(stateDir);
 	}
 });

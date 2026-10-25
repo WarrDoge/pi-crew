@@ -26,6 +26,7 @@ import {
 } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 /** Resolve temp dir through realpath to handle macOS /var → /private/var symlink. */
 function makeResolvedTempDir(prefix: string): string {
@@ -125,20 +126,20 @@ function removeDirectoryLink(linkPath: string): void {
 	}
 }
 
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T | Promise<T>): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = makeResolvedTempDir("pi-crew-state-home-");
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await cleanupStateRoot(home);
 	}
 }
 
-test("createRunManifest writes manifest and tasks", () => {
+test("createRunManifest writes manifest and tasks", async () => {
 	let cwd = makeResolvedTempDir("pi-crew-state-test-");
 	try {
 		cwd = fs.realpathSync(cwd);
@@ -160,11 +161,11 @@ test("createRunManifest writes manifest and tasks", () => {
 		assert.equal(loaded?.manifest.goal, "test");
 		assert.equal(loaded?.tasks[0]?.role, "planner");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("loadRunManifestById rejects unsafe run ids and manifest path mismatches", () => {
+test("loadRunManifestById rejects unsafe run ids and manifest path mismatches", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-safe-runid-");
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -183,11 +184,11 @@ test("loadRunManifestById rejects unsafe run ids and manifest path mismatches", 
 		__test__clearManifestCache();
 		assert.equal(loadRunManifestById(cwd, created.manifest.runId), undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("loadRunManifestById rejects symlinked artifact roots outside artifact parent", (t) => {
+test("loadRunManifestById rejects symlinked artifact roots outside artifact parent", async (t) => {
 	const cwd = makeResolvedTempDir("pi-crew-state-artifact-symlink-");
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -199,10 +200,7 @@ test("loadRunManifestById rejects symlinked artifact roots outside artifact pare
 		});
 		const outside = path.join(cwd, "outside-artifacts");
 		fs.mkdirSync(outside, { recursive: true });
-		fs.rmSync(created.paths.artifactsRoot, {
-			recursive: true,
-			force: true,
-		});
+		await cleanupStateRoot(created.paths.artifactsRoot);
 		if (!tryDirectorySymlink(outside, created.paths.artifactsRoot)) {
 			t.skip("directory symlinks unavailable on this platform");
 			return;
@@ -217,11 +215,11 @@ test("loadRunManifestById rejects symlinked artifact roots outside artifact pare
 			assert.ok(e instanceof Error && e.message.includes("outside"), `Expected containment error, got: ${e}`);
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("loadRunManifestById revalidates cached artifact root containment", (t) => {
+test("loadRunManifestById revalidates cached artifact root containment", async (t) => {
 	const cwd = makeResolvedTempDir("pi-crew-state-cache-symlink-");
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -234,10 +232,7 @@ test("loadRunManifestById revalidates cached artifact root containment", (t) => 
 		assert.ok(loadRunManifestById(cwd, created.manifest.runId));
 		const outside = path.join(cwd, "outside-artifacts-cache");
 		fs.mkdirSync(outside, { recursive: true });
-		fs.rmSync(created.paths.artifactsRoot, {
-			recursive: true,
-			force: true,
-		});
+		await cleanupStateRoot(created.paths.artifactsRoot);
 		if (!tryDirectorySymlink(outside, created.paths.artifactsRoot)) {
 			t.skip("directory symlinks unavailable on this platform");
 			return;
@@ -252,12 +247,12 @@ test("loadRunManifestById revalidates cached artifact root containment", (t) => 
 		}
 	} finally {
 		__test__clearManifestCache();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("runtime manifest cache rejects tampered manifest paths", () => {
-	withIsolatedHome(() => {
+test("runtime manifest cache rejects tampered manifest paths", async () => {
+	await withIsolatedHome(async () => {
 		const cwd = makeResolvedTempDir("pi-crew-runtime-manifest-cache-safe-");
 		fs.mkdirSync(path.join(cwd, ".crew"));
 		try {
@@ -282,12 +277,12 @@ test("runtime manifest cache rejects tampered manifest paths", () => {
 			}
 		} finally {
 			__test__clearManifestCache();
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
 
-test("loadRunManifestById resolves symlinks to canonical paths in manifest", (t) => {
+test("loadRunManifestById resolves symlinks to canonical paths in manifest", async (t) => {
 	const parent = makeResolvedTempDir("pi-crew-state-workspace-link-");
 	const realRoot = path.join(parent, "real-workspace");
 	const linkRoot = path.join(parent, "linked-workspace");
@@ -313,11 +308,11 @@ test("loadRunManifestById resolves symlinks to canonical paths in manifest", (t)
 		assert.equal(loaded?.manifest.stateRoot, created.manifest.stateRoot);
 	} finally {
 		if (fs.existsSync(linkRoot)) removeDirectoryLink(linkRoot);
-		fs.rmSync(parent, { recursive: true, force: true });
+		await cleanupStateRoot(parent);
 	}
 });
 
-test("loadRunManifestById cache invalidates after task save", () => {
+test("loadRunManifestById cache invalidates after task save", async () => {
 	__test__clearManifestCache();
 	const cwd = makeResolvedTempDir("pi-crew-state-cache-");
 	fs.mkdirSync(path.join(cwd, ".crew"));
@@ -337,7 +332,7 @@ test("loadRunManifestById cache invalidates after task save", () => {
 		const loaded2 = loadRunManifestById(cwd, created.manifest.runId);
 		assert.equal(loaded2?.tasks[0]?.status, "running");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -345,7 +340,7 @@ test("loadRunManifestById cache invalidates after task save", () => {
 // entry and zeroes only the tasks stamps. A zeroed stamp can only cause a
 // miss (real on-disk mtime is never 0), so the next load re-reads tasks from
 // disk — never a stale tasks hit — while the manifest half stays stat-verified.
-test("saveRunTasksCoalesced keeps the cache entry and the next load reads the saved tasks", () => {
+test("saveRunTasksCoalesced keeps the cache entry and the next load reads the saved tasks", async () => {
 	__test__clearManifestCache();
 	const cwd = makeResolvedTempDir("pi-crew-state-cache-keep-");
 	fs.mkdirSync(path.join(cwd, ".crew"));
@@ -377,7 +372,7 @@ test("saveRunTasksCoalesced keeps the cache entry and the next load reads the sa
 		assert.equal(loaded2?.tasks[0]?.status, "running", "zeroed stamps force a disk re-read that sees the new tasks");
 	} finally {
 		__test__clearManifestCache();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -403,11 +398,11 @@ test("async save helpers persist run manifest and tasks", async () => {
 		assert.equal(reloaded?.tasks[0]?.status, "completed");
 		assert.equal(reloaded?.manifest.summary, "Async test");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("createRunManifest resolves project root from parent .git directory", () => {
+test("createRunManifest resolves project root from parent .git directory", async () => {
 	let root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-state-gitroot-"));
 	// Canonicalize to long-name form matching production code
 	try {
@@ -437,13 +432,13 @@ test("createRunManifest resolves project root from parent .git directory", () =>
 		const manifestPath = path.join(created.paths.stateRoot, "manifest.json");
 		assert.equal(fs.existsSync(manifestPath), true);
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await cleanupStateRoot(root);
 	}
 });
 
 // --- New tests appended below ---
 
-test("saveRunManifest persists manifest synchronously", () => {
+test("saveRunManifest persists manifest synchronously", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-save-manifest-");
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -462,11 +457,11 @@ test("saveRunManifest persists manifest synchronously", () => {
 		const loaded = loadRunManifestById(cwd, created.manifest.runId);
 		assert.equal(loaded?.manifest.summary, "sync save test");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("createRunPaths generates correct directory structure", () => {
+test("createRunPaths generates correct directory structure", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-paths-");
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -478,11 +473,11 @@ test("createRunPaths generates correct directory structure", () => {
 		assert.equal(paths.tasksPath, path.join(paths.stateRoot, "tasks.json"));
 		assert.equal(paths.eventsPath, path.join(paths.stateRoot, "events.jsonl"));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("createRunPaths accepts a custom run ID", () => {
+test("createRunPaths accepts a custom run ID", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-custom-id-");
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -490,21 +485,21 @@ test("createRunPaths accepts a custom run ID", () => {
 		assert.equal(paths.runId, "my_custom_run_123");
 		assert.match(paths.stateRoot, /my_custom_run_123/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("createRunPaths rejects unsafe run IDs", () => {
+test("createRunPaths rejects unsafe run IDs", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-unsafe-id-");
 	try {
 		assert.throws(() => createRunPaths(cwd, "../traversal"), /Invalid runId/);
 		assert.throws(() => createRunPaths(cwd, "run with spaces"), /Invalid runId/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("createTasksFromWorkflow builds tasks for each step", () => {
+test("createTasksFromWorkflow builds tasks for each step", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-tasks-wf-");
 	try {
 		const multiStepWorkflow: WorkflowConfig = {
@@ -528,11 +523,11 @@ test("createTasksFromWorkflow builds tasks for each step", () => {
 		assert.equal(tasks[1].dependsOn[0], "explore");
 		assert.equal(tasks[1].graph?.queue, "blocked");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("createTasksFromWorkflow derives title and description from the step body", () => {
+test("createTasksFromWorkflow derives title and description from the step body", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-tasks-title-");
 	try {
 		const detailedWorkflow: WorkflowConfig = {
@@ -561,11 +556,11 @@ test("createTasksFromWorkflow derives title and description from the step body",
 		assert.equal(tasks[2].title, "verify");
 		assert.equal(tasks[2].description, undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("createTasksFromWorkflow names templated steps after the template, not the goal", () => {
+test("createTasksFromWorkflow names templated steps after the template, not the goal", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-tasks-goal-");
 	try {
 		const templatedWorkflow: WorkflowConfig = {
@@ -591,11 +586,11 @@ test("createTasksFromWorkflow names templated steps after the template, not the 
 		// Placeholder-only body (direct-run) adopts the goal itself as title.
 		assert.equal(substituted[1].title, "wire the dock scroll window");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("createTasksFromWorkflow uses agent from team roles", () => {
+test("createTasksFromWorkflow uses agent from team roles", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-tasks-agent-");
 	try {
 		const customTeam: TeamConfig = {
@@ -622,11 +617,11 @@ test("createTasksFromWorkflow uses agent from team roles", () => {
 		assert.equal(tasks[0].agent, "planner-agent");
 		assert.equal(tasks[1].agent, "exec-agent");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("updateRunStatus transitions queued to running", () => {
+test("updateRunStatus transitions queued to running", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-update-status-");
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -645,11 +640,11 @@ test("updateRunStatus transitions queued to running", () => {
 		const loaded = loadRunManifestById(cwd, created.manifest.runId);
 		assert.equal(loaded?.manifest.status, "running");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("updateRunStatus throws on invalid transitions", () => {
+test("updateRunStatus throws on invalid transitions", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-bad-transition-");
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -661,11 +656,11 @@ test("updateRunStatus throws on invalid transitions", () => {
 		});
 		assert.throws(() => updateRunStatus(created.manifest, "completed"), /Invalid run status transition: queued -> completed/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("updateRunStatus preserves previous summary when no new summary provided", () => {
+test("updateRunStatus preserves previous summary when no new summary provided", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-summary-preserve-");
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -683,7 +678,7 @@ test("updateRunStatus preserves previous summary when no new summary provided", 
 		const updated = updateRunStatus(withSummary, "running");
 		assert.equal(updated.summary, "Existing summary");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -703,11 +698,11 @@ test("loadRunManifestByIdAsync loads manifest asynchronously", async () => {
 		assert.equal(loaded?.manifest.goal, "async load");
 		assert.equal(loaded?.tasks.length, 1);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("manifest cache is LRU bounded", () => {
+test("manifest cache is LRU bounded", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-cache-bounds-");
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	const previousMax = DEFAULT_CACHE.manifestMaxEntries;
@@ -743,13 +738,13 @@ test("manifest cache is LRU bounded", () => {
 	} finally {
 		DEFAULT_CACHE.manifestMaxEntries = previousMax;
 		__test__clearManifestCache();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
 // --- OPT-08 additive helper tests ---
 
-test("getManifestCacheStats returns a sensible object (size, limits, per-stateRoot entries)", () => {
+test("getManifestCacheStats returns a sensible object (size, limits, per-stateRoot entries)", async () => {
 	const cwd = makeResolvedTempDir("pi-crew-state-cache-stats-");
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -781,7 +776,7 @@ test("getManifestCacheStats returns a sensible object (size, limits, per-stateRo
 		}
 	} finally {
 		__test__clearManifestCache();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -810,7 +805,7 @@ test("unloadRun is idempotent and invalidates the cache entry for the given stat
 		await unloadRun("/nonexistent/state/root/that/never/existed");
 	} finally {
 		__test__clearManifestCache();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -897,7 +892,7 @@ test("unloadRun forces the next read to reflect disk state, not stale cache", as
 		assert.equal(freshLoad?.manifest.summary, "FRESH-DISK", "after unloadRun, read should reflect disk");
 	} finally {
 		__test__clearManifestCache();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -930,6 +925,6 @@ test("unloadRun flushes pending coalesced writes to disk", async () => {
 		flushPendingAtomicWrites(); // belt-and-suspenders
 	} finally {
 		__test__clearManifestCache();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

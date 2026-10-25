@@ -28,6 +28,7 @@ import { assertOnlyControlEnvKeys } from "../../../../src/runtime/child-pi/child
 import { runLockSocketName, withRunLock } from "../../../../src/state/coordination/locks.ts";
 import { acquireProcessLock, isProcessLockHeldError } from "../../../../src/state/coordination/process-lock.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Import specifiers for the child fixture — FILE URLs, not native paths: a
 // Windows path (D:\a\…) is an INVALID ESM specifier (backslashes), the child
@@ -219,7 +220,7 @@ test("U21-1: dual guard default ON — file lock AND kernel socket held during t
 			assert.equal(fs.existsSync(lockFile), false, "run.lock removed after the body");
 		});
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -237,7 +238,7 @@ test("U21-2: PI_CREW_RUN_LOCK_SOCKET=0 — pre-U21 behaviour bit-for-bit (file l
 			});
 		});
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -263,7 +264,7 @@ test("U21-3: same-context nested withRunLock re-enters BEFORE the socket tier �
 		assert.equal(innerResult, "inner-ok");
 		assert.equal(result, "outer-ok");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -320,7 +321,7 @@ test("U21-4: socket guard DEFERS a stale-stealer until the live holder releases 
 			console.error = originalError;
 		}
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -364,7 +365,7 @@ test("U21-5: real 2-process contention — child fails while parent holds, succe
 		assert.match(socketFree.stdout ?? "", /CHILD:SOCKET_FREE/);
 		assert.equal(socketFree.status, 0);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -401,7 +402,7 @@ test("U21-6: no env inheritance — child sees no lock env keys and acquires a D
 		releaseHolder.resolve();
 		await parent;
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 

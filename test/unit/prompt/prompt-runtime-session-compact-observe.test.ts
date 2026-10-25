@@ -25,6 +25,7 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import registerPiTeamsPromptRuntime from "../../../src/prompt/prompt-runtime.ts";
 import { readEvents } from "../../../src/state/event-log/cursor.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 type CompactHandler = (event: Record<string, unknown>) => unknown;
 
@@ -62,7 +63,7 @@ function fireCompact(handlers: Map<string, CompactHandler[]>, event: Record<stri
 	return list[0]!(event);
 }
 
-test("observer: observe-only (returns undefined) and emits worker.session_before_compact with a scalar-only payload", () => {
+test("observer: observe-only (returns undefined) and emits worker.session_before_compact with a scalar-only payload", async () => {
 	scrubCrewEnv();
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-compact-obs-"));
 	const eventsPath = path.join(dir, "events.jsonl");
@@ -103,10 +104,10 @@ test("observer: observe-only (returns undefined) and emits worker.session_before
 	// Payload hygiene: branch entries / custom-instruction bodies are NEVER serialized.
 	assert.ok(!raw.includes("SECRET-BRANCH-BODY"), "branchEntries bodies must not be logged");
 	assert.ok(!raw.includes("SECRET-CUSTOM-INSTRUCTIONS"), "customInstructions body must not be logged");
-	fs.rmSync(dir, { recursive: true, force: true });
+	await removeDirWithRetry(dir);
 });
 
-test("observer: defensive payload when preparation is shapeless (no tokensBefore, no branchEntries)", () => {
+test("observer: defensive payload when preparation is shapeless (no tokensBefore, no branchEntries)", async () => {
 	scrubCrewEnv();
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-compact-obs-"));
 	const eventsPath = path.join(dir, "events.jsonl");
@@ -137,10 +138,10 @@ test("observer: defensive payload when preparation is shapeless (no tokensBefore
 		branchEntryCount: 0,
 		hasCustomInstructions: false,
 	});
-	fs.rmSync(dir, { recursive: true, force: true });
+	await removeDirWithRetry(dir);
 });
 
-test("observer: dormant without PI_CREW_EVENTS_PATH — handler registers, returns undefined, writes nothing", () => {
+test("observer: dormant without PI_CREW_EVENTS_PATH — handler registers, returns undefined, writes nothing", async () => {
 	scrubCrewEnv();
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-compact-obs-"));
 	const wouldBePath = path.join(dir, "events.jsonl");
@@ -161,5 +162,5 @@ test("observer: dormant without PI_CREW_EVENTS_PATH — handler registers, retur
 	}
 	assert.equal(result, undefined);
 	assert.equal(fs.existsSync(wouldBePath), false, "no events file may be created outside a team run");
-	fs.rmSync(dir, { recursive: true, force: true });
+	await removeDirWithRetry(dir);
 });

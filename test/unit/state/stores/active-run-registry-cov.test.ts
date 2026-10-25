@@ -13,6 +13,7 @@ import {
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot, removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "test-team",
@@ -30,28 +31,28 @@ const workflow: WorkflowConfig = {
 	steps: [{ id: "step1", role: "executor", task: "Do work" }],
 };
 
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T | Promise<T>): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ar-reg-cov-"));
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
 describe("readActiveRunRegistry", () => {
-	it("returns empty array when no registry exists", () => {
-		withIsolatedHome(() => {
+	it("returns empty array when no registry exists", async () => {
+		await withIsolatedHome(async () => {
 			assert.deepEqual(readActiveRunRegistry(), []);
 		});
 	});
 
-	it("returns empty array for corrupt registry file", () => {
-		withIsolatedHome(() => {
+	it("returns empty array for corrupt registry file", async () => {
+		await withIsolatedHome(async () => {
 			const runsDir = path.join(process.env.PI_TEAMS_HOME!, "state", "runs");
 			fs.mkdirSync(runsDir, { recursive: true });
 			fs.writeFileSync(path.join(runsDir, "active-run-index.json"), "not json");
@@ -59,8 +60,8 @@ describe("readActiveRunRegistry", () => {
 		});
 	});
 
-	it("returns empty array for non-array registry content", () => {
-		withIsolatedHome(() => {
+	it("returns empty array for non-array registry content", async () => {
+		await withIsolatedHome(async () => {
 			const runsDir = path.join(process.env.PI_TEAMS_HOME!, "state", "runs");
 			fs.mkdirSync(runsDir, { recursive: true });
 			fs.writeFileSync(path.join(runsDir, "active-run-index.json"), '{"not":"array"}');
@@ -70,8 +71,8 @@ describe("readActiveRunRegistry", () => {
 });
 
 describe("registerActiveRun + unregisterActiveRun", () => {
-	it("registers and reads back a run", () => {
-		withIsolatedHome(() => {
+	it("registers and reads back a run", async () => {
+		await withIsolatedHome(async () => {
 			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ar-reg-cwd-"));
 			const { manifest } = createRunManifest({
 				cwd,
@@ -83,12 +84,12 @@ describe("registerActiveRun + unregisterActiveRun", () => {
 			const entries = readActiveRunRegistry();
 			assert.ok(entries.length >= 1);
 			assert.ok(entries.some((e) => e.runId === manifest.runId));
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		});
 	});
 
-	it("unregisters a run by id", () => {
-		withIsolatedHome(() => {
+	it("unregisters a run by id", async () => {
+		await withIsolatedHome(async () => {
 			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ar-unreg-cwd-"));
 			const { manifest } = createRunManifest({
 				cwd,
@@ -100,20 +101,20 @@ describe("registerActiveRun + unregisterActiveRun", () => {
 			unregisterActiveRun(manifest.runId);
 			const entries = readActiveRunRegistry();
 			assert.ok(!entries.some((e) => e.runId === manifest.runId));
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		});
 	});
 
-	it("unregisterActiveRun ignores invalid run IDs", () => {
-		withIsolatedHome(() => {
+	it("unregisterActiveRun ignores invalid run IDs", async () => {
+		await withIsolatedHome(async () => {
 			// Should not throw
 			unregisterActiveRun("../../etc/passwd");
 			unregisterActiveRun("");
 		});
 	});
 
-	it("registering the same runId twice deduplicates", () => {
-		withIsolatedHome(() => {
+	it("registering the same runId twice deduplicates", async () => {
+		await withIsolatedHome(async () => {
 			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ar-dedup-cwd-"));
 			const { manifest } = createRunManifest({
 				cwd,
@@ -126,20 +127,20 @@ describe("registerActiveRun + unregisterActiveRun", () => {
 			const entries = readActiveRunRegistry();
 			const count = entries.filter((e) => e.runId === manifest.runId).length;
 			assert.equal(count, 1);
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		});
 	});
 });
 
 describe("activeRunEntries", () => {
-	it("returns empty when no runs exist", () => {
-		withIsolatedHome(() => {
+	it("returns empty when no runs exist", async () => {
+		await withIsolatedHome(async () => {
 			assert.deepEqual(activeRunEntries(), []);
 		});
 	});
 
-	it("returns entries for active runs", () => {
-		withIsolatedHome(() => {
+	it("returns entries for active runs", async () => {
+		await withIsolatedHome(async () => {
 			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ar-entries-cwd-"));
 			const { manifest } = createRunManifest({
 				cwd,
@@ -150,20 +151,20 @@ describe("activeRunEntries", () => {
 			registerActiveRun(manifest);
 			const entries = activeRunEntries();
 			assert.ok(entries.some((e) => e.runId === manifest.runId));
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		});
 	});
 });
 
 describe("activeRunRoots", () => {
-	it("returns empty when no runs exist", () => {
-		withIsolatedHome(() => {
+	it("returns empty when no runs exist", async () => {
+		await withIsolatedHome(async () => {
 			assert.deepEqual(activeRunRoots(), []);
 		});
 	});
 
-	it("returns deduplicated state root parents", () => {
-		withIsolatedHome(() => {
+	it("returns deduplicated state root parents", async () => {
+		await withIsolatedHome(async () => {
 			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ar-roots-cwd-"));
 			const { manifest } = createRunManifest({
 				cwd,
@@ -174,7 +175,7 @@ describe("activeRunRoots", () => {
 			registerActiveRun(manifest);
 			const roots = activeRunRoots();
 			assert.ok(roots.length >= 1);
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		});
 	});
 });

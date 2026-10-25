@@ -14,6 +14,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { createWorkerEventsChannel } from "../../../src/prompt/worker-events-channel.ts";
 import { readEvents } from "../../../src/state/event-log/cursor.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 function makeEventsFile(): { dir: string; eventsPath: string } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-wchan-"));
@@ -88,7 +89,7 @@ test("FIFO buffer cap: failing writer queues appends; overflow drops the OLDEST 
 	assert.equal(channel.stats().queued, 0);
 });
 
-test("crash mid-append: trailing PARTIAL line — complete events before it stay readable (recoverable)", () => {
+test("crash mid-append: trailing PARTIAL line — complete events before it stay readable (recoverable)", async () => {
 	const { dir, eventsPath } = makeEventsFile();
 	// A crashed writer left a partial line at the tail.
 	fs.writeFileSync(eventsPath, `${JSON.stringify({ type: "worker.before", runId: "r" })}\n{"type":"worker.partial","runId":"r"`, "utf-8");
@@ -105,7 +106,7 @@ test("crash mid-append: trailing PARTIAL line — complete events before it stay
 		after.map((e) => e.type),
 		["worker.before", "worker.after"],
 	);
-	fs.rmSync(dir, { recursive: true, force: true });
+	await cleanupStateRoot(dir, eventsPath);
 });
 
 test("non-team context (no env) → no-op, never throws", () => {

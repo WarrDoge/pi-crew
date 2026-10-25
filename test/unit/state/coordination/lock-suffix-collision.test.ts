@@ -18,6 +18,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import { withFileLockSync } from "../../../../src/state/coordination/locks.ts";
 import { appendEvent, readEvents, withEventLogLockSync } from "../../../../src/state/event-log/event-log.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function tmpDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-lock-suffix-"));
@@ -25,7 +26,7 @@ function tmpDir(): string {
 
 describe("C-02: distinct lock suffixes prevent mechanism collision", () => {
 	describe("Test 1: both locks coexist without deleting each other", () => {
-		it("event-log creates .mkdirlock directory, file-lock creates .flock file", () => {
+		it("event-log creates .mkdirlock directory, file-lock creates .flock file", async () => {
 			const dir = tmpDir();
 			const base = path.join(dir, "events.jsonl");
 			try {
@@ -50,11 +51,11 @@ describe("C-02: distinct lock suffixes prevent mechanism collision", () => {
 				assert.ok(!fs.existsSync(`${base}.mkdirlock`), ".mkdirlock dir should be cleaned up");
 				assert.ok(!fs.existsSync(`${base}.flock`), ".flock file should be cleaned up");
 			} finally {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await removeDirWithRetry(dir);
 			}
 		});
 
-		it("the old .lock suffix is NOT used by either mechanism", () => {
+		it("the old .lock suffix is NOT used by either mechanism", async () => {
 			const dir = tmpDir();
 			const base = path.join(dir, "shared.jsonl");
 			try {
@@ -69,13 +70,13 @@ describe("C-02: distinct lock suffixes prevent mechanism collision", () => {
 					return undefined;
 				});
 			} finally {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await removeDirWithRetry(dir);
 			}
 		});
 	});
 
 	describe("Test 2: stale reclaim of .mkdirlock does NOT touch .flock", () => {
-		it("event-log stale reclaim removes only .mkdirlock directory", () => {
+		it("event-log stale reclaim removes only .mkdirlock directory", async () => {
 			const dir = tmpDir();
 			const base = path.join(dir, "events.jsonl");
 			try {
@@ -110,13 +111,13 @@ describe("C-02: distinct lock suffixes prevent mechanism collision", () => {
 				assert.ok(fs.existsSync(flockFile), ".flock file must survive event-log stale reclaim — this is the C-02 bug");
 				assert.equal(fs.readFileSync(flockFile, "utf-8"), flockContent, ".flock content must be unchanged");
 			} finally {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await removeDirWithRetry(dir);
 			}
 		});
 	});
 
 	describe("Test 3: event-log functionality still works after suffix change", () => {
-		it("appendEvent writes and readEvents reads back correctly", () => {
+		it("appendEvent writes and readEvents reads back correctly", async () => {
 			const dir = tmpDir();
 			const eventsPath = path.join(dir, "events.jsonl");
 			try {
@@ -135,11 +136,11 @@ describe("C-02: distinct lock suffixes prevent mechanism collision", () => {
 				assert.equal(events[0].taskId, "task-1");
 				assert.equal(events[0].message, "regression test event");
 			} finally {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await removeDirWithRetry(dir);
 			}
 		});
 
-		it("multiple appends get monotonic sequence numbers", () => {
+		it("multiple appends get monotonic sequence numbers", async () => {
 			const dir = tmpDir();
 			const eventsPath = path.join(dir, "events.jsonl");
 			try {
@@ -150,7 +151,7 @@ describe("C-02: distinct lock suffixes prevent mechanism collision", () => {
 				const events = readEvents(eventsPath);
 				assert.equal(events.length, 2);
 			} finally {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await removeDirWithRetry(dir);
 			}
 		});
 	});

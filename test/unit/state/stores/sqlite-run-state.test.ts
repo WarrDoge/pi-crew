@@ -27,6 +27,7 @@ import {
 } from "../../../../src/state/stores/sqlite-run-state.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import { CURRENT_SCHEMA_VERSION } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeStateRoot(): string {
 	const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "u8-sqlite-"));
@@ -71,7 +72,7 @@ function makeTask(id: string, overrides: Partial<TeamTaskState> = {}): TeamTaskS
 	};
 }
 
-test("U8 sqlite store: opens with WAL journal + creates the spec schema", () => {
+test("U8 sqlite store: opens with WAL journal + creates the spec schema", async () => {
 	const stateRoot = makeStateRoot();
 	try {
 		const store = new SqliteRunStateStore(stateRoot);
@@ -83,11 +84,11 @@ test("U8 sqlite store: opens with WAL journal + creates the spec schema", () => 
 		assert.deepEqual(store.loadWorkerStatuses(), []);
 		store.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		await removeDirWithRetry(stateRoot);
 	}
 });
 
-test("U8 sqlite store: manifest + tasks round-trip (deep equal)", () => {
+test("U8 sqlite store: manifest + tasks round-trip (deep equal)", async () => {
 	const stateRoot = makeStateRoot();
 	try {
 		const store = new SqliteRunStateStore(stateRoot);
@@ -100,11 +101,11 @@ test("U8 sqlite store: manifest + tasks round-trip (deep equal)", () => {
 		assert.deepEqual(loaded.tasks, tasks, "tasks must round-trip deep-equal, insertion order preserved");
 		store.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		await removeDirWithRetry(stateRoot);
 	}
 });
 
-test("U8 sqlite store: saveTasks is a full-set replace (tasks.json semantics)", () => {
+test("U8 sqlite store: saveTasks is a full-set replace (tasks.json semantics)", async () => {
 	const stateRoot = makeStateRoot();
 	try {
 		const store = new SqliteRunStateStore(stateRoot);
@@ -119,11 +120,11 @@ test("U8 sqlite store: saveTasks is a full-set replace (tasks.json semantics)", 
 		assert.equal(tasks[0].status, "completed", "upsert-by-id keeps the updated record");
 		store.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		await removeDirWithRetry(stateRoot);
 	}
 });
 
-test("U8 sqlite store: batch is all-or-nothing — serialization error mid-batch rolls the WHOLE batch back", () => {
+test("U8 sqlite store: batch is all-or-nothing — serialization error mid-batch rolls the WHOLE batch back", async () => {
 	const stateRoot = makeStateRoot();
 	try {
 		const store = new SqliteRunStateStore(stateRoot);
@@ -157,11 +158,11 @@ test("U8 sqlite store: batch is all-or-nothing — serialization error mid-batch
 		);
 		reopened.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		await removeDirWithRetry(stateRoot);
 	}
 });
 
-test("U8 sqlite store: worker-status CRUD (upsert batch / single / delete / load)", () => {
+test("U8 sqlite store: worker-status CRUD (upsert batch / single / delete / load)", async () => {
 	const stateRoot = makeStateRoot();
 	try {
 		const store = new SqliteRunStateStore(stateRoot);
@@ -193,11 +194,11 @@ test("U8 sqlite store: worker-status CRUD (upsert batch / single / delete / load
 		);
 		store.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		await removeDirWithRetry(stateRoot);
 	}
 });
 
-test("U8 sqlite store: nextSeq is monotonic from 1 and survives reopen", () => {
+test("U8 sqlite store: nextSeq is monotonic from 1 and survives reopen", async () => {
 	const stateRoot = makeStateRoot();
 	try {
 		const store = new SqliteRunStateStore(stateRoot);
@@ -209,11 +210,11 @@ test("U8 sqlite store: nextSeq is monotonic from 1 and survives reopen", () => {
 		assert.equal(reopened.nextSeq("batch"), 3, "seq persists across close/reopen");
 		reopened.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		await removeDirWithRetry(stateRoot);
 	}
 });
 
-test("U8 sqlite store: data persists across close/reopen (fresh handle)", () => {
+test("U8 sqlite store: data persists across close/reopen (fresh handle)", async () => {
 	const stateRoot = makeStateRoot();
 	try {
 		const store = new SqliteRunStateStore(stateRoot);
@@ -223,11 +224,11 @@ test("U8 sqlite store: data persists across close/reopen (fresh handle)", () => 
 		assert.ok(reopened.loadManifestAndTasks(), "committed batch must be visible to a fresh handle");
 		reopened.close();
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		await removeDirWithRetry(stateRoot);
 	}
 });
 
-test("U8 sqlite store: process-wide handle cache reuses, releases, and is bounded", () => {
+test("U8 sqlite store: process-wide handle cache reuses, releases, and is bounded", async () => {
 	__test__closeAllSqliteStores();
 	const rootA = makeStateRoot();
 	const rootB = makeStateRoot();
@@ -248,8 +249,8 @@ test("U8 sqlite store: process-wide handle cache reuses, releases, and is bounde
 		assert.equal(__test__sqliteStoreCacheSize(), 0);
 	} finally {
 		__test__closeAllSqliteStores();
-		fs.rmSync(rootA, { recursive: true, force: true });
-		fs.rmSync(rootB, { recursive: true, force: true });
+		await removeDirWithRetry(rootA);
+		await removeDirWithRetry(rootB);
 	}
 });
 
@@ -272,7 +273,7 @@ test("U8 backend select: PI_CREW_STATE_BACKEND=sqlite opts in; unset/json/garbag
 	}
 });
 
-test("U8 review fix: handle cache is LRU — a hit refreshes recency, hot run survives the cap", () => {
+test("U8 review fix: handle cache is LRU — a hit refreshes recency, hot run survives the cap", async () => {
 	__test__closeAllSqliteStores();
 	const roots: string[] = [];
 	try {
@@ -299,7 +300,7 @@ test("U8 review fix: handle cache is LRU — a hit refreshes recency, hot run su
 		assert.equal(getSqliteRunStateStore(hot), hotHandle);
 	} finally {
 		__test__closeAllSqliteStores();
-		for (const root of roots) fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		for (const root of roots) await removeDirWithRetry(root);
 	}
 });
 
@@ -309,7 +310,7 @@ test("U8 review fix: handle cache is LRU — a hit refreshes recency, hot run su
 // store (reads fall through to the JSON mirrors while the db is empty).
 // ---------------------------------------------------------------------------
 
-test("R3A-M2: corrupt state.sqlite → quarantined, fresh db created, no throw, store functional", () => {
+test("R3A-M2: corrupt state.sqlite → quarantined, fresh db created, no throw, store functional", async () => {
 	__test__closeAllSqliteStores();
 	const root = makeStateRoot();
 	let store: SqliteRunStateStore | undefined;
@@ -341,11 +342,11 @@ test("R3A-M2: corrupt state.sqlite → quarantined, fresh db created, no throw, 
 			/* best-effort */
 		}
 		__test__closeAllSqliteStores();
-		fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		await removeDirWithRetry(root);
 	}
 });
 
-test("R3A-M2: pre-existing db with absent user_version (0) → treated as foreign → quarantined", () => {
+test("R3A-M2: pre-existing db with absent user_version (0) → treated as foreign → quarantined", async () => {
 	__test__closeAllSqliteStores();
 	const root = makeStateRoot();
 	let store: SqliteRunStateStore | undefined;
@@ -379,6 +380,6 @@ test("R3A-M2: pre-existing db with absent user_version (0) → treated as foreig
 			/* best-effort */
 		}
 		__test__closeAllSqliteStores();
-		fs.rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+		await removeDirWithRetry(root);
 	}
 });

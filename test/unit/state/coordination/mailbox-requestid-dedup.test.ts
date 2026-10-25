@@ -34,13 +34,14 @@ import {
 	replayPendingMailboxMessages,
 } from "../../../../src/state/coordination/mailbox.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const RUN_ID = "u5-dedup-run";
 
 interface Fixture {
 	manifest: TeamRunManifest;
 	stateRoot: string;
-	cleanup(): void;
+	cleanup(): void | Promise<void>;
 }
 
 function makeFixture(prefix: string): Fixture {
@@ -71,9 +72,9 @@ function makeFixture(prefix: string): Fixture {
 	return {
 		manifest,
 		stateRoot,
-		cleanup: () => {
+		cleanup: async () => {
 			try {
-				fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+				await removeDirWithRetry(root);
 			} catch (err) {
 				const code = (err as NodeJS.ErrnoException).code;
 				if (code !== "EBUSY" && code !== "EPERM" && code !== "ENOTEMPTY" && code !== "EACCES") throw err;
@@ -110,7 +111,7 @@ async function waitForEvents(stateRoot: string, type: string, count: number, tim
 	}
 }
 
-test("U5: every mailbox send carries a unique auto-stamped requestId", () => {
+test("U5: every mailbox send carries a unique auto-stamped requestId", async () => {
 	const { manifest, cleanup } = makeFixture("autostamp");
 	try {
 		const a = appendMailboxMessage(manifest, {
@@ -136,11 +137,11 @@ test("U5: every mailbox send carries a unique auto-stamped requestId", () => {
 		const row = readMailbox(manifest, "inbox", "task-1").find((m) => m.id === a.id);
 		assert.equal(row?.requestId, a.requestId);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("U5: appendMailboxMessageIdempotent — same (direction, requestId) reuses the row, per target mailbox", () => {
+test("U5: appendMailboxMessageIdempotent — same (direction, requestId) reuses the row, per target mailbox", async () => {
 	const { manifest, cleanup } = makeFixture("idem");
 	try {
 		const first = appendMailboxMessageIdempotent(manifest, {
@@ -190,7 +191,7 @@ test("U5: appendMailboxMessageIdempotent — same (direction, requestId) reuses 
 		});
 		assert.equal(sibling.deduped, false, "requestId dedup is scoped to the target mailbox file");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
@@ -220,11 +221,11 @@ test("U5: appendMailboxMessageIdempotentAsync — async twin dedups the same way
 		assert.equal(resend.message.id, first.message.id);
 		assert.equal(readMailbox(manifest, "inbox", "task-1").length, 1);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("U5: findMailboxMessageByRequestId — scoped lookup + legacy data.requestId compat", () => {
+test("U5: findMailboxMessageByRequestId — scoped lookup + legacy data.requestId compat", async () => {
 	const { manifest, cleanup } = makeFixture("lookup");
 	try {
 		appendMailboxMessageIdempotent(manifest, {
@@ -261,7 +262,7 @@ test("U5: findMailboxMessageByRequestId — scoped lookup + legacy data.requestI
 		assert.ok(legacy, "legacy data.requestId still matches (group_join compatibility)");
 		assert.equal(legacy.data?.kind, "group_join");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
@@ -333,7 +334,7 @@ test("U5 ACCEPTANCE: restart mid-run + resume replay + resend → the worker rec
 		assert.equal(delivery.requestIds?.[`inbox:task-1:${requestId}`], sent.message.id);
 		await drainEvents();
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
@@ -365,7 +366,7 @@ test("U5: duplicate rows under one requestId (pre-U5 duplicates) deliver exactly
 		assert.equal(second.length, 0, "the sibling duplicate row never delivers");
 		await drainEvents();
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
@@ -402,7 +403,7 @@ test("U5 audit: events log the dedup chain (mailbox.pickup → mailbox.pickup_de
 		assert.equal(dedups[0]!.data?.requestId, requestId);
 		assert.ok(["requestId", "acknowledged"].includes(String(dedups[0]!.data?.layer)), "layer is audited");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
@@ -458,6 +459,6 @@ test("M3-9/R33-1: one group-fanout requestId delivers to ALL recipients (no 1/0/
 		}
 		await new Promise((resolve) => setTimeout(resolve, 20));
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });

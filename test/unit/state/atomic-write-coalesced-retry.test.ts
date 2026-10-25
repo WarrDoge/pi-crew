@@ -18,6 +18,7 @@ import { createRequire, syncBuiltinESMExports } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 const require = createRequire(import.meta.url);
 const fsDefault = require("node:fs") as typeof fs & { __patched?: boolean };
@@ -54,7 +55,9 @@ function withWriteFailures(failTimes: number, fn: () => Promise<void> | void): P
 test("failed coalesced flush re-queues with backoff and retries to success", async (t) => {
 	await withWriteFailures(1, async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-retry-"));
-		t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+		t.after(async () => {
+			await cleanupStateRoot(dir);
+		});
 		const target = path.join(dir, "state.json");
 		const { atomicWriteJsonCoalesced, flushPendingAtomicWrites } = await import("../../../src/state/atomic-write.ts");
 		atomicWriteJsonCoalesced(target, { hello: "world" }, 5, { compact: true });

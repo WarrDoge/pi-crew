@@ -25,14 +25,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { withFileLockAsync, withFileLockSync } from "../../../../src/state/coordination/locks.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
-function mkTmp(): { dir: string; cleanup: () => void } {
+function mkTmp(): { dir: string; cleanup: () => void | Promise<void> } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "st14-reentrance-"));
 	return {
 		dir,
-		cleanup: () => {
+		cleanup: async () => {
 			try {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await removeDirWithRetry(dir);
 			} catch {
 				/* best-effort */
 			}
@@ -89,7 +90,7 @@ test("ST-14: nested withFileLockSync in the SAME async context bypasses (re-entr
 		assert.ok(innerFlockExisted, "flock must exist during re-entrant inner call");
 		assert.ok(!fs.existsSync(flockPath), "flock cleaned up after release");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
@@ -142,7 +143,7 @@ test("ST-14: re-entrance in one async context does NOT elide the lock in another
 		assert.ok(flockDuringB, "context B: flock must exist during CS (proves real acquisition)");
 		assert.ok(!fs.existsSync(flockPath), "flock released after context B");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
@@ -188,7 +189,7 @@ test("ST-14: concurrent async contexts both independently acquire (parallel setT
 		assert.equal(acquisitions.length, 2, "both contexts must have acquired the lock");
 		assert.ok(!fs.existsSync(flockPath), "flock released after both");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
@@ -243,6 +244,6 @@ test("ST-14: ST-3 cross-tier bypass preserved — withFileLockAsync hold elides 
 		assert.equal(asyncResult, "async-done");
 		assert.ok(!fs.existsSync(flockPath), "flock released after async holder exits");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });

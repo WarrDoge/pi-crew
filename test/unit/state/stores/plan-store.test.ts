@@ -20,6 +20,7 @@ import {
 	setPlanApproval,
 } from "../../../../src/state/stores/plan-store.ts";
 import type { PlanRecord, TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const tracked: string[] = [];
 function tmpDir(prefix: string): string {
@@ -27,8 +28,8 @@ function tmpDir(prefix: string): string {
 	tracked.push(dir);
 	return dir;
 }
-afterEach(() => {
-	while (tracked.length) fs.rmSync(tracked.pop() as string, { recursive: true, force: true });
+afterEach(async () => {
+	while (tracked.length) await removeDirWithRetry(tracked.pop() as string);
 });
 
 function makeManifest(stateRoot: string): TeamRunManifest {

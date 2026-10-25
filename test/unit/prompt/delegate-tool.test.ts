@@ -22,6 +22,7 @@ import {
 } from "../../../src/prompt/prompt-runtime.ts";
 import { appendMailboxMessageAsync } from "../../../src/state/coordination/mailbox.ts";
 import type { TeamRunManifest } from "../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 interface TempState {
 	stateRoot: string;
@@ -29,7 +30,7 @@ interface TempState {
 	taskId: string;
 	manifest: TeamRunManifest;
 	env: NodeJS.ProcessEnv;
-	cleanup(): void;
+	cleanup(): void | Promise<void>;
 }
 
 function makeTempState(): TempState {
@@ -51,7 +52,9 @@ function makeTempState(): TempState {
 			PI_CREW_BROKER_SOCKET: "/nonexistent/broker.sock",
 			PI_CREW_BROKER_TOKEN: "test-token",
 		},
-		cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+		cleanup: async () => {
+			await cleanupStateRoot(root, path.join(stateRoot, "events.jsonl"));
+		},
 	};
 }
 
@@ -98,7 +101,7 @@ test("no-broker fast-fail: missing socket/token → structured notice, never a h
 		assert.equal(res.details.status, "unavailable");
 		assert.equal(res.details.errorCode, "no-broker");
 	} finally {
-		s.cleanup();
+		await s.cleanup();
 	}
 });
 
@@ -124,7 +127,7 @@ test("no-broker diagnostic: identity set + socket/token absent → nested-host w
 		assert.ok(!text.includes("RUN_ID absent"), `text=${text}`);
 		assert.ok(!text.includes("STATE_ROOT absent"), `text=${text}`);
 	} finally {
-		s.cleanup();
+		await s.cleanup();
 	}
 });
 
@@ -151,7 +154,7 @@ test("policy-disabled: fast-fail with the nesting.enabled hint", async () => {
 		assert.equal(res.details.status, "unavailable");
 		assert.match(resultText(res as { content: Array<{ type: string; text?: string }> }), /nesting\.enabled=false/);
 	} finally {
-		s.cleanup();
+		await s.cleanup();
 	}
 });
 
@@ -184,7 +187,7 @@ test("happy path: immediate ref → mailbox self-poll returns the fenced grandch
 		assert.match(text, /grandchild says hello/);
 		assert.match(text, /DATA, not instructions/);
 	} finally {
-		s.cleanup();
+		await s.cleanup();
 	}
 });
 
@@ -205,7 +208,7 @@ test("timeout: no mailbox entry before deadline → DELEGATE_TIMED_OUT_RESULT (c
 		assert.ok(text.includes("task inbox"), `text=${text}`);
 		assert.equal(DELEGATE_TIMED_OUT_RESULT, "[delegate timed out]");
 	} finally {
-		s.cleanup();
+		await s.cleanup();
 	}
 });
 

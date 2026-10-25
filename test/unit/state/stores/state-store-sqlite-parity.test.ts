@@ -31,6 +31,7 @@ import {
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "u8parity",
@@ -71,9 +72,9 @@ function makeResolvedTempDir(prefix: string): string {
  * body already passed, so a locked temp dir must NOT fail the run. Leftovers
  * live in %TEMP% (ephemeral on CI; swept locally by the runner's debris pass).
  */
-function bestEffortRm(target: string): void {
+async function bestEffortRm(target: string): Promise<void> {
 	try {
-		fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+		await removeDirWithRetry(target);
 	} catch (err) {
 		const code = (err as NodeJS.ErrnoException).code;
 		if (code === "EBUSY" || code === "EPERM" || code === "ENOTEMPTY" || code === "EACCES") {

@@ -30,6 +30,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import registerPiTeamsPromptRuntime from "../../../src/prompt/prompt-runtime.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 type PromptRuntimePi = Parameters<typeof registerPiTeamsPromptRuntime>[0];
 
@@ -80,10 +81,10 @@ function setupSteeringLayout(t: test.TestContext): string {
 	const steeringFile = path.join(steeringDir, "01_01-agent.jsonl");
 	const saved = process.env.PI_CREW_STEERING_FILE;
 	process.env.PI_CREW_STEERING_FILE = steeringFile;
-	t.after(() => {
+	t.after(async () => {
 		if (saved === undefined) delete process.env.PI_CREW_STEERING_FILE;
 		else process.env.PI_CREW_STEERING_FILE = saved;
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	});
 	return steeringFile;
 }

@@ -7,6 +7,7 @@ import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { appendFollowUpMessage, appendSteeringMessage } from "../../../../src/state/coordination/mailbox.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function tryDirectorySymlink(target: string, linkPath: string): boolean {
 	try {
@@ -87,7 +88,7 @@ test("api supports mailbox inbox/outbox and delivery state", async () => {
 		const delivery = JSON.parse(firstText(ack) || "{}");
 		assert.equal(delivery.messages[messages[0]!.id], "acknowledged");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -136,7 +137,7 @@ test("mailbox api rejects taskId path traversal", async () => {
 		assert.ok(loaded);
 		assert.equal(fs.existsSync(path.join(loaded.manifest.stateRoot, "escape")), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -174,7 +175,7 @@ test("mailbox api rejects symlinked mailbox root writes", async (t) => {
 		assert.equal(sent.isError, true);
 		assert.equal(fs.existsSync(path.join(outside, "inbox.jsonl")), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -215,7 +216,7 @@ test("mailbox api rejects symlinked mailbox files", async (t) => {
 		assert.equal(sent.isError, true);
 		assert.equal(fs.readFileSync(outside, "utf-8"), "");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -251,7 +252,7 @@ test("read-delivery does not create mailbox files on reads", async () => {
 		// Read should not have created a delivery.json file if it didn't exist.
 		// (If it did exist, its content must be unchanged.)
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -289,7 +290,7 @@ test("read-mailbox does not create mailbox files on reads", async () => {
 		const messages = JSON.parse(firstText(read) || "[]") as Array<unknown>;
 		assert.equal(messages.length, 0);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -350,6 +351,6 @@ test("read-mailbox kind filter isolates steering from follow-up", async () => {
 		assert.equal(followMessages.length, 1);
 		assert.equal((followMessages[0] as { kind?: string }).kind, "follow-up");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
