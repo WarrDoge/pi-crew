@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+## [0.11.41] — fix wave 13: watchdog liveness — false "appears hung" alerts on healthy direct runs (2026-10-25)
+
+Five false alarms landed in one working session (2026-10-24/25), all the same shape: healthy direct single-agent
+runs executing ONE long tool call (a ~20-min CI poll loop; a ~20-min full test suite). Every run completed
+normally — the watchdog's *evidence* was frozen, not the run (SPEC `fixwave13-watchdog-liveness-2026-10-25`).
+Unlike the T1/T4 incidents already covered by WD-DELIVER-GUARD / WD-STALE-RECORD, these verdicts were wrong at
+emit time: the run genuinely was still running.
+
+**Fixed — root cause: evidence frozen during long tool calls (GAP-0).** The hung verdict in
+`src/runtime/foreground-watchdog.ts` reached through `isLikelyOrphanedActiveRun` used only the manifest
+`updatedAt` and agent `progress.lastActivityAt` — and both freeze by construction while a tool runs:
+`persistLiveProgress` was purely event-driven (no pi events fire during a 20-min bash call) and `updateRunStatus`
+writes `updatedAt` only on status transitions. The 5-min activity shield expires, the next cycle reads a stale
+manifest ⇒ false hung.
+
+**Added — watchdog liveness short-circuit (F1).** Before a hung verdict is emitted, the watchdog now consults the
+two liveness signals other consumers already trust: a fresh **active-run registry claim** (registered at dispatch)
+⇒ the alert is suppressed for up to `CLAIMED_RUN_HUNG_MS` = 45 min, OR a fresh **task heartbeat**
+(`heartbeat.lastSeenAt` on a running/waiting task, `alive !== false`) ⇒ no alert. The hung ladder for unclaimed
+runs is unchanged (`ORPHANED_ACTIVE_RUN_MS` untouched — dashboard semantics preserved).
+
+**Added — live-executor heartbeat timer (GAP-1).** `src/runtime/task-runner/live-executor.ts` now runs an unref'd
+`LIVE_TOOL_HEARTBEAT_INTERVAL_MS` = 30 s interval, active only while a tool executes, throttled persist of live
+progress, cleared in `finally`; no event-log writes. The state store no longer freezes mid-tool for ANY consumer
+(watchdog, dashboard, doctor).
+
+**Added — evidence timestamp (GAP-2).** The watchdog alert detail now carries `as of <updatedAt>` so a fresh alert
+is distinguishable from a stale or queued one.
+
+**Fixed — `steer-live` test fixture orphan leak (GAP-3).** 13 orphan background-runner processes from the
+`steer-live` test were found alive and killed manually — 5 born AFTER wave 12 shipped (a different fixture from
+the `steer-clamp` test wave 12 fixed). `test/unit/extension/core/subagent-steer-live.test.ts` spawns a REAL
+background runner through the SUT (setsid + detached + SIGTERM-swallowing) and held no handle on it. Teardown now
+resolves the runner pid from `manifest.async.pid` → `async.pid` → state scan, reaps via `reapGroup` when
+`pgid === pid` (with `/proc/<pid>/cwd` scoping + self-pid guard), falls back to a pid-SIGKILL, and runs in
+`finally` + `after()`.
+
+**Battery (PASS).** targeted ×3 (`foreground-watchdog` 29/29, `live-executor-heartbeat` 5/5, `subagent-steer-live`
+4/4), `test:critical` 124/124, full unit 10,061 pass / 0 fail / 4 skipped, integration 144/0/4, static gates 0,
+dist MATCH. **Live repro on the real dist** (`PI_CREW_WATCHDOG_INTERVAL_MS=20000` + a 400 s tool): 5 hung verdicts
+suppressed by the new liveness short-circuit, 0 alerts delivered — while the same box's older 0.11.40 verifier
+session emitted 2 false alerts during the battery (the exact pre-fix behavior).
+
+**Docs.** battery report `docs/real-test/reports/real-test-2026-10-25-wave13-watchdog-liveness-battery.md`.
+
 ## [0.11.40] — fix wave 12: fixture teardown — test-harness orphan leaks (2026-10-24)
 
 Closes the leak class wave 11 exposed but did not own: the reaping wave made production descendants provable, and
