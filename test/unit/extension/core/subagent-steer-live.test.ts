@@ -44,9 +44,9 @@ import { resolveEntryBySubagentId } from "../../../../src/state/stores/ownership
 import { createRunManifest, loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
-import { sleepSync } from "../../../../src/utils/sleep.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
 import { firstText, textFromToolResult } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Minimal team for createRunManifest-backed tests (no workflow → zero starter
 // tasks; the terminal-guard test seeds its own task state directly).
@@ -102,30 +102,6 @@ function fakeCtx(cwd: string, sessionId: string | undefined): any {
 		ctx.sessionManager = { getSessionId: () => sessionId };
 	}
 	return ctx;
-}
-
-/**
- * macOS-CI teardown hardening (resume-cancel.test.ts pattern): the spawned
- * mock worker's final writes can race the recursive rmdir — rimrafSync throws
- * ENOTEMPTY (not swallowed by force:true) when a file lands between its unlink
- * pass and a directory rmdir. Retry briefly; the worker has exited by then, so
- * the next attempt succeeds. Best-effort: a persistent ENOTEMPTY is NOT a test
- * failure — the assertions already passed, and /tmp is swept by the OS.
- */
-function removeDirWithRetry(dir: string): void {
-	for (let attempt = 0; attempt < 5; attempt++) {
-		try {
-			fs.rmSync(dir, { recursive: true, force: true });
-			return;
-		} catch (error) {
-			const code = (error as NodeJS.ErrnoException).code;
-			if ((code !== "ENOTEMPTY" && code !== "EBUSY" && code !== "EPERM") || attempt === 4) {
-				console.error(`subagent-steer-live teardown: unable to remove ${dir}: ${String(error)}`);
-				return;
-			}
-			sleepSync(200);
-		}
-	}
 }
 
 /** Best-effort: cancel a run so the manager's poll loop does not linger. */
@@ -500,7 +476,7 @@ test("dispatch one-shot → identity link → steer resolves → steering file a
 		else process.env.PI_CREW_ROLE = previousCrewRole;
 		if (previousTeamsRole === undefined) delete process.env.PI_TEAMS_ROLE;
 		else process.env.PI_TEAMS_ROLE = previousTeamsRole;
-		removeDirWithRetry(cwd);
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -537,7 +513,7 @@ test("steer refuses a record owned by another session (P2.3 cross-session guard)
 		assert.match(firstText(result), /belongs to another session/);
 	} finally {
 		void manager.abortAll();
-		removeDirWithRetry(cwd);
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -572,7 +548,7 @@ test("steer on a missing message returns the requires-prompt error (no throw)", 
 		assert.ok(textFromToolResult(result).length > 0, "must return a prompt-required message");
 	} finally {
 		void manager.abortAll();
-		removeDirWithRetry(cwd);
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -626,6 +602,6 @@ test("steer refuses a terminal task (T-S1 parity with handleSteer, no file write
 		const steeringPath = path.join(manifest.artifactsRoot, "steering", "01-ter.jsonl");
 		assert.equal(fs.existsSync(steeringPath), false, "no steering file must be written for a terminal task");
 	} finally {
-		removeDirWithRetry(cwd);
+		await removeDirWithRetry(cwd);
 	}
 });

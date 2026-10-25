@@ -22,7 +22,7 @@ import { afterEach, test } from "node:test";
 import { handleSteer } from "../../../src/extension/team-tool.ts";
 import { loadRunManifestById } from "../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
-import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 const RUN_ID = "team_steer_clamp_test";
 const TASK_ID = "01_execute";
@@ -90,17 +90,20 @@ function makeRun(status: TeamTaskState["status"]): string {
 	return cwd;
 }
 
-// Wave 12d — teardown race. handleSteer is sync and fires `void
+// Wave 14 F3 — drain-then-delete teardown. handleSteer is sync and fires `void
 // appendEventAsync(...)` (team-tool.ts:1028); that queued write awaits
 // fs.promises.mkdir(dirname(eventsPath)) (event-log.ts:787) and can RECREATE
 // .crew/state/runs/<runId>/ after a bare rmSync already walked past it ⇒
-// ENOTEMPTY under load. removeDirWithRetry settles 250 ms (letting the in-flight
-// writer land) then retries EBUSY/EPERM/ENOTEMPTY. There is no public drain for
-// the asyncQueues tier (drainAsyncQueues is module-private in event-log.ts), so
-// settle+retry is the strongest teardown available here.
+// ENOTEMPTY under load. Wave 12d settled 250 ms + retried (guessing timing);
+// the wave-14 drain API makes this deterministic — cleanupStateRoot awaits the
+// run's in-flight writers first (drainEventLogWriters(eventsPath)), then
+// removes with settleMs: 0. The fixture writes eventsPath into the manifest as
+// <cwd>/.crew/state/runs/<RUN_ID>/events.jsonl — same layout rebuilt here (no
+// extra manifest read needed).
 afterEach(async () => {
 	for (const dir of tmpDirs.splice(0)) {
-		await removeDirWithRetry(dir);
+		const eventsPath = path.join(dir, ".crew", "state", "runs", RUN_ID, "events.jsonl");
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 

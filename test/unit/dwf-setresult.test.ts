@@ -14,6 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { cleanupStateRoot } from "../helpers/rm-retry.ts";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const require = createRequire(import.meta.url);
@@ -256,7 +257,7 @@ test("round-13 integration: dwf calling Date.now() is rejected with clear error"
 		);
 	} finally {
 		if (savedSkip !== undefined) process.env.PI_CREW_DWF_SKIP_DETERMINISM_CHECK = savedSkip;
-		fs.rmSync(fx.tmpCwd, { recursive: true, force: true });
+		await cleanupStateRoot(fx.tmpCwd, fx.eventsPath);
 	}
 });
 
@@ -297,7 +298,7 @@ test("round-13 integration: dwf calling Math.random() is rejected with clear err
 		);
 	} finally {
 		if (savedSkip !== undefined) process.env.PI_CREW_DWF_SKIP_DETERMINISM_CHECK = savedSkip;
-		fs.rmSync(fx.tmpCwd, { recursive: true, force: true });
+		await cleanupStateRoot(fx.tmpCwd, fx.eventsPath);
 	}
 });
 
@@ -338,7 +339,7 @@ test("round-13 integration: dwf with new Date() is rejected with clear error", a
 		);
 	} finally {
 		if (savedSkip !== undefined) process.env.PI_CREW_DWF_SKIP_DETERMINISM_CHECK = savedSkip;
-		fs.rmSync(fx.tmpCwd, { recursive: true, force: true });
+		await cleanupStateRoot(fx.tmpCwd, fx.eventsPath);
 	}
 });
 
@@ -357,7 +358,7 @@ test("round-13 integration: dwf with literal string 'Date.now()' succeeds", asyn
 		const finalManifest = await runDwf(fx);
 		assert.equal(finalManifest.status, "completed");
 	} finally {
-		fs.rmSync(fx.tmpCwd, { recursive: true, force: true });
+		await cleanupStateRoot(fx.tmpCwd, fx.eventsPath);
 	}
 });
 
@@ -380,7 +381,7 @@ test("round-13 integration: env var PI_CREW_DWF_SKIP_DETERMINISM_CHECK=1 allows 
 	} finally {
 		if (savedSkip === undefined) delete process.env.PI_CREW_DWF_SKIP_DETERMINISM_CHECK;
 		else process.env.PI_CREW_DWF_SKIP_DETERMINISM_CHECK = savedSkip;
-		fs.rmSync(fx.tmpCwd, { recursive: true, force: true });
+		await cleanupStateRoot(fx.tmpCwd, fx.eventsPath);
 	}
 });
 
@@ -536,7 +537,7 @@ test("round-12 integration: dwf calling ctx.phase() emits correct events; runner
 			"dwf.completed",
 		]);
 	} finally {
-		fs.rmSync(fx.tmpCwd, { recursive: true, force: true });
+		await cleanupStateRoot(fx.tmpCwd, fx.eventsPath);
 	}
 });
 
@@ -676,7 +677,7 @@ test("round-14 integration: dwf calling ctx.log() produces dwf.log events", asyn
 		assert.equal(logEvents[0]?.data?.message, "scan complete");
 		assert.equal(logEvents[1]?.data?.message, '{"findings":3}');
 	} finally {
-		fs.rmSync(fx.tmpCwd, { recursive: true, force: true });
+		await cleanupStateRoot(fx.tmpCwd, fx.eventsPath);
 	}
 });
 
@@ -728,7 +729,7 @@ test("round-14 integration: dwf calling ctx.args<T>() reads typed args from mani
 		const logEvents = eventLines.filter((e) => e.type === "dwf.log");
 		assert.equal(logEvents[0]?.data?.message, "target=src/lib.ts retries=2", "ctx.args() read the manifest args end-to-end");
 	} finally {
-		fs.rmSync(fx.tmpCwd, { recursive: true, force: true });
+		await cleanupStateRoot(fx.tmpCwd, fx.eventsPath);
 	}
 });
 
@@ -883,7 +884,7 @@ test("round-18 fresh run: no checkpoint loaded (no dwf.resumed event)", async ()
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = savedMock;
 		if (savedAllow === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
-		fs.rmSync(fx.tmpCwd, { recursive: true, force: true });
+		await cleanupStateRoot(fx.tmpCwd, fx.eventsPath);
 	}
 });
 
@@ -912,7 +913,7 @@ test("round-18 completed run: checkpoint is deleted after clean completion", asy
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = savedMock;
 		if (savedAllow === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
-		fs.rmSync(fx.tmpCwd, { recursive: true, force: true });
+		await cleanupStateRoot(fx.tmpCwd, fx.eventsPath);
 	}
 });
 
@@ -965,7 +966,7 @@ test("round-18 resume: pre-existing checkpoint hydrates ctx + emits dwf.resumed"
 		// 3. The checkpoint is deleted after the resumed run completes cleanly.
 		assert.ok(!fs.existsSync(fx.checkpointPath), "checkpoint deleted after resumed run completes");
 	} finally {
-		fs.rmSync(fx.tmpCwd, { recursive: true, force: true });
+		await cleanupStateRoot(fx.tmpCwd, fx.eventsPath);
 	}
 });
 
@@ -987,6 +988,6 @@ test("round-18 resume: corrupt checkpoint is treated as a fresh run (no throw)",
 		const events = readRound18Events(fx.eventsPath);
 		assert.equal(events.filter((e) => e.type === "dwf.resumed").length, 0, "corrupt checkpoint is NOT resumed");
 	} finally {
-		fs.rmSync(fx.tmpCwd, { recursive: true, force: true });
+		await cleanupStateRoot(fx.tmpCwd, fx.eventsPath);
 	}
 });

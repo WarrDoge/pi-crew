@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { appendEvent, appendEventAsync, appendEventBuffered, readEvents } from "../../../../src/state/event-log/event-log.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 test("non-terminal events via appendEventAsync are written directly (no buffering since v0.9.26)", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-batch-async-"));
@@ -25,7 +26,7 @@ test("non-terminal events via appendEventAsync are written directly (no bufferin
 		// Seq should be monotonic
 		assert.ok((r1.metadata?.seq ?? 0) < (r2.metadata?.seq ?? 0), "seq should be monotonic");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -41,11 +42,11 @@ test("terminal events via appendEventAsync bypass buffer and are written immedia
 		assert.equal(events.length, 1, "terminal event written immediately");
 		assert.equal(events[0].type, "run.completed");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
-test("terminal events via appendEvent bypass buffer and are written immediately (sync)", () => {
+test("terminal events via appendEvent bypass buffer and are written immediately (sync)", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-batch-terminal-sync-"));
 	const eventsPath = path.join(dir, "events.jsonl");
 	try {
@@ -56,11 +57,11 @@ test("terminal events via appendEvent bypass buffer and are written immediately 
 		assert.equal(events.length, 1, "terminal event written immediately");
 		assert.equal(events[0].type, "task.failed");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
-test("non-terminal events via appendEvent sync path are written directly (not buffered)", () => {
+test("non-terminal events via appendEvent sync path are written directly (not buffered)", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-batch-nonterminal-sync-"));
 	const eventsPath = path.join(dir, "events.jsonl");
 	try {
@@ -76,7 +77,7 @@ test("non-terminal events via appendEvent sync path are written directly (not bu
 		const events = readEvents(eventsPath);
 		assert.equal(events.length, 2, "both events on disk after sync calls");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -102,7 +103,7 @@ test("terminal event flushes pending buffered events before writing (via appendE
 		assert.deepEqual(types, ["run.completed", "task.progress", "task.progress"], "all event types present");
 		assert.ok(terminal.metadata?.seq, "terminal event has seq");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -136,7 +137,7 @@ test("mixed terminal and non-terminal events maintain unique monotonic seqs", as
 		assert.equal(diskEvents.length, 4, "4 events on disk");
 	} finally {
 		clearInterval(keepAlive);
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -161,7 +162,7 @@ test("appendEventFireAndForget routes non-terminal events through buffer", async
 		assert.equal(events.length, 1, "event written via fire-and-forget through buffer");
 		assert.equal(events[0].type, "task.progress");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -197,6 +198,6 @@ test("non-terminal events via appendEventAsync batch under single lock acquire",
 		assert.deepEqual(seqs, sorted, "seqs must be monotonic");
 	} finally {
 		clearInterval(keepAlive);
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });

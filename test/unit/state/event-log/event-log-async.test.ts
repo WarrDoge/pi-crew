@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { appendEvent, appendEventAsync, appendEventFireAndForget, readEvents } from "../../../../src/state/event-log/event-log.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 test("appendEventAsync writes events correctly", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-event-async-"));
@@ -28,7 +29,7 @@ test("appendEventAsync writes events correctly", async () => {
 		assert.equal(events[0].runId, "run-1");
 		assert.equal(events[0].metadata?.seq, result.metadata?.seq);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -62,7 +63,7 @@ test("appendEventAsync concurrent calls maintain seq order", async () => {
 		const diskSeqs = events.map((e) => e.metadata?.seq ?? -1);
 		assert.equal(new Set(diskSeqs).size, diskSeqs.length, "disk seqs must be unique");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -90,7 +91,7 @@ test("appendEventAsync does not block the event loop", async () => {
 
 		assert.ok(timerFired, "event loop should not be blocked — timer should have fired");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -126,7 +127,7 @@ test("appendEventAsync and sync appendEvent share seq sequence", async () => {
 		const diskEvents = readEvents(eventsPath);
 		assert.equal(diskEvents.length, 3, "3 events on disk");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
 
@@ -155,6 +156,6 @@ test("appendEventFireAndForget uses async path", async () => {
 		assert.equal(events[0].type, "task.progress");
 		assert.equal(events[0].runId, "run-1");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir, eventsPath);
 	}
 });
