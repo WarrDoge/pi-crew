@@ -5,6 +5,7 @@ import { appendEventFireAndForget } from "../../state/event-log/event-log.ts";
 import { writeArtifact } from "../../state/stores/artifact-store.ts";
 import { loadRunManifestById } from "../../state/stores/state-store.ts";
 import type { ArtifactDescriptor, TeamRunManifest, TeamTaskState } from "../../state/types.ts";
+import { logInternalError } from "../../utils/internal-error.ts";
 import type { WorkflowStep } from "../../workflows/workflow-config.ts";
 import {
 	appendCrewAgentEvent,
@@ -104,6 +105,79 @@ function updateTask(tasks: TeamTaskState[], updated: TeamTaskState): TeamTaskSta
 	return tasks.map((task) => (task.id === updated.id ? updated : task));
 }
 
+/**
+ * Wave 13 (F2, GAP-1): default cadence (ms) of the live-executor tool
+ * heartbeat timer. 30s sits far inside every liveness window that consumes
+ * the task heartbeat (watchdog task-heartbeat evidence 5 min, stale-reconciler
+ * ACTIVE_EVIDENCE_TTL_MS 5 min, CLAIMED_RUN_HUNG_MS 45 min), costs at most one
+ * throttled tasks.json persist per running tool per 30s, and never touches
+ * the event log. Fixed constant, NOT env-configurable on purpose (SPEC §3.2):
+ * wiring an env kill-switch would require registering
+ * PI_CREW_LIVE_HEARTBEAT_MS in src/config/env-vars.ts AND a forwarding
+ * decision in src/config/env-allowlist-registry.ts (fail-fast at module
+ * load) — both outside this wave's file scope.
+ */
+export const LIVE_TOOL_HEARTBEAT_INTERVAL_MS = 30_000;
+
+/** Opaque handle for the per-attempt live tool heartbeat timer. */
+export interface LiveToolHeartbeatTimer {
+	/** Stop the timer and clear its interval. Idempotent. */
+	stop(): void;
+}
+
+/**
+ * Wave 13 (F2, GAP-1) — start the tool heartbeat timer for one live attempt
+ * (SPEC §3.2). Every `intervalMs`, IF a tool is currently executing
+ * (`isToolInFlight()` — `agentProgress.currentToolStartedAt` set by
+ * tool_execution_start, cleared by tool_execution_end), call `touch()`
+ * (the heartbeat-only persist, shared 1s throttle with event-driven persists).
+ * Idle between tools ⇒ no write. `touch` must NOT append task.progress events
+ * so the event log cannot grow from heartbeats.
+ *
+ * Failure containment (mirrors startWorkerHeartbeatPulse [pulse-3]): a
+ * throwing gate/touch is logged and the timer keeps ticking — the heartbeat
+ * must never crash the host process. The interval is `unref`'d so it can
+ * never hold the event loop open.
+ */
+export function startLiveToolHeartbeatTimer(opts: {
+	intervalMs: number;
+	isToolInFlight: () => boolean;
+	touch: () => void;
+}): LiveToolHeartbeatTimer {
+	// Kill-switch shape (interval ≤ 0 ⇒ disabled, no timer) kept so a future
+	// env-configurable interval can slot in without touching call sites.
+	if (opts.intervalMs <= 0) {
+		return {
+			stop() {
+				// Intentional no-op: a disabled timer (interval ≤ 0) has no handle.
+			},
+		};
+	}
+	const timer = setInterval(() => {
+		try {
+			if (opts.isToolInFlight()) opts.touch();
+		} catch (err) {
+			logInternalError("task-runner.live-tool-heartbeat", err as Error);
+		}
+	}, opts.intervalMs);
+	timer.unref?.();
+	return {
+		stop() {
+			clearInterval(timer);
+		},
+	};
+}
+
+let armLiveToolHeartbeatTimer: typeof startLiveToolHeartbeatTimer = startLiveToolHeartbeatTimer;
+
+/**
+ * @internal Test seam — replace the timer constructor used inside runLiveTask
+ * (null = real). Mirrors the loader seams in foreground-watchdog.ts.
+ */
+export function setLiveToolHeartbeatTimerForTests(starter: typeof startLiveToolHeartbeatTimer | null): void {
+	armLiveToolHeartbeatTimer = starter ?? startLiveToolHeartbeatTimer;
+}
+
 export async function runLiveTask(input: RunLiveTaskInput): Promise<RunLiveTaskOutput> {
 	const { manifest, step, agent, prompt } = input;
 	let task = input.task;
@@ -122,6 +196,24 @@ export async function runLiveTask(input: RunLiveTaskInput): Promise<RunLiveTaskO
 	let lastRunProgressPersistedAt = 0;
 	let lastHeartbeatPersistedAt = 0;
 	let lastRunProgressSummary: ProgressEventSummary | undefined;
+	/**
+	 * Wave 13 (F2, GAP-1): heartbeat-only persist, extracted from
+	 * persistLiveProgress so the tool heartbeat timer can reuse the EXACT
+	 * event-driven path (same 1s throttle via the shared lastHeartbeatPersistedAt,
+	 * same persistSingleTaskUpdate write, same isCurrent gate). Touching only
+	 * tasks.json — never the event log — so timer ticks cannot inflate it.
+	 */
+	const touchTaskHeartbeat = (force = false): void => {
+		if (!isCurrent()) return;
+		const now = Date.now();
+		if (!force && now - lastHeartbeatPersistedAt < 1000) return;
+		task = {
+			...task,
+			heartbeat: touchWorkerHeartbeat(task.heartbeat ?? createWorkerHeartbeat(task.id)),
+		};
+		tasks = persistSingleTaskUpdate(manifest, tasks, task);
+		lastHeartbeatPersistedAt = now;
+	};
 	const persistLiveProgress = (event: unknown, force = false): void => {
 		if (!isCurrent()) return;
 		const now = Date.now();
@@ -130,14 +222,7 @@ export async function runLiveTask(input: RunLiveTaskInput): Promise<RunLiveTaskO
 			lastAgentRecordPersistedAt = now;
 		}
 		// Bug #5 fix: also persist heartbeat to tasks.json so heartbeat-watcher can detect live-session activity
-		if (force || now - lastHeartbeatPersistedAt >= 1000) {
-			task = {
-				...task,
-				heartbeat: touchWorkerHeartbeat(task.heartbeat ?? createWorkerHeartbeat(task.id)),
-			};
-			tasks = persistSingleTaskUpdate(manifest, tasks, task);
-			lastHeartbeatPersistedAt = now;
-		}
+		touchTaskHeartbeat(force);
 		const summary = progressEventSummary(task, event);
 		const decision = shouldAppendProgressEventUpdate({
 			previous: lastRunProgressSummary,
@@ -166,44 +251,60 @@ export async function runLiveTask(input: RunLiveTaskInput): Promise<RunLiveTaskO
 		agentMax != null && agentMax > 0 && (!input.runtimeConfig?.maxTurns || agentMax < input.runtimeConfig.maxTurns)
 			? { ...input.runtimeConfig, maxTurns: agentMax }
 			: input.runtimeConfig;
-	const liveResult = await runLiveSessionTask({
-		manifest,
-		task,
-		step,
-		agent,
-		prompt,
-		signal: input.signal,
-		transcriptPath,
-		runtimeConfig: effectiveRuntimeConfig,
-		parentContext: input.parentContext,
-		parentModel: input.parentModel,
-		modelRegistry: input.modelRegistry,
-		modelOverride: input.modelOverride,
-		teamRoleModel: input.teamRoleModel,
-		teamRoleFallbackModels: input.teamRoleFallbackModels,
-		teamRoleThinking: input.teamRoleThinking,
-		isCurrent,
-		workspaceId: input.workspaceId,
-		// U11: embedded-tier mitigation knobs (lane-B contract) — forwarded
-		// verbatim; undefined keeps every mitigation inert (legacy path).
-		embeddedMitigations: input.embeddedMitigations,
-		// Phase 2: Pass output schema for yield validation
-		outputSchema: undefined,
-		onOutput: (text) => {
-			if (!isCurrent()) return;
-			appendCrewAgentOutput(manifest, task.id, text);
-		},
-		onEvent: (event) => {
-			if (!isCurrent()) return;
-			appendCrewAgentEvent(manifest, task.id, event);
-			task = {
-				...task,
-				agentProgress: applyAgentProgressEvent(task.agentProgress ?? emptyCrewAgentProgress(), event, task.startedAt),
-			};
-			tasks = updateTask(tasks, task);
-			persistLiveProgress(event);
-		},
+	// Wave 13 (F2, GAP-1): arm the tool heartbeat timer for this attempt. The
+	// tick no-ops unless a tool is executing (agentProgress.currentToolStartedAt
+	// set by tool_execution_start / cleared by tool_execution_end), so idle gaps
+	// between tools write nothing; the shared 1s throttle inside
+	// touchTaskHeartbeat bounds disk writes; and the finally below clears the
+	// interval on completion, throw AND cancel — no timer leak across attempts.
+	const heartbeatTimer = armLiveToolHeartbeatTimer({
+		intervalMs: LIVE_TOOL_HEARTBEAT_INTERVAL_MS,
+		isToolInFlight: () => task.agentProgress?.currentToolStartedAt !== undefined,
+		touch: () => touchTaskHeartbeat(false),
 	});
+	let liveResult: Awaited<ReturnType<typeof runLiveSessionTask>>;
+	try {
+		liveResult = await runLiveSessionTask({
+			manifest,
+			task,
+			step,
+			agent,
+			prompt,
+			signal: input.signal,
+			transcriptPath,
+			runtimeConfig: effectiveRuntimeConfig,
+			parentContext: input.parentContext,
+			parentModel: input.parentModel,
+			modelRegistry: input.modelRegistry,
+			modelOverride: input.modelOverride,
+			teamRoleModel: input.teamRoleModel,
+			teamRoleFallbackModels: input.teamRoleFallbackModels,
+			teamRoleThinking: input.teamRoleThinking,
+			isCurrent,
+			workspaceId: input.workspaceId,
+			// U11: embedded-tier mitigation knobs (lane-B contract) — forwarded
+			// verbatim; undefined keeps every mitigation inert (legacy path).
+			embeddedMitigations: input.embeddedMitigations,
+			// Phase 2: Pass output schema for yield validation
+			outputSchema: undefined,
+			onOutput: (text) => {
+				if (!isCurrent()) return;
+				appendCrewAgentOutput(manifest, task.id, text);
+			},
+			onEvent: (event) => {
+				if (!isCurrent()) return;
+				appendCrewAgentEvent(manifest, task.id, event);
+				task = {
+					...task,
+					agentProgress: applyAgentProgressEvent(task.agentProgress ?? emptyCrewAgentProgress(), event, task.startedAt),
+				};
+				tasks = updateTask(tasks, task);
+				persistLiveProgress(event);
+			},
+		});
+	} finally {
+		heartbeatTimer.stop();
+	}
 	const startupEvidence = createStartupEvidence({
 		command: "live-session",
 		startedAt: attemptStartedAt,

@@ -6,7 +6,9 @@
  * assistant has no way to know when a run completes or gets stuck without
  * manual polling. This watchdog monitors active runs and:
  *
- * 1. Detects hung runs (active status, no heartbeat update for >10 min)
+ * 1. Detects hung runs (active status, manifest not updated for >2 min with
+ *    no agent activity evidence — wave 13: a live registry claim or a fresh
+ *    task heartbeat withholds the verdict, see CLAIMED_RUN_HUNG_MS)
  * 2. Injects a followUp message via pi.sendUserMessage() so the assistant
  *    is automatically notified — no manual sleep+check needed.
  * 3. Cleans up after itself when the run completes or the session ends.
@@ -19,6 +21,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCrewEnv, getCrewEnvInt } from "../config/env-vars.ts";
 import { TEAM_TERMINAL_TASK_STATUSES } from "../state/contracts.ts";
+import { activeRunEntries } from "../state/stores/active-run-registry.ts";
 import { loadRunManifestById } from "../state/stores/state-store.ts";
 import type { TeamTaskState } from "../state/types.ts";
 import { readCrewAgents } from "./crew-agent-records.ts";
@@ -126,6 +129,170 @@ function resolveCheckIntervalMs(overrideMs: number | undefined): number {
 	const configured = getCrewEnvInt("PI_CREW_WATCHDOG_INTERVAL_MS");
 	if (typeof configured === "number" && Number.isFinite(configured) && configured > 0) return configured;
 	return DEFAULT_CHECK_INTERVAL_MS;
+}
+
+// ── Wave 13 (F1, GAP-0): hung-verdict liveness short-circuit ────────────────
+//
+// Live evidence (2026-10-24/25): five false "appears hung" alerts in one
+// session, all direct single-agent runs executing ONE long tool call (a
+// 20-min CI poll loop, a 20-min test suite). The hung verdict
+// (isLikelyOrphanedActiveRun: manifest stale ≥2 min + no agent activity
+// within 5 min) is structurally blind while a tool executes — every
+// liveness write is event-driven and no pi events fire mid-tool — so a
+// HEALTHY run reads as hung ~5-10 min into a long tool. The two signals
+// other consumers already trust, and this verdict ignores, are consulted
+// here IN THE WATCHDOG (never inside isLikelyOrphanedActiveRun — that
+// predicate is shared with the dashboard's isDisplayActiveRun, GAP-4):
+//   (a) a LIVE active-run-registry claim, and
+//   (b) a fresh task heartbeat (kept fresh through long tools by F2's
+//       live-executor timer).
+// The two branches are INDEPENDENT ORs: the registry drops non-async
+// entries once the manifest is >30 min stale, so past that horizon only the
+// heartbeat carries liveness — never require both.
+
+/**
+ * Wave 13 (F1, GAP-0): hard ceiling for how long a LIVE active-run-registry
+ * claim can shield a run from the watchdog's hung verdict. A claimed run
+ * whose NEWEST liveness evidence (claim assertion time, task heartbeats/
+ * activity) is older than this still alerts — a genuine in-process deadlock
+ * (claim held, nothing progressing) is still caught — while healthy claimed
+ * runs mid-long-tool are not false-alarmed by the 2-min ladder. 45 min is
+ * 1.5× the registry's own 30-min freshness horizon and 9× the 5-min activity
+ * shield, so only a truly stuck claim trips it. Unclaimed runs keep the
+ * fast 2-min ladder unchanged; ORPHANED_ACTIVE_RUN_MS (process-status.ts,
+ * shared with the dashboard — GAP-4) is NOT touched.
+ */
+export const CLAIMED_RUN_HUNG_MS = 45 * 60 * 1000;
+
+/**
+ * Wave 13 (F1): freshness window for task-heartbeat liveness evidence —
+ * mirrors ACTIVE_EVIDENCE_TTL_MS in stale-reconciler.ts (5 min).
+ */
+const TASK_HEARTBEAT_EVIDENCE_MS = 5 * 60 * 1000;
+
+/**
+ * Wave 13 (F1): read-only active-run-registry claim consult result.
+ * `claimedAtMs` is the registry entry's `updatedAt` (the moment the claim
+ * was asserted — registerActiveRun fires at dispatch); undefined when the
+ * entry carries no parseable timestamp.
+ */
+interface LiveRunClaim {
+	claimedAtMs?: number;
+}
+
+/**
+ * Wave 13 (F1, GAP-0): consult the active-run registry for a LIVE claim on
+ * `runId`. Read-only mirror of findLiveRegistryEntry (stale-reconciler G24):
+ * activeRunEntries() applies the full liveness filter itself (terminal
+ * status, dead async PID, >30-min-stale non-async manifests, symlink
+ * safety), so an entry found here means some live session/runner claims the
+ * run RIGHT NOW. Inlined via the registry store instead of importing
+ * stale-reconciler (its reaping graph must not enter the watchdog's import
+ * closure); the async-PID half of hasLiveRunClaim is deliberately omitted —
+ * async runs never reach this verdict path (isLikelyOrphanedActiveRun
+ * excludes them). Fail-open: any registry error ⇒ no claim — a broken
+ * registry must never shield a genuinely hung run (G24 contract).
+ */
+function consultActiveRunRegistry(runId: string): LiveRunClaim | undefined {
+	try {
+		const entry = activeRunEntries().find((item) => item.runId === runId);
+		if (!entry) return undefined;
+		const claimedAtMs = entry.updatedAt ? Date.parse(entry.updatedAt) : Number.NaN;
+		return { claimedAtMs: Number.isFinite(claimedAtMs) ? claimedAtMs : undefined };
+	} catch {
+		return undefined;
+	}
+}
+
+let liveClaimConsult: (runId: string) => LiveRunClaim | undefined = consultActiveRunRegistry;
+
+/** @internal Test seam — replace the registry claim consult (null = real). */
+export function setLiveClaimConsultForTests(consult: ((runId: string) => LiveRunClaim | undefined) | null): void {
+	liveClaimConsult = consult ?? consultActiveRunRegistry;
+}
+
+/**
+ * Wave 13 (F1): does any running/waiting task carry FRESH live evidence?
+ * Behavioral mirror of hasRecentActiveEvidence (stale-reconciler.ts): a
+ * running/waiting task whose `heartbeat.lastSeenAt` (with `alive !== false`)
+ * or `agentProgress.lastActivityAt` is within TASK_HEARTBEAT_EVIDENCE_MS
+ * counts. Absent/unreadable tasks (`[]`) ⇒ false — fail-open to the ladder,
+ * same as WD-STALE-RECORD.
+ */
+function hasFreshTaskHeartbeatEvidence(tasks: TeamTaskState[] | undefined, now: number): boolean {
+	if (!Array.isArray(tasks)) return false;
+	return tasks.some((task) => {
+		if (task.status !== "running" && task.status !== "waiting") return false;
+		const heartbeatAt = task.heartbeat?.lastSeenAt ? new Date(task.heartbeat.lastSeenAt).getTime() : Number.NaN;
+		if (task.heartbeat?.alive !== false && Number.isFinite(heartbeatAt) && now - heartbeatAt <= TASK_HEARTBEAT_EVIDENCE_MS) return true;
+		const activityAt = task.agentProgress?.lastActivityAt ? new Date(task.agentProgress.lastActivityAt).getTime() : Number.NaN;
+		return Number.isFinite(activityAt) && now - activityAt <= TASK_HEARTBEAT_EVIDENCE_MS;
+	});
+}
+
+/**
+ * Wave 13 (F1): newest liveness-evidence timestamp (epoch ms) among the
+ * claim assertion time and the running/waiting tasks' heartbeat/activity
+ * marks — everything EXCEPT manifest.updatedAt, which is the frozen
+ * artifact under judgment, not evidence (the registry's own filter already
+ * bounds it at 30 min for entry presence; counting it here would make the
+ * CLAIMED_RUN_HUNG_MS ceiling unreachable). undefined when no signal
+ * carries a finite timestamp.
+ */
+function newestClaimEvidenceMs(tasks: TeamTaskState[] | undefined, claim: LiveRunClaim): number | undefined {
+	let newest: number | undefined;
+	const consider = (ms: number): void => {
+		if (Number.isFinite(ms) && (newest === undefined || ms > newest)) newest = ms;
+	};
+	if (claim.claimedAtMs !== undefined) consider(claim.claimedAtMs);
+	for (const task of tasks ?? []) {
+		if (task.status !== "running" && task.status !== "waiting") continue;
+		const heartbeatAt = task.heartbeat?.lastSeenAt ? new Date(task.heartbeat.lastSeenAt).getTime() : Number.NaN;
+		consider(heartbeatAt);
+		const activityAt = task.agentProgress?.lastActivityAt ? new Date(task.agentProgress.lastActivityAt).getTime() : Number.NaN;
+		consider(activityAt);
+	}
+	return newest;
+}
+
+/** Wave 13 (F1): hung-verdict liveness short-circuit result. */
+interface LivenessShortCircuit {
+	/** True ⇒ the hung verdict is withheld this cycle (live evidence present). */
+	suppress: boolean;
+	/** Debug-log reason (PI_CREW_DEBUG-gated). */
+	reason: string;
+	/** Claim present but its evidence aged past CLAIMED_RUN_HUNG_MS — the alert detail must name it. */
+	claimExhausted: boolean;
+}
+
+/**
+ * Wave 13 (F1, GAP-0): should the hung verdict for this cycle be withheld?
+ * Two INDEPENDENT OR branches (never require both):
+ *   (b) a fresh task heartbeat (≤5 min) ⇒ suppress outright;
+ *   (a) a live registry claim ⇒ suppress while the newest liveness evidence
+ *       is ≤ CLAIMED_RUN_HUNG_MS old; past the ceiling the ladder proceeds
+ *       (claimExhausted ⇒ the alert names the claimed-run threshold).
+ * No claim and no fresh heartbeat ⇒ the existing 2-min ladder is unchanged
+ * (an unclaimed zombie still alerts fast).
+ */
+function assessClaimedRunLiveness(runId: string, tasks: TeamTaskState[] | undefined, now: number): LivenessShortCircuit {
+	if (hasFreshTaskHeartbeatEvidence(tasks, now)) {
+		return { suppress: true, reason: "fresh task heartbeat", claimExhausted: false };
+	}
+	const claim = liveClaimConsult(runId);
+	if (claim) {
+		const evidenceMs = newestClaimEvidenceMs(tasks, claim);
+		const evidenceAgeMs = evidenceMs !== undefined ? now - evidenceMs : undefined;
+		if (evidenceAgeMs !== undefined && evidenceAgeMs <= CLAIMED_RUN_HUNG_MS) {
+			return {
+				suppress: true,
+				reason: `live registry claim (newest evidence ${Math.max(0, Math.round(evidenceAgeMs / 1000))}s old)`,
+				claimExhausted: false,
+			};
+		}
+		return { suppress: false, reason: "claim evidence older than CLAIMED_RUN_HUNG_MS", claimExhausted: true };
+	}
+	return { suppress: false, reason: "no live claim", claimExhausted: false };
 }
 
 /**
@@ -471,39 +638,59 @@ export function startForegroundWatchdog(opts: WatchdogOptions): void {
 					// Keep monitoring: if the manifest eventually finalizes, the
 					// terminal branch delivers the completion notice.
 				} else {
-					const detail = `status=${manifest.status}, updatedAt=${manifest.updatedAt}, agents=${agents.length}`;
-					consecutiveHungNotices += 1;
-					try {
-						if (consecutiveHungNotices <= HUNG_NOTICE_CAP) {
-							// WD-DEDUP: alert-once per runId at module scope — even a
-							// fresh watchdog instance must not re-alert the same run.
-							if (!hungAlertAlreadySent(runId)) {
-								// Mark BEFORE queueing so a racing cycle cannot double-queue.
-								updateHungAlertRecord(runId, { alerted: true });
-								// WD-DELIVER-GUARD: the host queues a followUp while the
-								// session streams and delivers it arbitrarily later — so
-								// hand it over only at the idle boundary, re-verifying the
-								// run state at THAT moment.
+					// Wave 13 (F1, GAP-0): liveness short-circuit BEFORE any hung alert.
+					// The verdict above is structurally blind while a tool executes; a
+					// live registry claim or fresh task heartbeat withholds it. A
+					// suppressed cycle means the run left the hung state — reset the
+					// no-progress counter so a later genuine alert gets the full drip cap.
+					const liveness = assessClaimedRunLiveness(runId, reverified.tasks, now);
+					if (liveness.suppress) {
+						consecutiveHungNotices = 0;
+						debugLog(`[foreground-watchdog] suppress hung verdict for ${runId}: ${liveness.reason}`);
+					} else {
+						// Wave 13 (F3, GAP-2): the detail carries its EVIDENCE time (the
+						// manifest read the verdict was based on) — "as of <ISO>" — not the
+						// emit time, so a user re-checking can tell a stale/queued alert
+						// apart from one about the last few minutes. An exhausted claim
+						// names the claimed-run threshold so the user knows it is not the
+						// 2-min ladder.
+						const claimNote = liveness.claimExhausted
+							? `, claimed-run hung threshold exceeded (no live evidence for >${Math.round(CLAIMED_RUN_HUNG_MS / 60_000)} min)`
+							: "";
+						const detail = `status=${manifest.status}, updatedAt=${manifest.updatedAt}, agents=${agents.length}, as of ${manifest.updatedAt}${claimNote}`;
+						consecutiveHungNotices += 1;
+						try {
+							if (consecutiveHungNotices <= HUNG_NOTICE_CAP) {
+								// WD-DEDUP: alert-once per runId at module scope — even a
+								// fresh watchdog instance must not re-alert the same run.
+								if (!hungAlertAlreadySent(runId)) {
+									// Mark BEFORE queueing so a racing cycle cannot double-queue.
+									updateHungAlertRecord(runId, { alerted: true });
+									// WD-DELIVER-GUARD: the host queues a followUp while the
+									// session streams and delivers it arbitrarily later — so
+									// hand it over only at the idle boundary, re-verifying the
+									// run state at THAT moment.
+									queueHungAlertDelivery(
+										pi,
+										cwd,
+										runId,
+										`pi-crew watchdog: run ${runId} appears hung (${detail}). Consider running team action='cancel' runId='${runId}' or team action='doctor'.`,
+										opts.isSessionIdle,
+									);
+								}
+							} else if (consecutiveHungNotices === HUNG_NOTICE_CAP + 1) {
+								// One-time handoff, then silence — still monitoring, no more drips.
 								queueHungAlertDelivery(
 									pi,
 									cwd,
 									runId,
-									`pi-crew watchdog: run ${runId} appears hung (${detail}). Consider running team action='cancel' runId='${runId}' or team action='doctor'.`,
+									`pi-crew watchdog: run ${runId} is still hung after ${consecutiveHungNotices} checks — going quiet now. Intervene via team action='cancel' runId='${runId}', team action='doctor', or leave it; a completion notice will still fire.`,
 									opts.isSessionIdle,
 								);
 							}
-						} else if (consecutiveHungNotices === HUNG_NOTICE_CAP + 1) {
-							// One-time handoff, then silence — still monitoring, no more drips.
-							queueHungAlertDelivery(
-								pi,
-								cwd,
-								runId,
-								`pi-crew watchdog: run ${runId} is still hung after ${consecutiveHungNotices} checks — going quiet now. Intervene via team action='cancel' runId='${runId}', team action='doctor', or leave it; a completion notice will still fire.`,
-								opts.isSessionIdle,
-							);
+						} catch {
+							/* non-critical */
 						}
-					} catch {
-						/* non-critical */
 					}
 				}
 				// Keep monitoring (ARCH-5: silently past the cap — no more notices).

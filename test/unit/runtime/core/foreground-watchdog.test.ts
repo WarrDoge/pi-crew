@@ -23,12 +23,14 @@ import { test } from "node:test";
 import { saveCrewAgents } from "../../../../src/runtime/crew-agent-records.ts";
 import type { CrewAgentRecord } from "../../../../src/runtime/crew-agent-runtime.ts";
 import {
+	CLAIMED_RUN_HUNG_MS,
 	hungAlertDedupSizeForTests,
 	hungAlertDeliveryPendingForTests,
 	markHungAlertForTests,
 	resetHungAlertDedupForTests,
 	setDeliveryLoaderForTests,
 	setDeliveryTimingForTests,
+	setLiveClaimConsultForTests,
 	setReverifyLoaderForTests,
 	startForegroundWatchdog,
 	stopWatchdog,
@@ -142,6 +144,22 @@ function task(id: string, status: TeamTaskState["status"], runId: string): TeamT
 		cwd: "/tmp/pi-crew-fg-watchdog",
 		graph: { taskId: id, children: [], dependencies: [], queue: "done" },
 	} as unknown as TeamTaskState;
+}
+
+/** ISO timestamp `ms` in the past. */
+function isoAgo(ms: number): string {
+	return new Date(Date.now() - ms).toISOString();
+}
+
+/**
+ * Wave-13 F1 fixture: a RUNNING task carrying a heartbeat (no agentProgress —
+ * the heartbeat is the only task-level liveness signal).
+ */
+function runningHeartbeatTask(runId: string, lastSeenAt: string, alive = true): TeamTaskState {
+	return {
+		...task("do", "running", runId),
+		heartbeat: { workerId: "do", lastSeenAt, alive },
+	};
 }
 
 function queuedAgent(runId: string): CrewAgentRecord {
@@ -910,6 +928,156 @@ test("WD-DELIVER-GUARD cap-expiry: unreadable state at the cap FAILS OPEN (alert
 	} finally {
 		stopWatchdog(runId);
 		setDeliveryTimingForTests();
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+/**
+ * Wave 13 (F1, GAP-0) — hung-verdict liveness short-circuit.
+ *
+ * Live evidence (2026-10-24/25): five false "appears hung" alerts in one
+ * session, all direct single-agent runs executing ONE long tool call (CI poll
+ * ~20 min, test suite ~20 min). The hung verdict (manifest ≥2 min stale + no
+ * agent activity within 5 min) is structurally blind mid-tool, so the
+ * watchdog must consult the two liveness signals it previously ignored:
+ * a live active-run-registry claim (branch a) and a fresh task heartbeat
+ * (branch b) — as INDEPENDENT ORs (the registry drops non-async entries once
+ * the manifest is >30 min stale, so the heartbeat must carry liveness past
+ * that horizon on its own). The registry consult is seam-injected
+ * (setLiveClaimConsultForTests) to keep these units hermetic; the DEFAULT
+ * real consult path is exercised by every pre-existing hung test above
+ * (empty registry ⇒ no claim ⇒ ladder unchanged).
+ */
+test("wave-13 F1 (w1): a live registry claim with fresh evidence suppresses the hung alert", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	// Running task with a STALE heartbeat (10 min) — branch (b) must NOT fire;
+	// the suppression has to come from the registry claim alone.
+	saveRunTasks(manifest, [runningHeartbeatTask(runId, isoAgo(10 * 60_000))]);
+	setLiveClaimConsultForTests(() => ({ claimedAtMs: Date.now() - 60_000 }));
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await sleep(150); // many hung cycles, each suppressed by the claim
+
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			0,
+			"no hung alert while a live registry claim carries fresh evidence",
+		);
+		assert.equal(pi.messages.filter((m) => m.text.includes("record stale")).length, 0, "no stale-record notice either");
+	} finally {
+		stopWatchdog(runId);
+		setLiveClaimConsultForTests(null);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("wave-13 F1 (w2): a fresh task heartbeat (registry empty) suppresses the hung alert", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	// No registry claim at all — the heartbeat branch alone must suppress.
+	saveRunTasks(manifest, [runningHeartbeatTask(runId, isoAgo(30_000))]);
+	setLiveClaimConsultForTests(() => undefined);
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await sleep(150);
+
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			0,
+			"a fresh task heartbeat (≤5 min) withholds the hung verdict — independent OR branch",
+		);
+	} finally {
+		stopWatchdog(runId);
+		setLiveClaimConsultForTests(null);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("wave-13 F1 (w3): no claim + stale heartbeat ⇒ the original ladder still alerts", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	// Both signals stale/absent: no registry claim, heartbeat 10 min old —
+	// the pre-wave-13 behavior must be preserved exactly (alert once).
+	saveRunTasks(manifest, [runningHeartbeatTask(runId, isoAgo(10 * 60_000))]);
+	setLiveClaimConsultForTests(() => undefined);
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await waitFor(() => pi.messages.some((m) => m.text.includes("appears hung")), 2000);
+		await sleep(80);
+
+		assert.equal(
+			pi.messages.filter((m) => m.text.includes("appears hung")).length,
+			1,
+			"an unclaimed run with no live evidence still alerts via the unchanged ladder",
+		);
+	} finally {
+		stopWatchdog(runId);
+		setLiveClaimConsultForTests(null);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("wave-13 F1 (w4): claim present but evidence older than CLAIMED_RUN_HUNG_MS ⇒ alert names the claimed-run threshold", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	// A registry claim EXISTS but every liveness timestamp (claim assertion,
+	// heartbeat) is older than the 45-min ceiling — a genuine deadlock under a
+	// held claim must still alert, and the detail must say WHICH threshold
+	// fired so the user knows it is not the 2-min ladder.
+	saveRunTasks(manifest, [runningHeartbeatTask(runId, isoAgo(50 * 60_000))]);
+	setLiveClaimConsultForTests(() => ({ claimedAtMs: Date.now() - (CLAIMED_RUN_HUNG_MS + 60_000) }));
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await waitFor(() => pi.messages.some((m) => m.text.includes("appears hung")), 2000);
+
+		const hung = pi.messages.find((m) => m.text.includes("appears hung"));
+		assert.ok(hung, "claim exhausted past the ceiling ⇒ alert fires");
+		assert.ok(
+			hung.text.includes("claimed-run hung threshold exceeded"),
+			"the alert names the claimed-run threshold (not the 2-min ladder)",
+		);
+	} finally {
+		stopWatchdog(runId);
+		setLiveClaimConsultForTests(null);
+		resetHungAlertDedupForTests();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("wave-13 F3 (w5): the hung alert carries its evidence time — `as of <ISO>` = the manifest read", async () => {
+	resetHungAlertDedupForTests();
+	const { cwd, runId, manifest } = prepareRun({ status: "running", ageMs: 5 * 60_000 });
+	saveCrewAgents(manifest, [queuedAgent(runId)]);
+	saveRunTasks(manifest, [runningHeartbeatTask(runId, isoAgo(10 * 60_000))]);
+	setLiveClaimConsultForTests(() => undefined);
+	const pi = makePi();
+	try {
+		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
+		await waitFor(() => pi.messages.some((m) => m.text.includes("appears hung")), 2000);
+
+		const hung = pi.messages.find((m) => m.text.includes("appears hung"));
+		assert.ok(hung, "ladder alert fired");
+		// The evidence mark is the manifest.updatedAt the verdict was based on
+		// (5 min old at emit time), NOT the emit time — a re-checking user can
+		// tell a stale/queued alert apart from one about the last few minutes.
+		assert.ok(hung.text.includes(`as of ${manifest.updatedAt}`), "alert carries `as of <manifest.updatedAt>`");
+		assert.match(hung.text, /as of \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/, "the as-of mark is an ISO timestamp");
+	} finally {
+		stopWatchdog(runId);
+		setLiveClaimConsultForTests(null);
 		resetHungAlertDedupForTests();
 		fs.rmSync(cwd, { recursive: true, force: true });
 	}
