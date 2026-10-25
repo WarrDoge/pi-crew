@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+## [0.11.43] — fix wave 15: render trusts task heartbeats + teardown sweep batch 1 (2026-10-25)
+
+Wave 13 fixed the watchdog's frozen-evidence hung verdicts by adding task heartbeats, but the render layer still
+judged liveness from `lastActivityAt` alone — which freezes by construction during one long tool call. A run
+executing a 20-min test suite displayed as "stale"/"orphaned" on the dashboard while its heartbeat was fresh.
+Meanwhile the bare-`rmSync` inventory from the same deep review counted ~1,400 sites across 470 files; this wave
+ships the render half and the first sweep batch (SPEC `fixwave15-display-heartbeat-sweep1-2026-10-25`).
+
+**Added — `hasFreshTaskHeartbeatEvidence(tasks, now, ttl)`.** Pure predicate export from
+`src/runtime/process-status.ts` (shared predicates untouched per GAP-4 purity). The render layer — run dashboard
+and agents-jobs-browser — now treats a run with a fresh task heartbeat (`lastSeenAt` within the 5-min TTL,
+`alive !== false`) as active and suppresses the "stale"/"orphaned" labels, closing the render half of wave 13's
+liveness work. Old behavior pinned: no heartbeat / expired / `alive === false` ⇒ stale label stands.
+
+**Fixed — teardown races in batch 1 of the bare-`rmSync` sweep.** 336 sites across 84 files in `test/unit/state/**`
++ `test/unit/prompt/**` migrated to `cleanupStateRoot`/`removeDirWithRetry` (drain-then-remove over
+retry-racing the async event-log writer). Intentional residuals kept: the `drain-event-log-writers` in-body
+plain-`rmSync` assertion (it pins the exact race the API exists to fix), single-file deletes, and child-source
+strings.
+
+**Battery (PASS, adjudicated).** targeted ×3 (h1 heartbeat-evidence 11/11, h2 run-dashboard 4/4, h3
+agents-jobs-browser 5/5 incl. 2 new heartbeat tests), sweep clusters 1,895 test-runs (4 load-timing fail-events,
+all solo ×3 green), `test:critical` 124/124, full unit 10,081 pass / 1 adjudicated flake / 4 skipped, integration
+144/0/4, static gates 0, dist MATCH (1,893,087 B).
+
+**Docs.** Battery report
+`docs/real-test/reports/real-test-2026-10-25-wave15-render-heartbeat-sweep1-battery.md`. Residual noted:
+health-monitor is not wired to the new predicate (its scan loop consumes tasks internally, not display).
+Backlog: sweep batches 2a (415 sites/124 files), 2b (816/210), 3 (88/33).
+
 ## [0.11.42] — fix wave 14: event-log drain API + zombie-scanner seam (2026-10-25)
 
 Wave 12d papered over the recurring `ENOTEMPTY` teardown race with `removeDirWithRetry`; the root cause stayed:
