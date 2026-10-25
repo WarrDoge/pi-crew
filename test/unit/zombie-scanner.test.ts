@@ -18,6 +18,7 @@ import {
 	type ForeignPiProcess,
 	formatZombieReport,
 	scanZombieSubagents,
+	type ZombieScanOptions,
 	type ZombieSubagent,
 } from "../../src/runtime/process/zombie-scanner.ts";
 
@@ -124,11 +125,141 @@ async function waitForSubagentMarker(pid: number | undefined, timeoutMs = 5000):
 	}
 }
 
-test("scanZombieSubagents: surface worker exposes surface + surfacePaneId from /proc environ", {
+// ── Wave-14 F4: ZombieScanOptions seam — synthetic /proc fixtures ──────────
+// The seam lets the classification tests below run on EVERY OS: they no
+// longer spawn real processes / read the real /proc (which forced
+// `skip: process.platform !== "linux"` forever on macOS/Windows CI).
+// Real-/proc default-path coverage stays pinned by the linux-gated
+// "default opts" tests (spec §4 z1) — seam defaults must not drift.
+
+/** Synthetic pids above Linux's max pid_max (2^22 = 4194304) — can never
+ *  collide with a real process (including this test process / its parent). */
+const SYNTH_PID_BASE = 5_000_000;
+
+interface SynthProc {
+	environ?: Record<string, string>;
+	ppid?: number;
+	starttime?: number;
+	cmdline?: string[];
+	rssKb?: number;
+	uid?: number;
+}
+
+interface SynthScanExtras {
+	alive?: number[];
+	uptime?: string;
+	parentPid?: number;
+	platform?: NodeJS.Platform;
+	getuid?: () => number | undefined;
+}
+
+/** Encode a synthetic /proc table into ZombieScanOptions. */
+function syntheticScanOpts(procs: Record<number, SynthProc>, extra: SynthScanExtras = {}): ZombieScanOptions {
+	const uptime = extra.uptime ?? "2000000.00"; // default starttime 199999000 ticks → elapsed 10s
+	const readProcFile = (p: string): string | undefined => {
+		if (p === "/proc/uptime") return uptime;
+		const m = /^\/proc\/(\d+)\/(environ|stat|cmdline|status)$/.exec(p);
+		if (!m) return undefined;
+		const proc = procs[Number(m[1])];
+		if (!proc) return undefined;
+		switch (m[2]) {
+			case "environ":
+				return proc.environ === undefined
+					? ""
+					: Object.entries(proc.environ)
+							.map(([k, v]) => `${k}=${v}`)
+							.join("\0");
+			case "stat": {
+				// After the paren-aware comm cut: rest[1] = ppid (field 4),
+				// rest[19] = starttime (field 22) — pad the fields between.
+				const rest = ["S", String(proc.ppid ?? 1), ...Array<string>(17).fill("0"), String(proc.starttime ?? 199999000)];
+				return `${m[1]} (pi-crew-synth) ${rest.join(" ")}`;
+			}
+			case "cmdline":
+				return (proc.cmdline ?? ["pi", "--mode", "json"]).join("\0");
+			case "status":
+				return `Name:\tpi\nUid:\t${proc.uid ?? 1000}\t1000\t1000\t1000\nVmRSS:\t${proc.rssKb ?? 4096} kB`;
+		}
+		return undefined;
+	};
+	const alive = new Set(extra.alive ?? []);
+	return {
+		platform: extra.platform ?? "linux",
+		getuid: extra.getuid ?? (() => 1000),
+		readProcFile,
+		listProcPids: () => Object.keys(procs).map(Number),
+		pidAlive: (pid) => alive.has(pid),
+		getParentPid: () => extra.parentPid ?? 1,
+	};
+}
+
+test("scanZombieSubagents (synthetic): surface worker exposes surface + surfacePaneId from /proc environ", () => {
+	const zombiePid = SYNTH_PID_BASE + 1;
+	const deadParent = SYNTH_PID_BASE + 99; // NOT in `alive` → parent dead
+	const scan = scanZombieSubagents(
+		syntheticScanOpts({
+			[zombiePid]: {
+				environ: {
+					PI_CREW_KIND: "subagent",
+					PI_CREW_PARENT_PID: String(deadParent),
+					PI_CREW_ROLE: "executor",
+					PI_CREW_SURFACE: "tmux",
+					PI_CREW_SURFACE_PANE: "%12",
+				},
+			},
+		}),
+	);
+	assert.equal(scan.zombies.length, 1, "dead-parent crew worker lands in zombies");
+	const entry = scan.zombies[0]!;
+	assert.equal(entry.pid, zombiePid);
+	assert.equal(entry.parentAlive, false);
+	assert.equal(entry.surface, "tmux", "PI_CREW_SURFACE=tmux must surface as entry.surface");
+	assert.equal(entry.surfacePaneId, "%12", "PI_CREW_SURFACE_PANE must surface as entry.surfacePaneId");
+	assert.equal(entry.role, "executor");
+	// M-7 fields derived from the synthetic stat + uptime (199999000 ticks / 100).
+	assert.equal(entry.elapsedSec, 10);
+	assert.equal(entry.starttime, 199999000);
+	assert.ok(entry.startedAt, "startedAt derived from synthetic uptime");
+	assert.equal(entry.rssKb, 4096);
+});
+
+test("scanZombieSubagents (synthetic): headless worker leaves surface fields undefined", () => {
+	const livePid = SYNTH_PID_BASE + 2;
+	const liveParent = SYNTH_PID_BASE + 98; // in `alive` → parent alive → live bucket
+	const scan = scanZombieSubagents(
+		syntheticScanOpts(
+			{
+				[livePid]: { environ: { PI_CREW_KIND: "subagent", PI_CREW_PARENT_PID: String(liveParent) } },
+			},
+			{ alive: [liveParent] },
+		),
+	);
+	assert.equal(scan.zombies.length, 0, "live-parent crew worker is never a zombie");
+	const entry = scan.live.find((z) => z.pid === livePid);
+	assert.ok(entry, "live-parent marker process must appear in the scan");
+	assert.equal(entry.parentAlive, true);
+	assert.equal(entry.surface, undefined, "no PI_CREW_SURFACE → surface stays undefined");
+	assert.equal(entry.surfacePaneId, undefined, "no PI_CREW_SURFACE_PANE → surfacePaneId stays undefined");
+});
+
+test("scanZombieSubagents (synthetic): unknown PI_CREW_SURFACE value is ignored (not half-parsed)", () => {
+	const pid = SYNTH_PID_BASE + 3;
+	const scan = scanZombieSubagents(
+		syntheticScanOpts({
+			[pid]: {
+				environ: { PI_CREW_KIND: "subagent", PI_CREW_PARENT_PID: "1", PI_CREW_SURFACE: "screen", PI_CREW_SURFACE_PANE: "%99" },
+			},
+		}),
+	);
+	const entry = scan.zombies.find((z) => z.pid === pid);
+	assert.ok(entry, "crew worker must appear in the scan");
+	assert.equal(entry.surface, undefined, "unsupported surface kind must not be reported");
+});
+
+test("scanZombieSubagents (real /proc, default opts): surface fields parsed from a live process", {
 	skip: process.platform !== "linux",
 }, async () => {
-	// A pid that has already exited + been reaped — process.kill(pid, 0) sees ESRCH.
-	// PID reuse within the test window is astronomically unlikely.
+	// z1: the seam's DEFAULTS must keep reading the real /proc — no drift.
 	const deadParentPid = spawnSync("true").pid ?? 1;
 	const child = spawn("sleep", ["30"], {
 		env: {
@@ -144,7 +275,7 @@ test("scanZombieSubagents: surface worker exposes surface + surfacePaneId from /
 		await waitForSubagentMarker(child.pid);
 		const scan = scanZombieSubagents();
 		const entry = [...scan.zombies, ...scan.live].find((z) => z.pid === child.pid);
-		assert.ok(entry, "spawned marker process must appear in the scan");
+		assert.ok(entry, "spawned marker process must appear in the no-opts scan");
 		assert.equal(entry.surface, "tmux", "PI_CREW_SURFACE=tmux must surface as entry.surface");
 		assert.equal(entry.surfacePaneId, "%12", "PI_CREW_SURFACE_PANE must surface as entry.surfacePaneId");
 	} finally {
@@ -152,51 +283,31 @@ test("scanZombieSubagents: surface worker exposes surface + surfacePaneId from /
 	}
 });
 
-test("scanZombieSubagents: headless worker leaves surface fields undefined", { skip: process.platform !== "linux" }, async () => {
-	const deadParentPid = spawnSync("true").pid ?? 1;
-	const child = spawn("sleep", ["30"], {
-		env: {
-			...process.env,
-			PI_CREW_KIND: "subagent",
-			PI_CREW_PARENT_PID: String(deadParentPid),
-		},
-		stdio: "ignore",
-	});
-	try {
-		await waitForSubagentMarker(child.pid);
-		const scan = scanZombieSubagents();
-		const entry = [...scan.zombies, ...scan.live].find((z) => z.pid === child.pid);
-		assert.ok(entry, "spawned marker process must appear in the scan");
-		assert.equal(entry.surface, undefined, "no PI_CREW_SURFACE → surface stays undefined");
-		assert.equal(entry.surfacePaneId, undefined, "no PI_CREW_SURFACE_PANE → surfacePaneId stays undefined");
-	} finally {
-		child.kill();
-	}
+test("scanZombieSubagents (synthetic): uid mismatch skips the pid entirely", () => {
+	const pid = SYNTH_PID_BASE + 9;
+	const scan = scanZombieSubagents(
+		syntheticScanOpts({
+			[pid]: { uid: 2000, environ: { PI_CREW_KIND: "subagent", PI_CREW_PARENT_PID: "1" } },
+		}),
+	);
+	assert.equal(
+		[...scan.zombies, ...scan.live, ...scan.foreign].some((e) => e.pid === pid),
+		false,
+		"foreign-uid pid is never inspected (cheap-rejection gate)",
+	);
 });
 
-test("scanZombieSubagents: unknown PI_CREW_SURFACE value is ignored (not half-parsed)", {
-	skip: process.platform !== "linux",
-}, async () => {
-	const deadParentPid = spawnSync("true").pid ?? 1;
-	const child = spawn("sleep", ["30"], {
-		env: {
-			...process.env,
-			PI_CREW_KIND: "subagent",
-			PI_CREW_PARENT_PID: String(deadParentPid),
-			PI_CREW_SURFACE: "screen", // not a pi-crew surface kind
-			PI_CREW_SURFACE_PANE: "%99",
-		},
-		stdio: "ignore",
-	});
-	try {
-		await waitForSubagentMarker(child.pid);
-		const scan = scanZombieSubagents();
-		const entry = [...scan.zombies, ...scan.live].find((z) => z.pid === child.pid);
-		assert.ok(entry, "spawned marker process must appear in the scan");
-		assert.equal(entry.surface, undefined, "unsupported surface kind must not be reported");
-	} finally {
-		child.kill();
-	}
+test("scanZombieSubagents (synthetic): non-linux platform returns empty result + Linux-only note", () => {
+	const scan = scanZombieSubagents(
+		syntheticScanOpts(
+			{ [SYNTH_PID_BASE + 10]: { environ: { PI_CREW_KIND: "subagent", PI_CREW_PARENT_PID: "1" } } },
+			{ platform: "darwin" },
+		),
+	);
+	assert.equal(scan.zombies.length, 0);
+	assert.equal(scan.live.length, 0);
+	assert.equal(scan.foreign.length, 0);
+	assert.match(scan.errors[0] ?? "", /Linux-only.*darwin/, "skip note names the platform");
 });
 
 test("formatZombieReport: surface entries render pane id + provider", () => {
@@ -322,11 +433,43 @@ function envWithoutCrewKind(): NodeJS.ProcessEnv {
 	return env;
 }
 
-test("scanZombieSubagents: marker+pi-argv foreign process lands in foreign (REPORT ONLY), not zombies/live", {
+test("scanZombieSubagents (synthetic): marker+pi-argv foreign lands in foreign (REPORT ONLY), not zombies/live", () => {
+	const foreignPid = SYNTH_PID_BASE + 4;
+	const liveParent = SYNTH_PID_BASE + 98;
+	const scan = scanZombieSubagents(
+		syntheticScanOpts(
+			{
+				[foreignPid]: {
+					// argv0 "pi" fakes the CLI binary's argv[0]; markers make it
+					// pi-descended; no PI_CREW_KIND → the foreign branch owns it.
+					environ: { AI_AGENT: "pi", PI_CODING_AGENT: "true" },
+					ppid: liveParent,
+					cmdline: ["pi"],
+				},
+			},
+			{ alive: [liveParent] },
+		),
+	);
+	const foreign = scan.foreign.find((f) => f.pid === foreignPid);
+	assert.ok(foreign, "marker+pi-argv process must appear in scan.foreign");
+	assert.equal(
+		scan.zombies.some((z) => z.pid === foreignPid),
+		false,
+		"foreign entries never leak into zombies",
+	);
+	assert.equal(
+		scan.live.some((z) => z.pid === foreignPid),
+		false,
+		"foreign entries never leak into live",
+	);
+	assert.equal(foreign.orphaned, false, "live parent → orphaned=false");
+	assert.equal(foreign.headless, false, "no headless flags in argv → headless=false");
+});
+
+test("scanZombieSubagents (real /proc, default opts): foreign marker+pi-argv child reported", {
 	skip: process.platform !== "linux",
 }, async () => {
-	// argv0 "pi" fakes the CLI binary's argv[0]; markers make it pi-descended.
-	// No PI_CREW_KIND → not a crew child → the R3-16 foreign branch owns it.
+	// z1: default opts still drive the real /proc foreign branch.
 	const child = spawn("sleep", ["30"], {
 		argv0: "pi",
 		env: { ...envWithoutCrewKind(), AI_AGENT: "pi", PI_CODING_AGENT: "true" },
@@ -336,88 +479,88 @@ test("scanZombieSubagents: marker+pi-argv foreign process lands in foreign (REPO
 		await waitForMarker(child.pid, (env) => env.AI_AGENT === "pi");
 		const scan = scanZombieSubagents();
 		const foreign = scan.foreign.find((f) => f.pid === child.pid);
-		assert.ok(foreign, "marker+pi-argv process must appear in scan.foreign");
+		assert.ok(foreign, "default-opts scan still finds foreign pi processes");
 		assert.equal(
 			scan.zombies.some((z) => z.pid === child.pid),
 			false,
-			"foreign entries never leak into zombies",
-		);
-		assert.equal(
-			scan.live.some((z) => z.pid === child.pid),
-			false,
-			"foreign entries never leak into live",
 		);
 		// Spawned by this test process → parent alive → not orphaned.
-		assert.equal(foreign.orphaned, false, "live parent → orphaned=false");
-		// argv has no --mode json/-p → headless=false.
-		assert.equal(foreign.headless, false, "no headless flags in argv → headless=false");
+		assert.equal(foreign.orphaned, false);
 	} finally {
 		child.kill();
 	}
 });
 
-test("scanZombieSubagents: marker INHERITOR without pi argv (bash) is never foreign-listed", {
-	skip: process.platform !== "linux",
-}, async () => {
+test("scanZombieSubagents (synthetic): marker INHERITOR without pi argv is never foreign-listed", () => {
 	// Every process pi spawns (shells, MCP servers, xclip…) inherits the markers.
 	// The argv gate must keep them out — otherwise the user's own tool processes
 	// flood the report.
-	const child = spawn("sleep", ["30"], {
-		env: { ...envWithoutCrewKind(), AI_AGENT: "pi", PI_CODING_AGENT: "true" },
-		stdio: "ignore",
-	});
-	try {
-		await waitForMarker(child.pid, (env) => env.AI_AGENT === "pi");
-		const scan = scanZombieSubagents();
-		assert.equal(
-			scan.foreign.some((f) => f.pid === child.pid),
-			false,
-			"argv[0]=sleep must NOT be listed as foreign pi",
-		);
-	} finally {
-		child.kill();
-	}
+	const inheritorPid = SYNTH_PID_BASE + 5;
+	const scan = scanZombieSubagents(
+		syntheticScanOpts({
+			[inheritorPid]: {
+				environ: { AI_AGENT: "pi", PI_CODING_AGENT: "true" },
+				cmdline: ["sleep", "30"],
+			},
+		}),
+	);
+	assert.equal(
+		scan.foreign.some((f) => f.pid === inheritorPid),
+		false,
+		"argv[0]=sleep must NOT be listed as foreign pi",
+	);
 });
 
-test("scanZombieSubagents: crew workers are never duplicated into foreign", {
-	skip: process.platform !== "linux",
-}, async () => {
+test("scanZombieSubagents (synthetic): crew workers (even legacy marker carriers) are never duplicated into foreign", () => {
 	// A real crew worker carries PI_CREW_KIND AND (after the env scrub) no
 	// markers; even a LEGACY worker that somehow kept markers must classify via
 	// the authoritative PI_CREW_KIND gate — never in both buckets.
-	const deadParentPid = spawnSync("true").pid ?? 1;
-	const child = spawn("sleep", ["30"], {
-		argv0: "pi",
-		env: {
-			...process.env,
-			PI_CREW_KIND: "subagent",
-			PI_CREW_PARENT_PID: String(deadParentPid),
-			AI_AGENT: "pi",
-			PI_CODING_AGENT: "true",
-		},
-		stdio: "ignore",
-	});
-	try {
-		await waitForMarker(child.pid, (env) => env.PI_CREW_KIND === "subagent");
-		const scan = scanZombieSubagents();
-		const inCrew = [...scan.zombies, ...scan.live].some((z) => z.pid === child.pid);
-		assert.ok(inCrew, "PI_CREW_KIND carrier must classify via the crew path");
-		assert.equal(
-			scan.foreign.some((f) => f.pid === child.pid),
-			false,
-			"crew worker must never also appear in foreign",
-		);
-	} finally {
-		child.kill();
-	}
+	const crewPid = SYNTH_PID_BASE + 6;
+	const scan = scanZombieSubagents(
+		syntheticScanOpts({
+			[crewPid]: {
+				environ: {
+					PI_CREW_KIND: "subagent",
+					PI_CREW_PARENT_PID: "1",
+					AI_AGENT: "pi",
+					PI_CODING_AGENT: "true",
+				},
+				cmdline: ["pi", "--mode", "json"],
+			},
+		}),
+	);
+	const inCrew = [...scan.zombies, ...scan.live].some((z) => z.pid === crewPid);
+	assert.ok(inCrew, "PI_CREW_KIND carrier must classify via the crew path");
+	assert.equal(
+		scan.foreign.some((f) => f.pid === crewPid),
+		false,
+		"crew worker must never also appear in foreign",
+	);
 });
 
-test("collectAncestorPids: covers the scanner's parent chain, never self", {
-	skip: process.platform !== "linux",
-}, () => {
-	const ancestors = __test.collectAncestorPids();
-	assert.equal(ancestors.has(process.pid), false, "self is never an ancestor");
-	assert.ok(ancestors.size > 0, "a test process always has a living parent chain");
+test("collectAncestorPids (synthetic): walks the ppid chain over synthetic stats, never self", () => {
+	const ancestorTop = SYNTH_PID_BASE + 7;
+	const ancestorMid = SYNTH_PID_BASE + 8;
+	const opts = syntheticScanOpts(
+		{
+			// The chain start (scanner's "parent") carries markers + pi argv but is
+			// a hosting session — R3-16: ancestors are excluded from foreign.
+			[ancestorTop]: { environ: { AI_AGENT: "pi", PI_CODING_AGENT: "true" }, ppid: ancestorMid, cmdline: ["pi"] },
+			[ancestorMid]: { ppid: 1 },
+		},
+		{ parentPid: ancestorTop },
+	);
+	// Direct helper check: chain = top → mid → init(1) stop.
+	const chain = __test.collectAncestorPids(opts.readProcFile!, () => ancestorTop);
+	assert.ok(chain.has(ancestorTop) && chain.has(ancestorMid), "chain walks synthetic ppid links");
+	assert.equal(chain.has(process.pid), false, "self is never an ancestor");
+	// Scan-level: a marker+pi-argv process ON the ancestor chain is not foreign.
+	const scan = scanZombieSubagents(opts);
+	assert.equal(
+		scan.foreign.some((f) => f.pid === ancestorTop),
+		false,
+		"ancestor pi must never be reported foreign",
+	);
 });
 
 test("looksLikePiBinary + isHeadlessArgv: classification unit checks", () => {

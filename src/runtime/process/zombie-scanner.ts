@@ -97,11 +97,51 @@ export interface ForeignPiProcess {
 	cmd: string;
 }
 
+/** Wave-14 F4 (GAP-3): injectable seam for `scanZombieSubagents`.
+ *
+ *  Every ambient read the scanner performs is replaceable so classification
+ *  tests can drive a SYNTHETIC /proc on every OS (previously 7 tests skipped
+ *  forever on macOS/Windows CI). Defaults preserve behavior EXACTLY — each
+ *  read-site resolves `opts.X ?? <the previous inline expression>` (the same
+ *  injection pattern as reap-group.ts ReapGroupOptions, wave 12b). Production
+ *  callers are no-arg (doctor.ts, orphan-reaper.ts) and see zero change. */
+export interface ZombieScanOptions {
+	/** Platform gate. Default `process.platform`. */
+	platform?: NodeJS.Platform;
+	/** Real uid of the scanner process. Default `tryGetUid` (try/catch around
+	 *  `process.getuid?.()` — undefined on win32). */
+	getuid?: () => number | undefined;
+	/** File reader for /proc paths. Default `fs.readFileSync(p, "utf-8")` with
+	 *  read errors mapped to `undefined` (the previous per-helper catch). */
+	readProcFile?: (p: string) => string | undefined;
+	/** Candidate pid enumeration. Default: readdir of the real `/proc`. */
+	listProcPids?: () => number[];
+	/** Pid liveness probe. Default `isPidAlive` (`process.kill(pid, 0)` with the
+	 *  R7-A2 ESRCH/ENOENT semantics). */
+	pidAlive?: (pid: number) => boolean;
+	/** Scanner's own parent pid — the ancestor-chain starting point. Default
+	 *  `process.ppid`. Injection point for deterministic ancestor tests. */
+	getParentPid?: () => number;
+}
+
+/** Normalized /proc read: `undefined` = unreadable (missing, EPERM, …). */
+type ReadProcFile = (p: string) => string | undefined;
+
+/** Default seam reader — real fs with the previous per-helper catch folded in. */
+const defaultReadProcFile: ReadProcFile = (p) => {
+	try {
+		return fs.readFileSync(p, "utf-8");
+	} catch {
+		return undefined;
+	}
+};
+
 /** Read /proc/<pid>/environ as a key=value record. Returns {} if unreadable. */
-function readProcEnviron(pid: number): Record<string, string> {
+function readProcEnviron(pid: number, read: ReadProcFile = defaultReadProcFile): Record<string, string> {
 	try {
 		// /proc/<pid>/environ is NUL-separated key=value pairs.
-		const raw = fs.readFileSync(`/proc/${pid}/environ`, "utf-8");
+		const raw = read(`/proc/${pid}/environ`);
+		if (raw === undefined) return {};
 		const out: Record<string, string> = {};
 		for (const entry of raw.split("\0")) {
 			const eq = entry.indexOf("=");
@@ -114,9 +154,13 @@ function readProcEnviron(pid: number): Record<string, string> {
 }
 
 /** Read /proc/<pid>/stat to get ppid + starttime + elapsed. Returns undefined if unreadable. */
-function readProcStat(pid: number): { ppid: number; starttime: number | undefined; elapsedSec: number | undefined } | undefined {
+function readProcStat(
+	pid: number,
+	read: ReadProcFile = defaultReadProcFile,
+): { ppid: number; starttime: number | undefined; elapsedSec: number | undefined } | undefined {
 	try {
-		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
+		const stat = read(`/proc/${pid}/stat`);
+		if (stat === undefined) return undefined;
 		// stat format: pid (comm) state ppid ... starttime ...
 		// Shared paren-aware cut (proc-stat.ts) — MUST index identically with
 		// surface-spawn's PI_CREW_PARENT_START_TIME capture.
@@ -125,7 +169,7 @@ function readProcStat(pid: number): { ppid: number; starttime: number | undefine
 		const ppid = Number.parseInt(rest[PROC_STAT_PPID_INDEX] ?? "", 10);
 		const starttimeTicksRaw = Number.parseInt(rest[PROC_STAT_STARTTIME_INDEX] ?? "", 10);
 		const starttime = Number.isFinite(starttimeTicksRaw) ? starttimeTicksRaw : undefined;
-		const elapsedSec = computeElapsedSec(starttime);
+		const elapsedSec = computeElapsedSec(starttime, read);
 		return { ppid: Number.isFinite(ppid) ? ppid : 0, starttime, elapsedSec };
 	} catch {
 		return undefined;
@@ -133,9 +177,10 @@ function readProcStat(pid: number): { ppid: number; starttime: number | undefine
 }
 
 /** /proc/uptime first field (seconds since boot); undefined when unreadable. */
-function readUptimeSec(): number | undefined {
+function readUptimeSec(read: ReadProcFile = defaultReadProcFile): number | undefined {
 	try {
-		const uptimeRaw = fs.readFileSync("/proc/uptime", "utf-8");
+		const uptimeRaw = read("/proc/uptime");
+		if (uptimeRaw === undefined) return undefined;
 		const uptimeSec = Number.parseFloat(uptimeRaw.split(" ")[0] ?? "");
 		return Number.isFinite(uptimeSec) ? uptimeSec : undefined;
 	} catch {
@@ -148,22 +193,22 @@ function readUptimeSec(): number | undefined {
  * ticks — boot time = now - uptime, so startedAt = boot + starttime/CLK_TCK.
  * Best-effort ISO string; undefined when /proc/uptime is unavailable.
  */
-function computeStartedAtIso(starttime: number | undefined): string | undefined {
+function computeStartedAtIso(starttime: number | undefined, read: ReadProcFile = defaultReadProcFile): string | undefined {
 	if (starttime === undefined || !Number.isFinite(starttime)) return undefined;
-	const uptimeSec = readUptimeSec();
+	const uptimeSec = readUptimeSec(read);
 	if (uptimeSec === undefined) return undefined;
 	const bootMs = Date.now() - uptimeSec * 1000;
 	return new Date(bootMs + (starttime / 100) * 1000).toISOString();
 }
 
-function computeElapsedSec(starttimeTicks: number | undefined): number | undefined {
+function computeElapsedSec(starttimeTicks: number | undefined, read: ReadProcFile = defaultReadProcFile): number | undefined {
 	if (starttimeTicks === undefined || !Number.isFinite(starttimeTicks)) return undefined;
 	try {
 		// Linux CLK_TCK is virtually always 100 (sysconf(_SC_CLK_TCK)). Reading it
 		// portably from Node requires a native addon; hardcoding 100 matches every
 		// mainstream Linux distro and keeps this dependency-free.
 		const ticksPerSec = 100;
-		const uptimeSec = readUptimeSec();
+		const uptimeSec = readUptimeSec(read);
 		if (uptimeSec === undefined) return undefined;
 		// starttime (ticks since boot) → process age in seconds = uptime - starttime/ticksPerSec.
 		const startAgeSec = starttimeTicks / ticksPerSec;
@@ -188,24 +233,26 @@ function isPidAlive(pid: number): boolean {
 	}
 }
 
-function readProcCmdline(pid: number): string {
-	return readProcCmdlineTokens(pid).join(" ").trim() || `pid ${pid}`;
+function readProcCmdline(pid: number, read: ReadProcFile = defaultReadProcFile): string {
+	return readProcCmdlineTokens(pid, read).join(" ").trim() || `pid ${pid}`;
 }
 
 /** /proc/<pid>/cmdline as argv tokens (NUL-split). Empty array if unreadable. */
-function readProcCmdlineTokens(pid: number): string[] {
+function readProcCmdlineTokens(pid: number, read: ReadProcFile = defaultReadProcFile): string[] {
 	try {
 		// /proc/<pid>/cmdline is NUL-separated argv.
-		const raw = fs.readFileSync(`/proc/${pid}/cmdline`, "utf-8");
+		const raw = read(`/proc/${pid}/cmdline`);
+		if (raw === undefined) return [];
 		return raw.split("\0").filter(Boolean);
 	} catch {
 		return [];
 	}
 }
 
-function readProcRssKb(pid: number): number {
+function readProcRssKb(pid: number, read: ReadProcFile = defaultReadProcFile): number {
 	try {
-		const status = fs.readFileSync(`/proc/${pid}/status`, "utf-8");
+		const status = read(`/proc/${pid}/status`);
+		if (status === undefined) return 0;
 		const match = status.match(/^VmRSS:\s+(\d+)\s+kB/m);
 		return match ? Number.parseInt(match[1] ?? "", 10) : 0;
 	} catch {
@@ -221,8 +268,8 @@ function readProcRssKb(pid: number): number {
  * non-Linux platforms the scanner returns an empty result with a note in
  * `errors` (zombie detection is best-effort; the doctor report still renders).
  */
-function listCandidatePids(): number[] {
-	if (process.platform !== "linux") return [];
+function listCandidatePids(platform: NodeJS.Platform = process.platform): number[] {
+	if (platform !== "linux") return [];
 	const pids: number[] = [];
 	try {
 		for (const entry of fs.readdirSync("/proc")) {
@@ -241,23 +288,30 @@ function listCandidatePids(): number[] {
  * any scan errors. Callers decide what to do with the result; this module
  * has no side effects.
  */
-export function scanZombieSubagents(): ZombieScanResult {
+export function scanZombieSubagents(opts: ZombieScanOptions = {}): ZombieScanResult {
+	// Wave-14 F4: resolve the seam ONCE — every default below is the exact
+	// previous inline expression, so no-arg callers are byte-for-byte behavior
+	// preserved (doctor.ts:990, orphan-reaper.ts:306).
+	const platform = opts.platform ?? process.platform;
+	const read = opts.readProcFile ?? defaultReadProcFile;
+	const pidAlive = opts.pidAlive ?? isPidAlive;
 	const result: ZombieScanResult = { zombies: [], live: [], foreign: [], errors: [] };
-	if (process.platform !== "linux") {
-		result.errors.push("zombie scan is Linux-only (/proc required); skipping on " + process.platform);
+	if (platform !== "linux") {
+		result.errors.push("zombie scan is Linux-only (/proc required); skipping on " + platform);
 		return result;
 	}
 
-	const myUid = tryGetUid();
+	const myUid = (opts.getuid ?? tryGetUid)();
 	// R3-16: self + ancestors are live hosting sessions (main session / crew
 	// host chain) — never reportable as foreign, even when they carry markers.
-	const ancestors = collectAncestorPids();
-	for (const pid of listCandidatePids()) {
+	const ancestors = collectAncestorPids(read, opts.getParentPid);
+	const listPids = opts.listProcPids ?? (() => listCandidatePids(platform));
+	for (const pid of listPids()) {
 		try {
 			// Cheap rejection first: only inspect processes we own (avoid scanning system procs).
-			if (myUid !== undefined && getProcUid(pid) !== myUid) continue;
+			if (myUid !== undefined && getProcUid(pid, read) !== myUid) continue;
 
-			const environ = readProcEnviron(pid);
+			const environ = readProcEnviron(pid, read);
 			// AUTHORITATIVE GATE: a process is a pi-crew sub-agent ONLY if it carries
 			// PI_CREW_KIND=subagent. The user's main session never sets this, so it can
 			// never be matched — this is the fix for accidentally killing main sessions.
@@ -271,18 +325,18 @@ export function scanZombieSubagents(): ZombieScanResult {
 				// them (pi-crew also scrubs these markers from worker env).
 				const hasPiMarker = environ.AI_AGENT === "pi" || environ.PI_CODING_AGENT === "true";
 				if (hasPiMarker && pid !== process.pid && !ancestors.has(pid)) {
-					const tokens = readProcCmdlineTokens(pid);
+					const tokens = readProcCmdlineTokens(pid, read);
 					if (looksLikePiBinary(tokens)) {
-						const foreignStat = readProcStat(pid);
+						const foreignStat = readProcStat(pid, read);
 						const ppid = foreignStat?.ppid ?? 0;
 						result.foreign.push({
 							pid,
 							ppid,
-							orphaned: ppid <= 1 || !isPidAlive(ppid),
+							orphaned: ppid <= 1 || !pidAlive(ppid),
 							headless: isHeadlessArgv(tokens),
-							rssKb: readProcRssKb(pid),
+							rssKb: readProcRssKb(pid, read),
 							elapsedSec: foreignStat?.elapsedSec,
-							cmd: readProcCmdline(pid),
+							cmd: readProcCmdline(pid, read),
 						});
 					}
 				}
@@ -290,7 +344,7 @@ export function scanZombieSubagents(): ZombieScanResult {
 			}
 
 			const crewParentPid = Number.parseInt(environ.PI_CREW_PARENT_PID ?? "", 10);
-			const stat = readProcStat(pid);
+			const stat = readProcStat(pid, read);
 			// Surface identity (T12): strict allowlist — an unrelated PI_CREW_SURFACE
 			// value must not half-populate the fields doctor relies on for pane close.
 			const surface = environ.PI_CREW_SURFACE === "tmux" || environ.PI_CREW_SURFACE === "herdr" ? environ.PI_CREW_SURFACE : undefined;
@@ -298,17 +352,17 @@ export function scanZombieSubagents(): ZombieScanResult {
 				pid,
 				ppid: stat?.ppid ?? 0,
 				crewParentPid: Number.isFinite(crewParentPid) ? crewParentPid : 0,
-				parentAlive: Number.isFinite(crewParentPid) && isPidAlive(crewParentPid),
+				parentAlive: Number.isFinite(crewParentPid) && pidAlive(crewParentPid),
 				role: environ.PI_CREW_ROLE,
 				surface,
 				surfacePaneId: environ.PI_CREW_SURFACE_PANE || undefined,
-				rssKb: readProcRssKb(pid),
+				rssKb: readProcRssKb(pid, read),
 				elapsedSec: stat?.elapsedSec,
 				// M-7: starttime (ticks) + derived wall-clock start — pid identity pin
 				// for kill-time PID-reuse checks and prompt-kill triage.
 				starttime: stat?.starttime,
-				startedAt: computeStartedAtIso(stat?.starttime),
-				cmd: readProcCmdline(pid),
+				startedAt: computeStartedAtIso(stat?.starttime, read),
+				cmd: readProcCmdline(pid, read),
 			};
 
 			if (entry.parentAlive) {
@@ -338,10 +392,11 @@ function tryGetUid(): number | undefined {
 	}
 }
 
-function getProcUid(pid: number): number | undefined {
+function getProcUid(pid: number, read: ReadProcFile = defaultReadProcFile): number | undefined {
 	try {
 		// /proc/<pid>/status has Uid: <real> <eff> <sav> <fs>
-		const status = fs.readFileSync(`/proc/${pid}/status`, "utf-8");
+		const status = read(`/proc/${pid}/status`);
+		if (status === undefined) return undefined;
 		const match = status.match(/^Uid:\s+(\d+)/m);
 		return match ? Number.parseInt(match[1] ?? "", 10) : undefined;
 	} catch {
@@ -393,13 +448,13 @@ function isHeadlessArgv(tokens: string[]): boolean {
  * it sit on this chain and carry markers when pi-in-pi). Bounded at 64 hops to
  * survive a hypothetical pid cycle.
  */
-function collectAncestorPids(): Set<number> {
+function collectAncestorPids(read: ReadProcFile = defaultReadProcFile, getParentPid?: () => number): Set<number> {
 	const chain = new Set<number>();
-	let current = process.ppid;
+	let current = getParentPid !== undefined ? getParentPid() : process.ppid;
 	let guard = 0;
 	while (current > 1 && guard++ < 64) {
 		chain.add(current);
-		const stat = readProcStat(current);
+		const stat = readProcStat(current, read);
 		if (!stat || stat.ppid <= 0) break;
 		current = stat.ppid;
 	}

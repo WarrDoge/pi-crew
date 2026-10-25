@@ -1376,6 +1376,48 @@ export function appendEventFireAndForget(eventsPath: string, event: AppendTeamEv
 	appendEventAsync(eventsPath, event).catch((error) => logInternalError("event-log.fire-and-forget", error, eventsPath));
 }
 
+/**
+ * Wave-14 F1 (GAP-0): await a run's in-flight event-log writers.
+ *
+ * Safe to call from tests before removing a run state dir: awaits all
+ * in-flight async appends for the given events path (all paths when omitted)
+ * and flushes its buffer. No-op when nothing is in flight.
+ *
+ * - With `eventsPath`: awaiting the per-path queue TAIL settles the entire
+ *   write chain (tail-chaining guarantees the tail completes last), then
+ *   flushes that path's buffered tier via the internal `flushOneEventLogBuffer`
+ *   (per-path flush is a simple direct call — no complexity caveat).
+ *   The Map entry may already have self-deleted (compare-and-delete on
+ *   settle) — `?? Promise.resolve()` makes that a clean no-op.
+ * - Without `eventsPath`: awaits every queue tail + `flushEventLogBuffer()`.
+ *
+ * Never throws: a rejected tail is absorbed by `allSettled` (a teardown
+ * helper must never fail because an old write failed — the error-reset path
+ * in appendEventAsync already logs and resets the queue). The buffer flush
+ * is best-effort for the same reason. The MAX_ASYNC_QUEUES (256) cap is
+ * irrelevant here: drain-by-key touches one entry, global drain iterates
+ * whatever currently exists. `drainAsyncQueues` stays private — this is the
+ * public, path-scoped surface.
+ */
+export async function drainEventLogWriters(eventsPath?: string): Promise<void> {
+	if (eventsPath !== undefined) {
+		const tail = asyncQueues.get(eventsPath) ?? Promise.resolve();
+		await Promise.allSettled([tail]);
+		try {
+			await flushOneEventLogBuffer(eventsPath);
+		} catch {
+			/* best-effort — teardown must not fail on a flush error */
+		}
+		return;
+	}
+	await Promise.allSettled([...asyncQueues.values()]);
+	try {
+		await flushEventLogBuffer();
+	} catch {
+		/* best-effort */
+	}
+}
+
 // Auto-flush on process exit so buffered events do not silently leak.
 // Defense-in-depth: SIGTERM/SIGINT use setImmediate so the handler returns
 // immediately and the main thread is not blocked by sync I/O.
