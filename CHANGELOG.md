@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+## [0.11.42] — fix wave 14: event-log drain API + zombie-scanner seam (2026-10-25)
+
+Wave 12d papered over the recurring `ENOTEMPTY` teardown race with `removeDirWithRetry`; the root cause stayed:
+production fires **66 event writes across 23 files** without awaiting them (`void appendEventAsync` ×23,
+`appendEventFireAndForget` ×43), and each queued write re-creates the run dir before appending — so teardown that
+`rmSync`s the state dir mid-flight races the async writer and loses. There was no way for a test to await one
+run's writers: the queue drain was private and `beforeExit`-only (SPEC `fixwave14-drain-api-zombie-seam-2026-10-25`).
+
+**Added — `drainEventLogWriters(eventsPath?)`.** Public per-run drain API for the event-log async writer queues
+(allSettled tail await + per-path buffer flush, never throws). Lets tests await in-flight writers before removing
+a run state dir instead of retry-racing them — the race repro (drain → plain `rmSync`, no retry) is now a pinned
+test.
+
+**Added — `cleanupStateRoot(dir, eventsPath?)` test helper.** Best-effort drain then `removeDirWithRetry(settleMs: 0)`.
+
+**Added — `ZombieScanOptions` seam on `scanZombieSubagents`** (`platform`/`getuid`/`readProcFile`/`listProcPids`/
+`pidAlive`/`getParentPid`, defaults byte-exact). **7 previously linux-only tests now run on every OS** via
+synthetic `/proc` fixtures (+2 new seam tests; 2 real-`/proc` default-path tests stay linux-gated).
+
+**Fixed — teardown races by adopting drain-then-remove in pilot tests.** `team-tool-steer-clamp` (retry-only →
+drain), `dwf-setresult` (12 bare `rmSync`), `event-log-batch`/`event-log-async`, plus dedup of two local
+`removeDirWithRetry` variants (`subagent-steer-live`, `subagent-tools-integration`).
+
+**Battery (PASS).** targeted ×3 (drain 4/4, zombie 26/26 skip=0, 6 pilot files), `test:critical` 124/124, full
+unit 10,075 pass / 1 ambient-adjudicated / 4 skipped, integration 144/0/4, static gates 0, dist MATCH.
+
+**Docs.** Battery report `docs/real-test/reports/real-test-2026-10-25-wave14-drain-zombie-battery.md`; closed
+investigation (no code change): the "hung" alert for an already-cancelled run was delivery timing — `cancelled`
+is already terminal in both the emit and delivery gates.
+
 ## [0.11.41] — fix wave 13: watchdog liveness — false "appears hung" alerts on healthy direct runs (2026-10-25)
 
 Five false alarms landed in one working session (2026-10-24/25), all the same shape: healthy direct single-agent
