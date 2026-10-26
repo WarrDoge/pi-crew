@@ -804,3 +804,75 @@ test("O-5: plan-phase name truncation is grapheme-aware — emoji titles never s
 	);
 	assert.ok((exact.text ?? "").includes("🚀".repeat(5)), `at-budget title must pass through whole, got: ${exact.text}`);
 });
+
+/* Wave 16 (residual render wiring): the powerbar keeps a frozen-manifest run
+ * in its active segment while task heartbeats stay fresh — item.tasks comes
+ * from snapshot.tasks | readTasks, so the OR-guard adds zero disk reads. */
+test("wave 16: powerbar keeps frozen-manifest run active while task heartbeats are fresh", async () => {
+	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-powerbar-hb-home-"));
+	const previousHome = process.env.PI_TEAMS_HOME;
+	process.env.PI_TEAMS_HOME = home;
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-powerbar-hb-"));
+	try {
+		resetPowerbarDedupState();
+		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
+		const events: Array<{ event: string; data: unknown }> = [];
+		const bus = {
+			emit: (event: string, data: unknown) => events.push({ event, data }),
+		};
+		const team = {
+			name: "hb-team",
+			description: "",
+			roles: [{ name: "worker", agent: "worker" }],
+			source: "test",
+			filePath: "builtin",
+		} as never;
+		const workflow = {
+			name: "hb-team",
+			description: "",
+			steps: [{ id: "work", role: "worker" }],
+			source: "test",
+			filePath: "builtin",
+		} as never;
+		const created = createRunManifest({ cwd, team, workflow, goal: "frozen manifest fresh heartbeat" });
+		// Manifest froze 3 minutes ago (past the 2min orphan threshold) and the
+		// agent record has no evidence — isDisplayActiveRun alone says inactive.
+		const frozenAt = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+		const manifest: TeamRunManifest = { ...created.manifest, status: "running", updatedAt: frozenAt };
+		saveRunManifest(manifest, { allowTerminalExit: true });
+		saveRunTasks(manifest, [
+			{
+				...created.tasks[0]!,
+				status: "running",
+				startedAt: frozenAt,
+				heartbeat: { workerId: "worker-1", lastSeenAt: new Date().toISOString() },
+			},
+		]);
+		saveCrewAgents(manifest, [
+			{
+				id: `${manifest.runId}:01`,
+				runId: manifest.runId,
+				taskId: created.tasks[0]!.id,
+				agent: "worker",
+				role: "worker",
+				runtime: "child-process",
+				status: "queued",
+				startedAt: frozenAt,
+			},
+		]);
+
+		updatePiCrewPowerbar(bus, cwd);
+		const activeUpdate = events.find(
+			(item) => item.event === "powerbar:update" && JSON.stringify(item.data).includes("pi-crew-active"),
+		);
+		assert.ok(
+			activeUpdate,
+			`expected pi-crew-active segment update (fresh heartbeat run stays active), got: ${JSON.stringify(events)}`,
+		);
+	} finally {
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(home);
+		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
+		else process.env.PI_TEAMS_HOME = previousHome;
+	}
+});

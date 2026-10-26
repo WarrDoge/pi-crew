@@ -130,6 +130,63 @@ const workflow: WorkflowConfig = {
 	steps: [{ id: "plan", role: "planner", task: "Plan {goal}" }],
 };
 
+/* Wave 16 (residual render wiring): the toast must surface a run whose
+ * manifest froze mid-long-tool (no recent agent progress) while its task
+ * heartbeats stay fresh — the same evidence the widget/powerbar use. */
+describe("notifyActiveRuns surfaces frozen-manifest runs with fresh task heartbeats (wave 16)", () => {
+	it("advertises a run isDisplayActiveRun calls inactive but heartbeatLiveForDisplay proves alive", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-summary-hb-"));
+		fs.mkdirSync(path.join(dir, ".crew"));
+		const calls: string[] = [];
+		const ctx = {
+			cwd: dir,
+			sessionManager: { getSessionId: () => "session-A" },
+			ui: {
+				notify: (msg: string) => {
+					calls.push(msg);
+				},
+			},
+		};
+		try {
+			const created = createRunManifest({ cwd: dir, team, workflow, goal: "fresh heartbeat" });
+			const frozenAt = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+			const manifest = {
+				...created.manifest,
+				status: "running" as const,
+				ownerSessionId: "session-A",
+				updatedAt: frozenAt,
+			};
+			const heartbeatTasks = created.tasks.map((task) => ({
+				...task,
+				status: "running" as const,
+				startedAt: frozenAt,
+				heartbeat: { workerId: "worker-1", lastSeenAt: new Date().toISOString() },
+			}));
+			saveRunManifest(manifest);
+			saveRunTasks(manifest, heartbeatTasks);
+			// Agent record frozen at the same instant — NO recent activity evidence,
+			// so isDisplayActiveRun(run, agents) alone returns false.
+			saveCrewAgents(
+				manifest,
+				heartbeatTasks.map((task) => ({
+					...recordFromTask(manifest, task, "live-session"),
+					status: "queued" as const,
+					progress: undefined,
+				})),
+			);
+
+			clearProjectRootCache();
+			notifyActiveRuns(ctx as never);
+			assert.equal(calls.length, 1, `expected the fresh-heartbeat run advertised, got ${calls.length}`);
+			assert.match(calls[0]!, /pi-crew active runs/);
+			assert.match(calls[0]!, /\[running\]/);
+		} finally {
+			clearProjectRootCache();
+			await removeDirWithRetry(dir);
+		}
+	});
+});
+
 /* Vector #11: notifyActiveRuns must never surface another session's runs in the
  * active-runs toast — session B must not advertise session A's in-flight runs. */
 describe("notifyActiveRuns filters out runs owned by another session (vector #11)", () => {

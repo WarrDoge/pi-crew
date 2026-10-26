@@ -300,6 +300,80 @@ test("should detect orphaned non-async stale run with no agent progress", async 
 	});
 });
 
+// ── 3b. Wave 16: heartbeat evidence suppresses the orphan label ────
+
+test("wave 16: stale-no-progress orphan suppressed when task heartbeat is fresh", async () => {
+	await withIsolatedHome(async () => {
+		const isolatedTmp = createIsolatedTmpDir();
+		const projectCwd = createProjectCwd(isolatedTmp);
+
+		try {
+			const created = createRunManifest({
+				cwd: projectCwd,
+				team,
+				workflow,
+				goal: "frozen manifest fresh heartbeat",
+			});
+			const running = updateRunStatus(created.manifest, "running", "started");
+
+			// Manifest froze 3 minutes ago (mid-long-tool): past ORPHANED_ACTIVE_RUN_MS,
+			// and the agent record carries no recent progress evidence — WITHOUT the
+			// wave-16 guard this run is labelled stale-no-progress.
+			const frozenAt = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+			const staleManifest: TeamRunManifest = {
+				...running,
+				updatedAt: frozenAt,
+			};
+			saveRunManifest(staleManifest);
+
+			const freshTasks: TeamTaskState[] = [
+				{
+					...created.tasks[0]!,
+					status: "running",
+					startedAt: frozenAt,
+					heartbeat: {
+						workerId: "worker-1",
+						lastSeenAt: new Date().toISOString(),
+					},
+				},
+			];
+			saveRunTasks(staleManifest, freshTasks);
+
+			const agentsPath = path.join(staleManifest.stateRoot, "agents.json");
+			fs.writeFileSync(
+				agentsPath,
+				JSON.stringify([
+					{
+						id: "agent-1",
+						runId: staleManifest.runId,
+						taskId: freshTasks[0]!.id,
+						agent: "planner",
+						role: "planner",
+						runtime: "scaffold",
+						status: "running",
+						startedAt: frozenAt,
+					},
+				]),
+			);
+
+			clearProjectRootCache();
+			sharedScanCache.clear();
+			__test__clearManifestCache();
+
+			const { text, counts } = buildHealthReport({ cwd: projectCwd }, {}, { tmpDir: isolatedTmp });
+
+			// The fresh task heartbeat proves the worker is alive: no orphan label,
+			// and the task is not stuck either (heartbeat < 5min).
+			assert.equal(counts.orphaned, 0, `expected 0 orphaned, got: ${counts.orphaned}`);
+			assert.doesNotMatch(text, /stale-no-progress/);
+			assert.equal(counts.stuck, 0, "fresh heartbeat is not stuck");
+		} finally {
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
+		}
+	});
+});
+
 // ── 4. Corrupted run detection ──────────────────────────────────────
 
 test("should detect corrupted run when artifacts root is missing", async () => {

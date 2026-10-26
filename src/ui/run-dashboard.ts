@@ -10,12 +10,7 @@ import { readCrewAgents } from "../runtime/crew-agent-records.ts";
 import type { CrewAgentRecord } from "../runtime/crew-agent-runtime.ts";
 import { getLiveAgentContextPercent } from "../runtime/live-session/live-agent-manager.ts";
 import { isPlanApprovalPending } from "../runtime/plan-approval.ts";
-import {
-	hasFreshTaskHeartbeatEvidence,
-	isActiveRunStatus,
-	isDisplayActiveRun,
-	isLikelyOrphanedActiveRun,
-} from "../runtime/process-status.ts";
+import { heartbeatLiveForDisplay, isActiveRunStatus, isDisplayActiveRun, isLikelyOrphanedActiveRun } from "../runtime/process-status.ts";
 import type { ScheduledJob } from "../runtime/scheduling/scheduler.ts";
 import type { TeamRunManifest, TeamTaskState, UsageState } from "../state/types.ts";
 import { aggregateUsage } from "../state/usage.ts";
@@ -366,19 +361,6 @@ function readRunTasks(run: TeamRunManifest, snapshotCache?: RunSnapshotCache, re
 
 function taskForAgent(tasks: TeamTaskState[], agent: CrewAgentRecord): TeamTaskState | undefined {
 	return tasks.find((task) => task.id === agent.taskId);
-}
-
-/**
- * Wave 15 (F2, GAP-0): tight heartbeat-liveness guard for ACTIVE display —
- * mirrors the orphan predicate's own preconditions (active status, non-async)
- * so a terminal or async run is never resurrected by a heartbeat. A healthy
- * direct run mid-long-tool freezes manifest `updatedAt` and agent progress
- * (event-driven writes) but keeps stamping `task.heartbeat.lastSeenAt`, so
- * fresh evidence means the run is alive. Call sites OR this in ONLY — every
- * non-stale branch and layout stays untouched.
- */
-function heartbeatLiveForDisplay(run: TeamRunManifest, tasks: TeamTaskState[] | undefined, now = Date.now()): boolean {
-	return isActiveRunStatus(run.status) && !run.async && hasFreshTaskHeartbeatEvidence(tasks, now);
 }
 
 function modelForTask(task: TeamTaskState | undefined): string | undefined {

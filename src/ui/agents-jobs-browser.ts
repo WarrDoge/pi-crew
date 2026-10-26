@@ -60,7 +60,7 @@ import type { CrewAgentRecord } from "../runtime/crew-agent-runtime.ts";
 import type { LiveAgentHandle } from "../runtime/live-session/live-agent-manager.ts";
 import type { ManifestCache } from "../runtime/manifest-cache.ts";
 import { createManifestCache } from "../runtime/manifest-cache.ts";
-import { hasFreshTaskHeartbeatEvidence, isActiveRunStatus, isDisplayActiveRun } from "../runtime/process-status.ts";
+import { heartbeatLiveForDisplay, isDisplayActiveRun } from "../runtime/process-status.ts";
 import type { ScheduledJob } from "../runtime/scheduling/scheduler.ts";
 import { surfaceGateEnvSnapshot } from "../runtime/surface/resolve-surface.ts";
 import { getTaskUsage } from "../runtime/usage-tracker.ts";
@@ -504,8 +504,7 @@ export class AgentsJobsBrowser {
 					// heartbeats are fresh (this loop already does per-run I/O — one more
 					// coalesced read is in-pattern). Terminal/async runs are never
 					// resurrected (isActiveRunStatus && !run.async).
-					const heartbeatLive =
-						isActiveRunStatus(run.status) && !run.async && hasFreshTaskHeartbeatEvidence(readLegacyRunTasks(run), nowMs);
+					const heartbeatLive = heartbeatLiveForDisplay(run, readLegacyRunTasks(run), nowMs);
 					if (isDisplayActiveRun(run, agents, nowMs) || heartbeatLive) runs.push({ run, agents });
 				} catch {
 					/* unreadable — skip */

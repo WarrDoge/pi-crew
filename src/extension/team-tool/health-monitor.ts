@@ -5,7 +5,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { readCrewAgents } from "../../runtime/crew-agent-records.ts";
-import { hasStaleAsyncProcess, isActiveRunStatus, isLikelyOrphanedActiveRun } from "../../runtime/process-status.ts";
+import {
+	hasFreshTaskHeartbeatEvidence,
+	hasStaleAsyncProcess,
+	isActiveRunStatus,
+	isLikelyOrphanedActiveRun,
+} from "../../runtime/process-status.ts";
 import type { TeamToolParamsValue } from "../../schema/team-tool-schema.ts";
 import { loadTasksWithRecovery } from "../../state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../state/types.ts";
@@ -374,10 +379,15 @@ export function buildHealthReport(
 			continue;
 		}
 
-		// 3. Stuck task detection for active runs
+		// 3. Stuck task detection for active runs. Wave 16 (residual render
+		// wiring): the tasks loaded here are HOISTED — step 6 reuses them so the
+		// orphan guard consults fresh task heartbeats with ZERO extra disk reads
+		// (parity with run-dashboard's stale predicate).
+		let tasks: TeamTaskState[] | undefined;
 		if (isActiveRunStatus(run.status)) {
-			const stuck = detectStuckTasks(run, now);
-			allStuck.push(...stuck);
+			const loaded = readRunTasks(run.stateRoot);
+			tasks = loaded;
+			allStuck.push(...stuckTasksFromRecords(loaded, run.runId, now));
 		}
 
 		// 4. Only check orphan status for active runs
@@ -393,9 +403,12 @@ export function buildHealthReport(
 			continue;
 		}
 
-		// 6. Orphaned: non-async active run with no recent update
+		// 6. Orphaned: non-async active run with no recent update. Wave 16: a
+		// run whose manifest froze mid-long-tool (worker busy, event-driven
+		// writes paused) keeps stamping task heartbeats — fresh evidence
+		// suppresses the stale-no-progress label (run-dashboard parity).
 		const agents = readCrewAgents(run as TeamRunManifest);
-		if (isLikelyOrphanedActiveRun(run as TeamRunManifest, agents, now)) {
+		if (isLikelyOrphanedActiveRun(run as TeamRunManifest, agents, now) && !hasFreshTaskHeartbeatEvidence(tasks, now)) {
 			orphaned.push({
 				runId: run.runId,
 				reason: "stale-no-progress",

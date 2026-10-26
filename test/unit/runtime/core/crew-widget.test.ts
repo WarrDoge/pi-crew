@@ -6,8 +6,11 @@ import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { saveCrewAgents } from "../../../../src/runtime/crew-agent-records.ts";
 import { clearLiveAgentsForTest } from "../../../../src/runtime/live-session/live-agent-manager.ts";
-import { createRunManifest, loadRunManifestById, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
+import { createRunManifest, loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
+import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
+import { createRunSnapshotCache } from "../../../../src/ui/run-snapshot-cache.ts";
 import { buildCrewWidgetLines, type CrewWidgetState, updateCrewWidget } from "../../../../src/ui/widget/index.ts";
+import { activeWidgetRuns } from "../../../../src/ui/widget/widget-model.ts";
 import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("crew widget renders installed-style run and agent summary lines", async () => {
@@ -581,5 +584,77 @@ test("C4: widget signature cache invalidates on write so genuine state changes t
 		assert.match(secondRender, /CREW ▸ /, "re-render after invalidation stays healthy");
 	} finally {
 		await removeDirWithRetry(cwd);
+	}
+});
+
+/* Wave 16 (residual render wiring): activeWidgetRuns keeps a frozen-manifest
+ * run visible while its task heartbeats stay fresh — WITHOUT a disk read on
+ * the render tick (the guard reads only item.snapshot?.tasks). */
+test("wave 16: widget keeps frozen-manifest run visible while task heartbeats are fresh", async () => {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-widget-hb-"));
+	const previousHome = process.env.PI_TEAMS_HOME;
+	const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-widget-hb-home-"));
+	process.env.PI_TEAMS_HOME = tempHome;
+	try {
+		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
+		const team = {
+			name: "hb-fix",
+			description: "",
+			roles: [{ name: "explorer", agent: "explorer" }],
+			source: "test",
+			filePath: "builtin",
+		} as never;
+		const workflow = {
+			name: "hb-fix",
+			description: "",
+			steps: [{ id: "explore", role: "explorer" }],
+			source: "test",
+			filePath: "builtin",
+		} as never;
+		const created = createRunManifest({ cwd, team, workflow, goal: "frozen manifest fresh heartbeat" });
+		// Manifest froze 3 minutes ago (past the 2min orphan threshold); the agent
+		// record is a frozen queued worker — isDisplayActiveRun alone says hidden.
+		const frozenAt = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+		const manifest: TeamRunManifest = { ...created.manifest, status: "running", updatedAt: frozenAt };
+		saveRunManifest(manifest);
+		const heartbeatTasks: TeamTaskState[] = [
+			{
+				...created.tasks[0]!,
+				status: "running",
+				startedAt: frozenAt,
+				heartbeat: { workerId: "worker-1", lastSeenAt: new Date().toISOString() },
+			},
+		];
+		saveRunTasks(manifest, heartbeatTasks);
+		saveCrewAgents(created.manifest, [
+			{
+				id: `${manifest.runId}:01`,
+				runId: manifest.runId,
+				taskId: created.tasks[0]!.id,
+				agent: "explorer",
+				role: "explorer",
+				runtime: "child-process",
+				status: "queued",
+				startedAt: frozenAt,
+			},
+		]);
+
+		const cache = createRunSnapshotCache(cwd, { ttlMs: 0 });
+		cache.refresh(manifest.runId);
+		const snapshot = cache.get(manifest.runId);
+		assert.ok(snapshot, "precondition: snapshot cached");
+		assert.ok(
+			snapshot?.tasks.some((task) => task.heartbeat?.lastSeenAt),
+			"precondition: snapshot carries the heartbeat task",
+		);
+
+		const runs = activeWidgetRuns(cwd, undefined, cache, [manifest], undefined);
+		assert.equal(runs.length, 1, `fresh-heartbeat frozen-manifest run must stay visible, got ${runs.length}`);
+		assert.equal(runs[0]?.run.runId, manifest.runId);
+	} finally {
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(tempHome);
+		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
+		else process.env.PI_TEAMS_HOME = previousHome;
 	}
 });

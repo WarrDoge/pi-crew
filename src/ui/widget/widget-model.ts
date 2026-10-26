@@ -9,7 +9,7 @@ import { readCrewAgents } from "../../runtime/crew-agent-records.ts";
 import type { CrewAgentRecord } from "../../runtime/crew-agent-runtime.ts";
 import { evictStaleLiveAgentHandles } from "../../runtime/live-session/live-agent-manager.ts";
 import type { ManifestCache } from "../../runtime/manifest-cache.ts";
-import { isDisplayActiveRun } from "../../runtime/process-status.ts";
+import { heartbeatLiveForDisplay, isDisplayActiveRun } from "../../runtime/process-status.ts";
 import { reconcileAllStaleRuns } from "../../runtime/recovery/crash-recovery.ts";
 import type { TeamRunManifest } from "../../state/types.ts";
 import { goalFlagSuffix } from "../goal-flag.ts";
@@ -61,42 +61,55 @@ export function activeWidgetRuns(
 	// workspaceId stays in scope: crash recovery below is still session-scoped.
 	const runs = preloadedManifests ?? (manifestCache ? manifestCache.list(20) : listRecentRuns(cwd, 20));
 
-	return runs
-		.map((run) => {
-			try {
-				// U7 (spec 2026-10-09): prefer the committed-state read when the
-				// cache exposes it. `readForRender` returns the SAME cached
-				// snapshot `get` would (identical render — parity), but a lapsed
-				// TTL schedules the coalesced ASYNC refresh (80ms batch → stamp
-				// check → rebuild only when files changed) instead of waiting for
-				// an external poller to notice. Structural check: legacy callers
-				// and test doubles may implement only `get`.
-				const committed = snapshotCache as
-					| { readForRender?: (runId: string) => RunUiSnapshot | undefined; get?: (runId: string) => RunUiSnapshot | undefined }
-					| undefined;
-				const snapshot =
-					typeof committed?.readForRender === "function" ? committed.readForRender(run.runId) : snapshotCache?.get(run.runId);
-				if (snapshot) {
-					return {
-						run: snapshot.manifest,
-						agents: snapshot.agents,
-						snapshot,
-					};
+	return (
+		runs
+			.map((run) => {
+				try {
+					// U7 (spec 2026-10-09): prefer the committed-state read when the
+					// cache exposes it. `readForRender` returns the SAME cached
+					// snapshot `get` would (identical render — parity), but a lapsed
+					// TTL schedules the coalesced ASYNC refresh (80ms batch → stamp
+					// check → rebuild only when files changed) instead of waiting for
+					// an external poller to notice. Structural check: legacy callers
+					// and test doubles may implement only `get`.
+					const committed = snapshotCache as
+						| {
+								readForRender?: (runId: string) => RunUiSnapshot | undefined;
+								get?: (runId: string) => RunUiSnapshot | undefined;
+						  }
+						| undefined;
+					const snapshot =
+						typeof committed?.readForRender === "function" ? committed.readForRender(run.runId) : snapshotCache?.get(run.runId);
+					if (snapshot) {
+						return {
+							run: snapshot.manifest,
+							agents: snapshot.agents,
+							snapshot,
+						};
+					}
+					// P0-6: render from snapshots only — never read disk on every
+					// render tick. When the snapshot cache is provided but hasn't
+					// populated yet (first frame after `updateCrewWidget`), drop the
+					// run from the result so the widget paints "(loading…)" instead
+					// of calling `agentsFor(run) → readCrewAgents`. Legacy callers
+					// (no snapshotCache) keep the disk-read fallback for tests/dev.
+					if (snapshotCache) return null;
+					return { run, agents: agentsFor(run) };
+				} catch {
+					if (snapshotCache) return null;
+					return { run, agents: agentsFor(run) };
 				}
-				// P0-6: render from snapshots only — never read disk on every
-				// render tick. When the snapshot cache is provided but hasn't
-				// populated yet (first frame after `updateCrewWidget`), drop the
-				// run from the result so the widget paints "(loading…)" instead
-				// of calling `agentsFor(run) → readCrewAgents`. Legacy callers
-				// (no snapshotCache) keep the disk-read fallback for tests/dev.
-				if (snapshotCache) return null;
-				return { run, agents: agentsFor(run) };
-			} catch {
-				if (snapshotCache) return null;
-				return { run, agents: agentsFor(run) };
-			}
-		})
-		.filter((item): item is WidgetRun => item !== null && isDisplayActiveRun(item.run, item.agents));
+			})
+			// Wave 16 (residual render wiring): the dock's high-frequency tick NEVER
+			// gains a disk read here — only the snapshot the render path already
+			// holds. OR-in ONLY: a run hidden because its manifest froze mid-long-tool
+			// stays visible while its task heartbeats are fresh (GAP-4 mix-A).
+			.filter(
+				(item): item is WidgetRun =>
+					item !== null &&
+					(isDisplayActiveRun(item.run, item.agents, now) || heartbeatLiveForDisplay(item.run, item.snapshot?.tasks, now)),
+			)
+	);
 }
 
 /**

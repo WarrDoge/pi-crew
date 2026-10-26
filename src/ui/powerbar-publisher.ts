@@ -5,7 +5,7 @@ import { readCrewAgents } from "../runtime/crew-agent-records.ts";
 import { listLiveAgents, listLiveAgentsByWorkspace } from "../runtime/live-session/live-agent-manager.ts";
 import type { ManifestCache } from "../runtime/manifest-cache.ts";
 import { isPlanApprovalPending } from "../runtime/plan-approval.ts";
-import { isDisplayActiveRun } from "../runtime/process-status.ts";
+import { heartbeatLiveForDisplay, isDisplayActiveRun } from "../runtime/process-status.ts";
 import type { TeamRunManifest, TeamTaskState } from "../state/types.ts";
 import { aggregateUsage } from "../state/usage.ts";
 import { readJsonFileCoalesced } from "../utils/file-coalescer.ts";
@@ -307,7 +307,11 @@ class PowerbarPublisher {
 				}
 				return { run, agents, tasks: readTasks(run.tasksPath), snapshot };
 			})
-			.filter((item) => isDisplayActiveRun(item.run, item.agents));
+			// Wave 16 (residual render wiring): item.tasks is already in scope
+			// (snapshot.tasks | readTasks fallback) — OR-ing the heartbeat guard in
+			// adds ZERO extra disk reads; a frozen-manifest run stays in the
+			// powerbar while its task heartbeats stay fresh.
+			.filter((item) => isDisplayActiveRun(item.run, item.agents) || heartbeatLiveForDisplay(item.run, item.tasks));
 		if (!active.length) {
 			this.#lastActiveKey = undefined;
 			this.#lastProgressKey = undefined;

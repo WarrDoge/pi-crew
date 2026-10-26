@@ -119,6 +119,22 @@ export function hasFreshTaskHeartbeatEvidence(
 	});
 }
 
+/**
+ * Wave 16 (residual render wiring, GAP-4): tight heartbeat-liveness guard for
+ * ACTIVE display — mirrors the orphan predicate's own preconditions (active
+ * status, non-async) so a terminal or async run is never resurrected by a
+ * heartbeat. A healthy direct run mid-long-tool freezes manifest `updatedAt`
+ * and agent progress (event-driven writes) but keeps stamping
+ * `task.heartbeat.lastSeenAt`, so fresh evidence means the run is alive.
+ * Single home for the guard that run-dashboard previously kept private and
+ * agents-jobs-browser inlined; call sites OR this in ONLY — every non-stale
+ * branch and layout stays untouched. PURE: takes the tasks the caller already
+ * holds in scope (no disk read here).
+ */
+export function heartbeatLiveForDisplay(run: TeamRunManifest, tasks: TeamTaskState[] | undefined, now = Date.now()): boolean {
+	return isActiveRunStatus(run.status) && !run.async && hasFreshTaskHeartbeatEvidence(tasks, now);
+}
+
 export function isLikelyOrphanedActiveRun(
 	run: TeamRunManifest,
 	agents: CrewAgentRecord[] = [],
