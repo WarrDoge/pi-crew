@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("forget deletes run state and artifacts when confirmed", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-forget-test-"));
@@ -45,6 +46,6 @@ test("forget deletes run state and artifacts when confirmed", async () => {
 		assert.equal(fs.existsSync(artifactsRoot), false);
 		assert.equal(loadRunManifestById(cwd, runId!), undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

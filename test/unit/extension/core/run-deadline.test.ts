@@ -11,14 +11,15 @@ import {
 	resetCrewViewSessionState,
 } from "../../../../src/ui/inline-panel/view-session-store.ts";
 import { clampTimerDelayMs } from "../../../../src/utils/timer-limits.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const realTmp = fs.realpathSync(os.tmpdir());
 
 const createdTmpDirs: string[] = [];
-after(() => {
+after(async () => {
 	for (const d of createdTmpDirs) {
 		try {
-			fs.rmSync(d, { recursive: true, force: true });
+			await removeDirWithRetry(d);
 		} catch {
 			/* best-effort cleanup */
 		}

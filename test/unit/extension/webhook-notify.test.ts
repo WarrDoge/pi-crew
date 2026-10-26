@@ -29,6 +29,7 @@ import { createRunManifest, saveRunManifest } from "../../../src/state/stores/st
 import type { TeamTaskState } from "../../../src/state/types.ts";
 import type { TeamConfig } from "../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const NOW = new Date("2026-09-23T10:20:30.000Z");
 
@@ -373,7 +374,7 @@ test("async notifier wiring: terminal transition fires the webhook once (blocked
 		assert.equal(toasts.length, 2, "local toasts unaffected by the webhook path");
 	} finally {
 		stopAsyncRunNotifier(state);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -463,6 +464,6 @@ test("SECURITY LOW: team-settings get never echoes webhook secret (sensitive-pat
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;
 		}
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 });

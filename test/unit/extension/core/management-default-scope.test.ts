@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * Tier 9e real-probe finding (2026-09-21).
@@ -65,7 +66,7 @@ test("update finds a PROJECT resource WITHOUT an explicit scope (default pool mu
 		assert.equal(update.isError, false, `update rejected a project team: ${JSON.stringify(update)}`);
 		assert.match(fs.readFileSync(filePath, "utf-8"), /Updated without scope/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -77,7 +78,7 @@ test("delete finds a PROJECT resource WITHOUT an explicit scope", async () => {
 		assert.equal(deleted.isError, false, `delete rejected a project team: ${JSON.stringify(deleted)}`);
 		assert.equal(fs.existsSync(filePath), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -92,7 +93,7 @@ test("a project AND a user resource with the same name is ambiguous → explicit
 		// With only a project copy present this must SUCCEED (no false ambiguity).
 		assert.equal(update.isError, false, `single project resource must not be ambiguous: ${JSON.stringify(update)}`);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -107,6 +108,6 @@ test("a genuinely unknown name still reports not-found", async () => {
 		assert.equal(update.isError, true, "an unknown name must still fail");
 		assert.match(JSON.stringify(update), /not found/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

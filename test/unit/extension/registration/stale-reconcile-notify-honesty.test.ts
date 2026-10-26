@@ -36,6 +36,7 @@ import { installLazyConfigurers } from "../../../../src/extension/registration/l
 import { installSessionLifecycleHandlers } from "../../../../src/extension/registration/lifecycle-handlers.ts";
 import { installRuntimeCleanup } from "../../../../src/extension/registration/runtime-cleanup.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function createEventBus() {
 	const handlers = new Map<string, Set<(payload: unknown) => void>>();
@@ -239,8 +240,8 @@ async function probeSessionStartNotifications(fixtures: FixtureRun[]): Promise<C
 	} finally {
 		if (prevHome === undefined) delete process.env.PI_CREW_HOME;
 		else process.env.PI_CREW_HOME = prevHome;
-		fs.rmSync(home, { recursive: true, force: true });
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(home);
+		await removeDirWithRetry(cwd);
 	}
 }
 

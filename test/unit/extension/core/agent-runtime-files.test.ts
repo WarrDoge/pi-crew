@@ -6,6 +6,7 @@ import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { unregisterActiveRun } from "../../../../src/state/stores/active-run-registry.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("child-process runs maintain per-agent status, events, and output files", async () => {
 	const previousMock = process.env.PI_TEAMS_MOCK_CHILD_PI;
@@ -92,6 +93,6 @@ test("child-process runs maintain per-agent status, events, and output files", a
 		else process.env.PI_TEAMS_EXECUTE_WORKERS = previousExecute;
 		if (previousAllowMock === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = previousAllowMock;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

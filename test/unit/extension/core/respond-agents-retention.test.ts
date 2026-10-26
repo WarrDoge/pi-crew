@@ -18,6 +18,7 @@ import { readCrewAgents, recordFromTask, saveCrewAgents } from "../../../../src/
 import { clearLiveAgentsForTest } from "../../../../src/runtime/live-session/live-agent-manager.ts";
 import { createRunManifest, loadRunManifestById, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function createRun() {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-r4a1-respond-"));
@@ -46,7 +47,7 @@ function makeTask(id: string, status: TeamTaskState["status"], runId: string, cw
 	} as unknown as TeamTaskState;
 }
 
-test("R4-A1 respond path: requeueing a dead-worker waiting task retains ALL sibling agent records", () => {
+test("R4-A1 respond path: requeueing a dead-worker waiting task retains ALL sibling agent records", async () => {
 	clearLiveAgentsForTest();
 	const run = createRun();
 	try {
@@ -78,6 +79,6 @@ test("R4-A1 respond path: requeueing a dead-worker waiting task retains ALL sibl
 		assert.equal(byTaskId.get("sib_done")?.status, "completed", "completed sibling record survives");
 		assert.equal(byTaskId.get("wait")?.status, "queued", "requeued task gets a fresh record");
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });

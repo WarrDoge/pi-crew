@@ -11,6 +11,7 @@ import {
 } from "../../../../src/extension/team-tool/explain.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeManifest(overrides?: Partial<TeamRunManifest>): TeamRunManifest {
 	return {
@@ -47,7 +48,7 @@ function makeTask(id: string, overrides?: Partial<TeamTaskState>): TeamTaskState
 }
 
 describe("handleExplain cross-project lookup", () => {
-	it("resolves a run stored in a nested child dir's .crew", () => {
+	it("resolves a run stored in a nested child dir's .crew", async () => {
 		// Project tree with a .git marker so state lands under the temp tree
 		// (mirrors test/unit/extension/core/locate-run-cwd.test.ts).
 		const base = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-explain-cross-"));
@@ -81,7 +82,7 @@ describe("handleExplain cross-project lookup", () => {
 			assert.equal(res.isError, false, res.text);
 			assert.ok(res.text.includes(manifest.runId));
 		} finally {
-			fs.rmSync(base, { recursive: true, force: true });
+			await removeDirWithRetry(base);
 		}
 	});
 });

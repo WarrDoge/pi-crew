@@ -28,10 +28,11 @@ import type { RegistrationContext } from "../../../../src/extension/registration
 import { createManifestCache } from "../../../../src/runtime/manifest-cache.ts";
 import { createRunManifest, updateRunStatus } from "../../../../src/state/stores/state-store.ts";
 import { createRunSnapshotCache } from "../../../../src/ui/run-snapshot-cache.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
-function makeTmpDir(prefix: string): { dir: string; cleanup: () => void } {
+async function makeTmpDir(prefix: string): Promise<{ dir: string; cleanup: () => Promise<void> }> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-	return { dir, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+	return { dir, cleanup: async () => await removeDirWithRetry(dir) };
 }
 
 type UiRecorder = {
@@ -107,7 +108,7 @@ function completedRunIn(dir: string): string {
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 120));
 
 test("#62 spread-copy owner (tool path): completion side effects all fire", async () => {
-	const { dir, cleanup } = makeTmpDir("pi-crew-fg62-spread-");
+	const { dir, cleanup } = await makeTmpDir("pi-crew-fg62-spread-");
 	try {
 		const runId = completedRunIn(dir);
 		const base = makeSessionBase(dir, "sess-1");
@@ -142,12 +143,12 @@ test("#62 spread-copy owner (tool path): completion side effects all fire", asyn
 			"crew.run.completed event must emit",
 		);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
 test("#62 stale session owner: reporting skipped, working-message clear still runs", async () => {
-	const { dir, cleanup } = makeTmpDir("pi-crew-fg62-stale-");
+	const { dir, cleanup } = await makeTmpDir("pi-crew-fg62-stale-");
 	try {
 		const runId = completedRunIn(dir);
 		const ownerBase = makeSessionBase(dir, "sess-owner");
@@ -176,12 +177,12 @@ test("#62 stale session owner: reporting skipped, working-message clear still ru
 			false,
 		);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
 test("#62 cleanedUp registration: clear attempted, reporting skipped", async () => {
-	const { dir, cleanup } = makeTmpDir("pi-crew-fg62-dead-");
+	const { dir, cleanup } = await makeTmpDir("pi-crew-fg62-dead-");
 	try {
 		const runId = completedRunIn(dir);
 		const base = makeSessionBase(dir, "sess-1");
@@ -208,12 +209,12 @@ test("#62 cleanedUp registration: clear attempted, reporting skipped", async () 
 			"clear attempt happens even on a cleanedUp registration",
 		);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
 test("#62 failed runner: error notify reaches a spread-copy owner", async () => {
-	const { dir, cleanup } = makeTmpDir("pi-crew-fg62-fail-");
+	const { dir, cleanup } = await makeTmpDir("pi-crew-fg62-fail-");
 	try {
 		const base = makeSessionBase(dir, "sess-1");
 		const ctx = makeRegContext(base, dir);
@@ -237,6 +238,6 @@ test("#62 failed runner: error notify reaches a spread-copy owner", async () => 
 			"failure notify must fire for a spread-copy owner (catch branch used the same broken identity guard)",
 		);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });

@@ -26,8 +26,9 @@ import { startTeamToolProgressBinder } from "../../../../src/extension/registrat
 import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
 import { __setSpinnerClockSource } from "../../../../src/ui/spinner.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
-test("MAJOR 2: the team-tool progress binder feeds durationMs to the formatter (producer wins over self-timing)", () => {
+test("MAJOR 2: the team-tool progress binder feeds durationMs to the formatter (producer wins over self-timing)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-binder-m2-"));
 	const restoreClock = __setSpinnerClockSource(() => Date.now() + 600_000); // self-timing would say 600s
 	try {
@@ -70,6 +71,6 @@ test("MAJOR 2: the team-tool progress binder feeds durationMs to the formatter (
 		}
 	} finally {
 		restoreClock();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

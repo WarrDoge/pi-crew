@@ -18,6 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { buildKnowledgeFragment, knowledgePath } from "../../../../src/extension/knowledge-injection.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const CONVENTIONS = `## Code Style
 - Use TABS for indentation (not spaces)
@@ -37,13 +38,13 @@ const CONVENTIONS = `## Code Style
 - NEVER \`npm publish\` before CI is GREEN.
 `;
 
-function makeTmpCrewDir(prefix: string): { cwd: string; cleanup: () => void } {
+async function makeTmpCrewDir(prefix: string): Promise<{ cwd: string; cleanup: () => Promise<void> }> {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	return {
 		cwd,
-		cleanup: () => {
+		cleanup: async () => {
 			try {
-				fs.rmSync(cwd, { recursive: true, force: true });
+				await removeDirWithRetry(cwd);
 			} catch {
 				/* best-effort */
 			}
@@ -60,20 +61,20 @@ function buildKnowledgeFile(cwd: string, sessionLogHeaders: string[]): void {
 
 // --- Shape contract ---
 
-test("buildKnowledgeFragment returns a string (empty when no knowledge file)", () => {
-	const { cwd, cleanup } = makeTmpCrewDir("bkf-shape-empty-");
+test("buildKnowledgeFragment returns a string (empty when no knowledge file)", async () => {
+	const { cwd, cleanup } = await makeTmpCrewDir("bkf-shape-empty-");
 	try {
 		// No knowledge.md → empty fragment.
 		const out = buildKnowledgeFragment(cwd);
 		assert.equal(typeof out, "string");
 		assert.equal(out, "", "no knowledge file → empty fragment");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("buildKnowledgeFragment returns the expected header + content shape", () => {
-	const { cwd, cleanup } = makeTmpCrewDir("bkf-shape-");
+test("buildKnowledgeFragment returns the expected header + content shape", async () => {
+	const { cwd, cleanup } = await makeTmpCrewDir("bkf-shape-");
 	try {
 		buildKnowledgeFile(cwd, ["sessionlog section one"]);
 		const out = buildKnowledgeFragment(cwd);
@@ -87,12 +88,12 @@ test("buildKnowledgeFragment returns the expected header + content shape", () =>
 		assert.match(out, /## Code Style/, "must include convention content");
 		assert.match(out, /## Architecture/, "must include convention content");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("buildKnowledgeFragment with no query still includes conventions (legacy path)", () => {
-	const { cwd, cleanup } = makeTmpCrewDir("bkf-legacy-");
+test("buildKnowledgeFragment with no query still includes conventions (legacy path)", async () => {
+	const { cwd, cleanup } = await makeTmpCrewDir("bkf-legacy-");
 	try {
 		buildKnowledgeFile(cwd, ["some sessionlog section"]);
 		const out = buildKnowledgeFragment(cwd);
@@ -100,14 +101,14 @@ test("buildKnowledgeFragment with no query still includes conventions (legacy pa
 		// Legacy path is head-only: it does not emit the section index.
 		assert.equal(out.includes("Session-log sections in knowledge.md"), false);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
 // --- IDF behavior ---
 
-test("buildKnowledgeFragment IDF scoring: rare token wins over common token", () => {
-	const { cwd, cleanup } = makeTmpCrewDir("bkf-idf-rank-");
+test("buildKnowledgeFragment IDF scoring: rare token wins over common token", async () => {
+	const { cwd, cleanup } = await makeTmpCrewDir("bkf-idf-rank-");
 	try {
 		// 4 session-log sections; "common" appears in 3 headers, "rarerare"
 		// appears in only 1. A query with both tokens should surface the
@@ -123,12 +124,12 @@ test("buildKnowledgeFragment IDF scoring: rare token wins over common token", ()
 		assert.match(out, /## rarerare section four/, "rarerare-matched section should be selected");
 		assert.match(out, /session log detail/, "selected section body should be present");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("buildKnowledgeFragment IDF: same-frequency tokens compete by original order", () => {
-	const { cwd, cleanup } = makeTmpCrewDir("bkf-idf-tie-");
+test("buildKnowledgeFragment IDF: same-frequency tokens compete by original order", async () => {
+	const { cwd, cleanup } = await makeTmpCrewDir("bkf-idf-tie-");
 	try {
 		// Both "alpha" and "beta" appear in exactly 1 header → same IDF.
 		// When the query has both, the section matching alpha should win (alphabetical
@@ -140,12 +141,12 @@ test("buildKnowledgeFragment IDF: same-frequency tokens compete by original orde
 		const hasSecond = out.includes("## beta second section");
 		assert.ok(hasFirst || hasSecond, "at least one matching section must be injected");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("buildKnowledgeFragment IDF: zero-match query yields conventions + section-index only", () => {
-	const { cwd, cleanup } = makeTmpCrewDir("bkf-idf-zero-");
+test("buildKnowledgeFragment IDF: zero-match query yields conventions + section-index only", async () => {
+	const { cwd, cleanup } = await makeTmpCrewDir("bkf-idf-zero-");
 	try {
 		buildKnowledgeFile(cwd, ["redaction env hardening", "incident recovery"]);
 		const out = buildKnowledgeFragment(cwd, { goal: "unrelated zzzquery" });
@@ -156,14 +157,14 @@ test("buildKnowledgeFragment IDF: zero-match query yields conventions + section-
 		assert.match(out, /redaction env hardening/);
 		assert.match(out, /incident recovery/);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
 // --- Empty / edge inputs ---
 
-test("buildKnowledgeFragment with empty query string falls through to legacy path", () => {
-	const { cwd, cleanup } = makeTmpCrewDir("bkf-empty-query-");
+test("buildKnowledgeFragment with empty query string falls through to legacy path", async () => {
+	const { cwd, cleanup } = await makeTmpCrewDir("bkf-empty-query-");
 	try {
 		buildKnowledgeFile(cwd, ["some section"]);
 		const out = buildKnowledgeFragment(cwd, { goal: "", taskText: "" });
@@ -171,12 +172,12 @@ test("buildKnowledgeFragment with empty query string falls through to legacy pat
 		assert.match(out, /## Code Style/);
 		assert.equal(out.includes("Session-log sections in knowledge.md"), false);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("buildKnowledgeFragment with whitespace-only query: no session-log body injected (just conventions + index)", () => {
-	const { cwd, cleanup } = makeTmpCrewDir("bkf-ws-query-");
+test("buildKnowledgeFragment with whitespace-only query: no session-log body injected (just conventions + index)", async () => {
+	const { cwd, cleanup } = await makeTmpCrewDir("bkf-ws-query-");
 	try {
 		buildKnowledgeFile(cwd, ["some section"]);
 		const out = buildKnowledgeFragment(cwd, { goal: "   \t\n  " });
@@ -188,47 +189,47 @@ test("buildKnowledgeFragment with whitespace-only query: no session-log body inj
 		// when no session-log body was matched.
 		assert.match(out, /Session-log sections in knowledge\.md/);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("buildKnowledgeFragment returns empty string when .crew dir is missing entirely", () => {
-	const { cwd, cleanup } = makeTmpCrewDir("bkf-no-crew-");
+test("buildKnowledgeFragment returns empty string when .crew dir is missing entirely", async () => {
+	const { cwd, cleanup } = await makeTmpCrewDir("bkf-no-crew-");
 	try {
 		// No .crew/ directory at all.
 		const out = buildKnowledgeFragment(cwd);
 		assert.equal(out, "");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("buildKnowledgeFragment returns empty string when knowledge.md is empty", () => {
-	const { cwd, cleanup } = makeTmpCrewDir("bkf-empty-file-");
+test("buildKnowledgeFragment returns empty string when knowledge.md is empty", async () => {
+	const { cwd, cleanup } = await makeTmpCrewDir("bkf-empty-file-");
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 		fs.writeFileSync(knowledgePath(cwd), "", "utf-8");
 		const out = buildKnowledgeFragment(cwd, { goal: "any query" });
 		assert.equal(out, "");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("buildKnowledgeFragment returns empty string when knowledge.md is only whitespace", () => {
-	const { cwd, cleanup } = makeTmpCrewDir("bkf-ws-file-");
+test("buildKnowledgeFragment returns empty string when knowledge.md is only whitespace", async () => {
+	const { cwd, cleanup } = await makeTmpCrewDir("bkf-ws-file-");
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 		fs.writeFileSync(knowledgePath(cwd), "   \n\n  \t  \n", "utf-8");
 		const out = buildKnowledgeFragment(cwd, { goal: "any query" });
 		assert.equal(out, "");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("buildKnowledgeFragment fragment shape: header line is followed by content (no leading blank)", () => {
-	const { cwd, cleanup } = makeTmpCrewDir("bkf-leading-");
+test("buildKnowledgeFragment fragment shape: header line is followed by content (no leading blank)", async () => {
+	const { cwd, cleanup } = await makeTmpCrewDir("bkf-leading-");
 	try {
 		buildKnowledgeFile(cwd, ["section one"]);
 		const out = buildKnowledgeFragment(cwd, { goal: "any query" });
@@ -237,6 +238,6 @@ test("buildKnowledgeFragment fragment shape: header line is followed by content 
 		const firstNonEmpty = out.split("\n").find((l) => l.trim().length > 0);
 		assert.equal(firstNonEmpty, "# Project knowledge (from .crew/knowledge.md)");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });

@@ -17,6 +17,7 @@ import { Value } from "@sinclair/typebox/value";
 import { domainForAction } from "../../../../src/extension/team-tool/dispatch/index.ts";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { type TeamDomain, TeamToolParams } from "../../../../src/schema/team-tool-schema.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ─── 54-action → domain mapping table ────────────────────────────────────────
 
@@ -78,8 +79,8 @@ function makeTmpCwd(): string {
 	return cwd;
 }
 
-function cleanupCwd(cwd: string): void {
-	fs.rmSync(cwd, { recursive: true, force: true });
+async function cleanupCwd(cwd: string): Promise<void> {
+	await removeDirWithRetry(cwd);
 }
 
 // ─── 1. Structural integrity of the mapping ─────────────────────────────────
@@ -162,7 +163,7 @@ test("handleTeamTool does not throw for all 54 actions", async (t) => {
 			} catch (err) {
 				assert.fail(`handleTeamTool({action: "${action}"}) threw: ${err instanceof Error ? err.message : String(err)}`);
 			} finally {
-				cleanupCwd(cwd);
+				await cleanupCwd(cwd);
 			}
 		});
 	}
@@ -176,7 +177,7 @@ test("handleTeamTool returns error for unknown action", async () => {
 		const out = await handleTeamTool({ action: "nonexistent" as never }, { cwd });
 		assert.equal(out.isError, true);
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -192,6 +193,6 @@ test("handleTeamTool defaults missing action to list (no Unhandled error)", asyn
 		assert.equal(out.isError, false, `missing action should default to list, not error: ${JSON.stringify(out)}`);
 		assert.equal((out.details as { action?: string } | undefined)?.action, "list");
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });

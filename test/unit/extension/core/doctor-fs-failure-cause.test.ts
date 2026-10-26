@@ -13,6 +13,7 @@ import path from "node:path";
 import test from "node:test";
 import { buildTeamDoctorReport } from "../../../../src/extension/team-tool/doctor.ts";
 import { resolveCanonicalDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 interface FixtureTask {
 	id: string;
@@ -27,7 +28,7 @@ function writeFixtureRun(cwd: string, runId: string, tasks: FixtureTask[]): void
 	fs.writeFileSync(path.join(runDir, "tasks.json"), JSON.stringify(tasks), "utf-8");
 }
 
-test("doctor Filesystem section reports fs failureCause count + last occurrence", () => {
+test("doctor Filesystem section reports fs failureCause count + last occurrence", async () => {
 	const cwd = resolveCanonicalDir(fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-doctor-fs-")));
 	try {
 		writeFixtureRun(cwd, "team_fixture_older", [
@@ -53,11 +54,11 @@ test("doctor Filesystem section reports fs failureCause count + last occurrence"
 		// Informational only — historical incidents must not fail doctor.
 		assert.equal(report.hasErrors, false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("doctor fs failure causes line reports none when no fixture failures exist", () => {
+test("doctor fs failure causes line reports none when no fixture failures exist", async () => {
 	const cwd = resolveCanonicalDir(fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-doctor-fs-none-")));
 	try {
 		writeFixtureRun(cwd, "team_fixture_clean", [{ id: "t1", status: "completed" }]);
@@ -73,11 +74,11 @@ test("doctor fs failure causes line reports none when no fixture failures exist"
 		assert.match(report.text, /none in last 10 runs/);
 		assert.equal(report.hasErrors, false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("doctor fs failure causes line tolerates a missing runs root", () => {
+test("doctor fs failure causes line tolerates a missing runs root", async () => {
 	const cwd = resolveCanonicalDir(fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-doctor-fs-missing-")));
 	try {
 		// A project marker so projectCrewRoot(cwd) resolves to <cwd>/.crew on EVERY
@@ -97,6 +98,6 @@ test("doctor fs failure causes line tolerates a missing runs root", () => {
 		assert.match(report.text, /no run history/);
 		assert.equal(report.hasErrors, false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

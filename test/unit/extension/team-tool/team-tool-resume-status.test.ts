@@ -17,35 +17,26 @@ import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { textFromToolResult } from "../../../../src/extension/tool-result.ts";
 import { loadRunManifestById, saveRunManifestAsync, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const realTmp = fs.realpathSync(os.tmpdir());
 
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(realTmp, "pi-crew-resume-status-home-"));
 	fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
-function rmCwd(cwd: string): void {
-	for (let attempt = 0; attempt < 5; attempt++) {
-		try {
-			fs.rmSync(cwd, { recursive: true, force: true });
-			break;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY" || attempt === 4) {
-				console.error(`resume-status teardown: unable to remove ${cwd}: ${String(error)}`);
-				break;
-			}
-		}
-	}
+async function rmCwd(cwd: string): Promise<void> {
+	await removeDirWithRetry(cwd);
 }
 
 /** Seed a completed scaffold run (hermetic — no child Pi spawns) and return its runId. */
@@ -100,7 +91,7 @@ test("bug #3: resume message reports re-queued work — no bare 'Status: complet
 			// Live-status pointer so the user can verify rather than trust.
 			assert.match(text, /team action=status runId=/, `expected status hint in: ${text}`);
 		} finally {
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });
@@ -123,7 +114,7 @@ test("bug #3: resume of an already-terminal run says so explicitly (0 re-queued)
 				`expected explicit zero-requeue wording in: ${text}`,
 			);
 		} finally {
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });

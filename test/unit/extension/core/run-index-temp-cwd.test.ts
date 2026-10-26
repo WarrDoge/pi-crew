@@ -22,6 +22,7 @@ import test from "node:test";
 import { listRecentRuns } from "../../../../src/extension/run-index.ts";
 import { createRunManifest, updateRunStatus } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "tempcwd",
@@ -45,7 +46,7 @@ async function withNonTempCrewHome<T>(fn: (home: string, viewerCwd: string) => P
 	} finally {
 		if (previous === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previous;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
@@ -66,7 +67,7 @@ test("terminal bare-temp-cwd run is hidden even when parked in a non-temp crew r
 				"terminal bare-temp-cwd fixture run must NOT be listed from a non-temp crew root",
 			);
 		} finally {
-			fs.rmSync(fixtureCwd, { recursive: true, force: true });
+			await removeDirWithRetry(fixtureCwd);
 		}
 	});
 });
@@ -106,8 +107,8 @@ test("terminal run with MARKERED temp cwd stays listed (deliberate /tmp project 
 				"terminal run from a repo-marked temp cwd must remain listed",
 			);
 		} finally {
-			fs.rmSync(tempProject, { recursive: true, force: true });
-			fs.rmSync(parkedCwd, { recursive: true, force: true });
+			await removeDirWithRetry(tempProject);
+			await removeDirWithRetry(parkedCwd);
 		}
 	});
 });
@@ -125,7 +126,7 @@ test("active bare-temp-cwd run stays listed in a non-temp root (scratch-dir user
 				"active bare-temp-cwd run must remain listed (only terminal fixture remnants are hidden)",
 			);
 		} finally {
-			fs.rmSync(scratchCwd, { recursive: true, force: true });
+			await removeDirWithRetry(scratchCwd);
 		}
 	});
 });

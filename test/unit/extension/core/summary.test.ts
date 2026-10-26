@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("summary action and summary artifact are created for runs", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-summary-test-"));
@@ -35,6 +36,6 @@ test("summary action and summary artifact are created for runs", async () => {
 		assert.match(firstText(summary), /Summary for/);
 		assert.match(firstText(summary), /Usage:/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -16,7 +16,7 @@ import { readMailbox } from "../../../../src/state/coordination/mailbox.ts";
 import type { TeamEvent } from "../../../../src/state/event-log/event-log.ts";
 import { loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
-import { sleepSync } from "../../../../src/utils/sleep.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * WP-2/R2 STEP 6 + STEP 8 — respond liveness discriminator + scheduler
@@ -87,19 +87,8 @@ async function createParkedRun(heartbeat: WorkerHeartbeatState, deadlineOffsetMs
 }
 
 /** Remove temp dir with the macOS-CI ENOTEMPTY retry (resume-cancel pattern). */
-function teardown(cwd: string): void {
-	for (let attempt = 0; attempt < 5; attempt++) {
-		try {
-			fs.rmSync(cwd, { recursive: true, force: true });
-			break;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY" || attempt === 4) {
-				console.error(`respond-discriminator teardown: unable to remove ${cwd}: ${String(error)}`);
-				break;
-			}
-			sleepSync(200);
-		}
-	}
+async function teardown(cwd: string): Promise<void> {
+	await removeDirWithRetry(cwd);
 }
 
 /** Poll events.jsonl until it contains the expected text (fire-and-forget events). */
@@ -152,7 +141,7 @@ test("respond discriminator: alive (fresh heartbeat) → mailbox response with q
 
 		assert.ok(await waitForEvent(fixture.cwd, fixture.runId, '"ask.answered"'));
 	} finally {
-		teardown(fixture.cwd);
+		await teardown(fixture.cwd);
 	}
 });
 
@@ -181,7 +170,7 @@ test("respond discriminator: alive via live in-memory handle despite stale heart
 		assert.equal(responses[0]!.questionId, fixture.questionId);
 	} finally {
 		clearLiveAgentsForTest();
-		teardown(fixture.cwd);
+		await teardown(fixture.cwd);
 	}
 });
 
@@ -219,7 +208,7 @@ test("respond discriminator: dead → requeued + fenced answer injected, no mail
 		assert.ok(await waitForEvent(fixture.cwd, fixture.runId, '"ask.answered"'));
 		assert.ok(await waitForEvent(fixture.cwd, fixture.runId, '"task.resumed"'));
 	} finally {
-		teardown(fixture.cwd);
+		await teardown(fixture.cwd);
 	}
 });
 
@@ -252,7 +241,7 @@ test("respond delivery events: dead worker, NO pid recorded → task.respond_mis
 		// Missed (root-side) and delivered (broker-side ack) are disjoint verdicts.
 		assert.ok(!fs.readFileSync(loaded.manifest.eventsPath, "utf-8").includes('"task.respond_delivered"'));
 	} finally {
-		teardown(fixture.cwd);
+		await teardown(fixture.cwd);
 	}
 });
 
@@ -283,7 +272,7 @@ test("respond delivery events: dead worker WITH dead pid → task.respond_missed
 		assert.equal(data.pidAlive, false);
 		assert.equal(data.pidDetail, "process does not exist");
 	} finally {
-		teardown(fixture.cwd);
+		await teardown(fixture.cwd);
 	}
 });
 
@@ -312,7 +301,7 @@ test("respond discriminator: exactly-once — second respond for the same questi
 		const noopIds = (second.details.data as { noopIds?: string[] } | undefined)?.noopIds;
 		assert.deepEqual(noopIds, [fixture.taskId], "second respond reports a no-op for the questionId");
 	} finally {
-		teardown(fixture.cwd);
+		await teardown(fixture.cwd);
 	}
 });
 
@@ -345,7 +334,7 @@ test("scheduler deadline owner: expired deadline + dead worker → requeue + ask
 		const again = await sweepExpiredWaitingTasks(fixture.cwd, fixture.runId);
 		assert.equal(again, undefined);
 	} finally {
-		teardown(fixture.cwd);
+		await teardown(fixture.cwd);
 	}
 });
 
@@ -368,7 +357,7 @@ test("scheduler deadline owner: expired deadline + alive worker → task stays w
 		assert.ok(eventsText.includes('"ask.timedout"'));
 		assert.ok(eventsText.includes('"workerAlive":true'));
 	} finally {
-		teardown(fixture.cwd);
+		await teardown(fixture.cwd);
 	}
 });
 
@@ -452,7 +441,7 @@ test("respond discriminator: requeuing the slot's park RE-POINTS waitState at a 
 		assert.equal(last.manifest.waitState, undefined, "no park left → slot cleared");
 		assert.equal(isWaitAnswerPending(last.manifest), false);
 	} finally {
-		teardown(fixture.cwd);
+		await teardown(fixture.cwd);
 	}
 });
 
@@ -474,6 +463,6 @@ test("scheduler deadline owner: ask-timeout requeue RE-POINTS waitState at a sur
 		assert.equal(after.manifest.waitState?.questionId, survivor.questionId);
 		assert.equal(isWaitAnswerPending(after.manifest), true, "the surviving park keeps its shield");
 	} finally {
-		teardown(fixture.cwd);
+		await teardown(fixture.cwd);
 	}
 });

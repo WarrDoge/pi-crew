@@ -16,6 +16,7 @@ import test from "node:test";
 import { handleCancel } from "../../../../src/extension/team-tool/cancel.ts";
 import { readEvents } from "../../../../src/state/event-log/event-log.ts";
 import { createRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -124,7 +125,7 @@ test("N-5: cancelling a run that is already completed on disk sends NO signal to
 		);
 	} finally {
 		killDummy(child);
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });
 
@@ -170,6 +171,6 @@ test("N-5 (control): cancelling a still-running run still signals the async runn
 		assert.ok(sawKillEvent, "async.kill_requested event must be recorded for a running cancel");
 	} finally {
 		killDummy(child);
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });

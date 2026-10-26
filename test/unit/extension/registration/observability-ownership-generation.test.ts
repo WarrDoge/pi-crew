@@ -25,6 +25,7 @@ import {
 	type ObservabilityState,
 } from "../../../../src/extension/registration/observability.ts";
 import { createManifestCache } from "../../../../src/runtime/manifest-cache.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function createEventBus() {
 	const handlers = new Map<string, Set<(payload: unknown) => void>>();
@@ -85,7 +86,7 @@ interface Harness {
 	cleanup: () => void;
 }
 
-function makeHarness(prefix: string): Harness {
+async function makeHarness(prefix: string): Promise<Harness> {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-home-`));
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `${prefix}-cwd-`));
 	fs.writeFileSync(path.join(cwd, "package.json"), "{}\n", "utf-8");
@@ -93,14 +94,14 @@ function makeHarness(prefix: string): Harness {
 	process.env.PI_CREW_HOME = home;
 	return {
 		cwd,
-		homeRestore: () => {
+		homeRestore: async () => {
 			if (prevHome === undefined) delete process.env.PI_CREW_HOME;
 			else process.env.PI_CREW_HOME = prevHome;
-			fs.rmSync(home, { recursive: true, force: true });
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(home);
+			await removeDirWithRetry(cwd);
 		},
-		cleanup: () => {
-			fs.rmSync(cwd, { recursive: true, force: true });
+		cleanup: async () => {
+			await removeDirWithRetry(cwd);
 		},
 	};
 }
@@ -128,7 +129,7 @@ function makeDeps(pi: FakePi, cwd: string, vars: OwnershipVars) {
 }
 
 test("F11: init suspended across cleanup publishes nothing and subscribes nothing", async () => {
-	const h = makeHarness("f11-own");
+	const h = await makeHarness("f11-own");
 	try {
 		const pi = createFakePi();
 		const state = freshState();
@@ -150,12 +151,12 @@ test("F11: init suspended across cleanup publishes nothing and subscribes nothin
 		assert.equal(pi.events.totalSubscriptions(), 0, "event→metric subscriptions leaked onto the bus");
 		await disposeObservability(state, true);
 	} finally {
-		h.homeRestore();
+		await h.homeRestore();
 	}
 });
 
 test("F11: a newer session resetting cleanedUp=false still cannot resurrect the old init (generation)", async () => {
-	const h = makeHarness("f11-gen");
+	const h = await makeHarness("f11-gen");
 	try {
 		const pi = createFakePi();
 		const state = freshState();
@@ -178,12 +179,12 @@ test("F11: a newer session resetting cleanedUp=false still cannot resurrect the 
 		assert.equal(pi.events.totalSubscriptions(), 0);
 		await disposeObservability(state, true);
 	} finally {
-		h.homeRestore();
+		await h.homeRestore();
 	}
 });
 
 test("F11: A-init → cleanup → B-init leaves B's resources intact (no orphaned A resources)", async () => {
-	const h = makeHarness("f11-orphan");
+	const h = await makeHarness("f11-orphan");
 	try {
 		const pi = createFakePi();
 		const state = freshState();
@@ -216,12 +217,12 @@ test("F11: A-init → cleanup → B-init leaves B's resources intact (no orphane
 		await disposeObservability(state, true);
 		assert.equal(pi.events.totalSubscriptions(), 0, "disposeObservability must clear B's subscriptions");
 	} finally {
-		h.homeRestore();
+		await h.homeRestore();
 	}
 });
 
 test("F12: configureObservability registers no before_agent_start hook (hook moved to extension registration)", async () => {
-	const h = makeHarness("f12-hook");
+	const h = await makeHarness("f12-hook");
 	try {
 		const pi = createFakePi();
 		const state = freshState();
@@ -236,6 +237,6 @@ test("F12: configureObservability registers no before_agent_start hook (hook mov
 		assert.equal(pi.hooks.get("before_agent_start") ?? 0, 0, "configureObservability must not register turn hooks");
 		await disposeObservability(state, true);
 	} finally {
-		h.homeRestore();
+		await h.homeRestore();
 	}
 });

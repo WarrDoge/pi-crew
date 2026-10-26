@@ -10,6 +10,7 @@ import {
 	resolveAutoPruneKeep,
 } from "../../../src/extension/run-maintenance.ts";
 import { createRunManifest, loadRunManifestById, updateRunStatus } from "../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 /**
  * DP-01 (2026-09-22): session-start auto-prune guards. Three data-loss
@@ -103,7 +104,7 @@ test("DP-01: resolveAutoPruneAgeFloorMs — default 24h, 0 disables, invalid →
 	);
 });
 
-test("DP-01: age floor protects young finished runs beyond top-keep (the incident)", () => {
+test("DP-01: age floor protects young finished runs beyond top-keep (the incident)", async () => {
 	const cwd = makeProjectCwd();
 	try {
 		// 14 finished runs ALL younger than the floor (1 minute old each) — the
@@ -119,11 +120,11 @@ test("DP-01: age floor protects young finished runs beyond top-keep (the inciden
 			assert.ok(loadRunManifestById(cwd, id), `run ${id} must still exist`);
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("DP-01: age floor still lets OLD runs be pruned (guard is not a no-op)", () => {
+test("DP-01: age floor still lets OLD runs be pruned (guard is not a no-op)", async () => {
 	const cwd = makeProjectCwd();
 	try {
 		// 14 runs, all 48h old → beyond the 24h floor → 4 removed (keep=10).
@@ -131,11 +132,11 @@ test("DP-01: age floor still lets OLD runs be pruned (guard is not a no-op)", ()
 		const { removed } = pruneFinishedRuns(cwd, 10, { ageFloorMs: 24 * 60 * 60 * 1000 });
 		assert.equal(removed.length, 4, "old runs beyond top-keep must still be pruned");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("DP-01: mixed shape (12 young + 3 old, keep=10) — young protected, old pruned (live-verified)", () => {
+test("DP-01: mixed shape (12 young + 3 old, keep=10) — young protected, old pruned (live-verified)", async () => {
 	const cwd = makeProjectCwd();
 	try {
 		// The exact 2026-09-21 incident shape: more finished runs than keep,
@@ -149,22 +150,22 @@ test("DP-01: mixed shape (12 young + 3 old, keep=10) — young protected, old pr
 		for (const id of old) assert.equal(loadRunManifestById(cwd, id), undefined, `old run ${id} must be pruned`);
 		assert.equal(removed.length, 3, "exactly the 3 old runs are removed");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("DP-01: ageFloorMs=0 (manual prune) keeps the old unguarded behavior", () => {
+test("DP-01: ageFloorMs=0 (manual prune) keeps the old unguarded behavior", async () => {
 	const cwd = makeProjectCwd();
 	try {
 		seedFinishedRuns(cwd, 14, () => 60_000);
 		const { removed } = pruneFinishedRuns(cwd, 10, { ageFloorMs: 0 });
 		assert.equal(removed.length, 4, "manual prune (no floor) removes beyond top-keep as before");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("DP-01: a pruned FAILED run leaves a recoverable reason in the durable index", () => {
+test("DP-01: a pruned FAILED run leaves a recoverable reason in the durable index", async () => {
 	const cwd = makeProjectCwd();
 	try {
 		const created = createRunManifest({ cwd, team, workflow, goal: "doomed goal" });
@@ -190,11 +191,11 @@ test("DP-01: a pruned FAILED run leaves a recoverable reason in the durable inde
 		assert.equal(entry.status, "failed");
 		assert.match(String(entry.summary), /the reason that must survive/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("DP-01: prune audit rotates when it exceeds the size cap", () => {
+test("DP-01: prune audit rotates when it exceeds the size cap", async () => {
 	const cwd = makeProjectCwd();
 	try {
 		// Seed a run so the crew root + audit path exist.
@@ -212,6 +213,6 @@ test("DP-01: prune audit rotates when it exceeds the size cap", () => {
 		assert.ok(fresh.length < PRUNE_AUDIT_MAX_BYTES, "the new audit file starts small");
 		assert.match(fresh, /session-start-auto/, "new entries carry the intent attribution");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -6,6 +6,7 @@ import test from "node:test";
 import { listImportedRuns } from "../../../../src/extension/import-index.ts";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function tryDirectorySymlink(target: string, linkPath: string): boolean {
 	try {
@@ -52,11 +53,11 @@ test("imports action lists imported run bundles", async () => {
 		assert.equal(listed.isError, false);
 		assert.match(firstText(listed), new RegExp(runId!));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("listImportedRuns skips symlinked imports root", (t) => {
+test("listImportedRuns skips symlinked imports root", async (t) => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-import-list-root-symlink-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -82,6 +83,6 @@ test("listImportedRuns skips symlinked imports root", (t) => {
 		}
 		assert.deepEqual(listImportedRuns(cwd), []);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

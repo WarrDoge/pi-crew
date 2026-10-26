@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { exportRunBundle } from "../../../src/extension/run-export.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 /**
  * US-022 (2026-09-22) verify-close:
@@ -56,7 +57,7 @@ function fixture(cwd: string): { manifest: never; tasks: never[] } {
 	return { manifest, tasks };
 }
 
-test("US-022(a): two exports with the same pinned clock are byte-identical", () => {
+test("US-022(a): two exports with the same pinned clock are byte-identical", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "us022-"));
 	try {
 		const { manifest, tasks } = fixture(cwd);
@@ -69,11 +70,11 @@ test("US-022(a): two exports with the same pinned clock are byte-identical", () 
 		assert.equal(first, second, "pinned-clock exports must be byte-identical (JSON)");
 		assert.equal(aMd, bMd, "pinned-clock exports must be byte-identical (markdown)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("US-022(b): markdown carries Cost + inline model/duration", () => {
+test("US-022(b): markdown carries Cost + inline model/duration", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "us022-"));
 	try {
 		const { manifest, tasks } = fixture(cwd);
@@ -85,6 +86,6 @@ test("US-022(b): markdown carries Cost + inline model/duration", () => {
 		assert.ok(md.includes("<anthropic/claude-sonnet-4.5>"), "task line must show the model");
 		assert.ok(md.includes("[1m5s]"), "task line must show the duration");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

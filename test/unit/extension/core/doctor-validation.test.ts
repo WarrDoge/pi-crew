@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("doctor includes platform diagnostics", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-doctor-platform-"));
@@ -13,7 +14,7 @@ test("doctor includes platform diagnostics", async () => {
 		assert.match(firstText(doctor), new RegExp(`platform: ${process.platform.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/${process.arch}`));
 		assert.match(firstText(doctor), /node=v/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -31,6 +32,6 @@ test("doctor includes resource validation result", async () => {
 		assert.match(firstText(doctor), /resource validation/);
 		assert.match(firstText(doctor), /1 errors|2 errors/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

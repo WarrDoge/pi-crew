@@ -25,6 +25,7 @@ import {
 	type ObservabilityDeps,
 	type ObservabilityState,
 } from "../../../../src/extension/registration/observability.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -106,7 +107,7 @@ test("configureObservability threads extractSessionId(ctx) into reconcileStaleRu
 	} finally {
 		if (prevHome === undefined) delete process.env.PI_CREW_HOME;
 		else process.env.PI_CREW_HOME = prevHome;
-		fs.rmSync(home, { recursive: true, force: true });
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(home);
+		await removeDirWithRetry(cwd);
 	}
 });

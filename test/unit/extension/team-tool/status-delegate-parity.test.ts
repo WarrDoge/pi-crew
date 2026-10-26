@@ -22,6 +22,7 @@ import { appendEvent } from "../../../../src/state/event-log/event-log.ts";
 import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -40,7 +41,7 @@ const workflow: WorkflowConfig = {
 };
 
 describe("status delegate.completed parity (EP2 rider)", () => {
-	it("a completed delegate task WITHOUT usage/transcript is not flagged noObservedWork when delegate.completed ok:true exists", () => {
+	it("a completed delegate task WITHOUT usage/transcript is not flagged noObservedWork when delegate.completed ok:true exists", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ep2-"));
 		try {
 			fs.writeFileSync(path.join(cwd, "package.json"), "{}\n");
@@ -62,11 +63,11 @@ describe("status delegate.completed parity (EP2 rider)", () => {
 			assert.match(out, /- noObservedWork=none/, `delegate.completed must suppress the phantom row, got: ${out}`);
 			assert.match(out, /- observable=1\/1 completed tasks/, "the delegate task counts as observable work");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("control: the SAME completed task IS flagged when no delegate.completed event exists", () => {
+	it("control: the SAME completed task IS flagged when no delegate.completed event exists", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ep2-"));
 		try {
 			fs.writeFileSync(path.join(cwd, "package.json"), "{}\n");
@@ -79,7 +80,7 @@ describe("status delegate.completed parity (EP2 rider)", () => {
 			const out = textFromToolResult(handleStatus({ runId: created.manifest.runId }, { cwd } as TeamContext));
 			assert.match(out, new RegExp(`- noObservedWork=${taskId}`), `without the event the task must be flagged, got: ${out}`);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

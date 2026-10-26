@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("export action writes JSON and markdown run bundles", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-export-test-"));
@@ -37,6 +38,6 @@ test("export action writes JSON and markdown run bundles", async () => {
 		assert.ok((bundle.events?.length ?? 0) > 0);
 		assert.match(fs.readFileSync(mdPath, "utf-8"), /# pi-crew export/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -20,6 +20,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { registerPiTeams } from "../../../../src/extension/register.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function createEventBus() {
 	const handlers = new Map<string, Set<(payload: unknown) => void>>();
@@ -139,8 +140,8 @@ test("F12: before_agent_start hook count stays at 1 across repeated session cycl
 	} finally {
 		if (prevHome === undefined) delete process.env.PI_CREW_HOME;
 		else process.env.PI_CREW_HOME = prevHome;
-		fs.rmSync(home, { recursive: true, force: true });
-		fs.rmSync(cwdA, { recursive: true, force: true });
-		fs.rmSync(cwdB, { recursive: true, force: true });
+		await removeDirWithRetry(home);
+		await removeDirWithRetry(cwdA);
+		await removeDirWithRetry(cwdB);
 	}
 });

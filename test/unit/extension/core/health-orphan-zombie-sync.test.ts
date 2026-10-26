@@ -39,6 +39,7 @@ import { clearProjectRootCache } from "../../../../src/utils/paths.ts";
 import { sharedScanCache } from "../../../../src/utils/scan-cache.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { resolveCanonicalDir } from "../../../fixtures/test-tempdir.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "health-n2-test",
@@ -56,7 +57,7 @@ const workflow: WorkflowConfig = {
 	steps: [{ id: "run", role: "executor", task: "Run {goal}" }],
 };
 
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = resolveCanonicalDir(fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-n2-home-")));
 	process.env.PI_TEAMS_HOME = home;
@@ -64,11 +65,11 @@ function withIsolatedHome<T>(fn: () => T): T {
 	sharedScanCache.clear();
 	__test__clearManifestCache();
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await cleanupStateRoot(home);
 		clearProjectRootCache();
 		sharedScanCache.clear();
 		__test__clearManifestCache();
@@ -92,8 +93,8 @@ function writeAgents(manifest: TeamRunManifest, agents: unknown[]): void {
 	fs.writeFileSync(path.join(manifest.stateRoot, "agents.json"), JSON.stringify(agents, null, 1));
 }
 
-test("R48-N2 replay: frozen running agent + dead host (B1) IS flagged as orphaned", () => {
-	withIsolatedHome(() => {
+test("R48-N2 replay: frozen running agent + dead host (B1) IS flagged as orphaned", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 		try {
@@ -157,14 +158,14 @@ test("R48-N2 replay: frozen running agent + dead host (B1) IS flagged as orphane
 			const stuck = detectStuckTasks({ runId: running.runId, stateRoot: running.stateRoot }, Date.now());
 			assert.equal(stuck.length, 1, "stuck-task scanner sees the stale running task");
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
-test("R48-N2 replay: 0-agent stale runs (B3 non-magic, B4 magic) are flagged identically", () => {
-	withIsolatedHome(() => {
+test("R48-N2 replay: 0-agent stale runs (B3 non-magic, B4 magic) are flagged identically", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 		try {
@@ -191,14 +192,14 @@ test("R48-N2 replay: 0-agent stale runs (B3 non-magic, B4 magic) are flagged ide
 			assert.equal(counts.total, 2);
 			assert.equal(counts.orphaned, 2, "both 0-agent stale runs flagged (magic string no longer needed)");
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
-test("R48-N2 replay: healthy control — running agent with recent activity is NOT orphaned", () => {
-	withIsolatedHome(() => {
+test("R48-N2 replay: healthy control — running agent with recent activity is NOT orphaned", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 		try {
@@ -232,8 +233,8 @@ test("R48-N2 replay: healthy control — running agent with recent activity is N
 			assert.equal(counts.total, 1);
 			assert.equal(counts.orphaned, 0, "recent agent activity proves the host is alive");
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });

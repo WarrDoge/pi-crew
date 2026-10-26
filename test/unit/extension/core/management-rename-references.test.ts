@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("agent rename can update team role references", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-rename-test-"));
@@ -36,6 +37,6 @@ test("agent rename can update team role references", async () => {
 		assert.equal(fs.existsSync(path.join(cwd, ".crew", "agents", "better-worker.md")), true);
 		assert.match(fs.readFileSync(teamPath, "utf-8"), /agent=better-worker/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

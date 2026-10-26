@@ -6,6 +6,7 @@ import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { validateResources } from "../../../../src/extension/validate-resources.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("validateResources reports broken team references", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-validate-test-"));
@@ -23,6 +24,6 @@ test("validateResources reports broken team references", async () => {
 		assert.equal(tool.isError, true);
 		assert.match(firstText(tool), /ERROR team:broken/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

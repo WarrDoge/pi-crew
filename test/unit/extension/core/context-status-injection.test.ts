@@ -14,6 +14,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /** Build a minimal manifest fixture for testing. */
 function makeRun(overrides: Partial<TeamRunManifest> = {}): TeamRunManifest {
@@ -144,7 +145,7 @@ test("handleContextEvent: returns undefined when cwd has no in-flight runs", () 
 	}
 });
 
-test("handleContextEvent: preserves original messages and inserts status before last", () => {
+test("handleContextEvent: preserves original messages and inserts status before last", async () => {
 	// End-to-end with a REAL in-flight run on disk: create a manifest (status
 	// 'queued' is in-flight), then verify the handler injects the status note.
 	const realTmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "pi-crew-ctx-inj-"));
@@ -207,7 +208,7 @@ test("handleContextEvent: preserves original messages and inserts status before 
 		assert.ok(injectedText.includes("Ship feature Z"), "injected note includes the run goal");
 		assert.ok(injectedText.includes(created.manifest.runId), "injected note includes the runId");
 	} finally {
-		fs.rmSync(realTmp, { recursive: true, force: true });
+		await removeDirWithRetry(realTmp);
 	}
 });
 

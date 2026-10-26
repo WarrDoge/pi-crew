@@ -13,6 +13,7 @@ import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeRunCwd(): string {
 	// createTrackedTempDir resolves to the canonical long-name path (handles
@@ -57,7 +58,7 @@ test("run with inline analysis writes shared/analysis.md and registers artifact"
 		assert.ok(analysisDescriptor, "analysis artifact must be in manifest.artifacts[]");
 		assert.equal(analysisDescriptor!.kind, "prompt");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -82,7 +83,7 @@ test("run with analysisPath loads file content into shared/analysis.md", async (
 		const written = fs.readFileSync(path.join(cwd, ".crew", "artifacts", runId, "shared", "analysis.md"), "utf-8");
 		assert.ok(written.includes("race condition in payment retry"));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -106,7 +107,7 @@ test("run injects analysis into plan step prompt via dependency context", async 
 		const planPrompt = fs.readFileSync(path.join(cwd, ".crew", "artifacts", runId, "prompts", "01_plan.md"), "utf-8");
 		assert.ok(planPrompt.includes(uniqueMarker), "plan step prompt must contain analysis content (sharedReads injection)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -126,7 +127,7 @@ test("run rejects analysisPath that escapes cwd (path traversal)", async () => {
 		assert.equal(run.isError, true);
 		assert.match(firstText(run), /within project directory/i);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -146,7 +147,7 @@ test("run returns friendly error when analysisPath file is missing", async () =>
 		assert.equal(run.isError, true);
 		assert.match(firstText(run), /Analysis file not found/i);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -167,7 +168,7 @@ test("run rejects analysisPath file larger than 100KB cap", async () => {
 		assert.equal(run.isError, true);
 		assert.match(firstText(run), /Analysis file too large/i);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -189,7 +190,7 @@ test("run rejects analysis and analysisPath set together", async () => {
 		assert.equal(run.isError, true);
 		assert.match(firstText(run), /mutually exclusive/i);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -211,7 +212,7 @@ test("plan-execute runs without analysis (reads filter empty content)", async ()
 		// plan prompt should still be written; sharedReads filter gracefully.
 		assert.ok(fs.existsSync(path.join(cwd, ".crew", "artifacts", runId, "prompts", "01_plan.md")));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -241,6 +242,6 @@ test("direct-agent run with analysis injects into agent prompt", async () => {
 		const agentPrompt = fs.readFileSync(path.join(promptsDir, promptFiles[0]!), "utf-8");
 		assert.ok(agentPrompt.includes(uniqueMarker), "direct-agent prompt must contain analysis content (sharedReads injection)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

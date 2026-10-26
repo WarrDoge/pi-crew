@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { buildTeamDoctorReport, type TeamDoctorReportInput } from "../../../../src/extension/team-tool/doctor.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Round 29 optimization: use a fresh empty temp cwd per test file run.
 // Previously this used cwd: "/tmp" which forced discoverX() to walk the
@@ -18,9 +19,9 @@ before(() => {
 	tmpConfig = path.join(tmpCwd, "pi-crew.yaml");
 });
 
-after(() => {
+after(async () => {
 	try {
-		fs.rmSync(tmpCwd, { recursive: true, force: true });
+		await removeDirWithRetry(tmpCwd);
 	} catch {
 		/* best-effort */
 	}

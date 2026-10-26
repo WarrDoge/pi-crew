@@ -6,6 +6,7 @@ import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { createRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -17,8 +18,8 @@ function makeTmpCwd(): string {
 	return cwd;
 }
 
-function cleanupCwd(cwd: string): void {
-	fs.rmSync(cwd, { recursive: true, force: true });
+async function cleanupCwd(cwd: string): Promise<void> {
+	await removeDirWithRetry(cwd);
 }
 
 /**
@@ -75,7 +76,7 @@ test("handleTeamTool returns error for unknown action", async () => {
 		assert.match(firstText(out), /Unknown action: nonexistent/);
 		assert.equal(out.details.status, "error");
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -94,7 +95,7 @@ test("handleTeamTool 'list' returns ok with team/workflow/agent headings", async
 		assert.match(text, /Agents:/);
 		assert.match(text, /Recent runs:/);
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -109,7 +110,7 @@ test("handleTeamTool 'status' returns error without runId", async () => {
 		assert.equal(out.isError, true);
 		assert.match(firstText(out), /Status requires runId/);
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -124,7 +125,7 @@ test("handleTeamTool 'status' returns run details for valid runId", async () => 
 		assert.match(text, /Task counts:/);
 		assert.equal(out.details.action, "status");
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -139,7 +140,7 @@ test("handleTeamTool 'cancel' returns error without runId", async () => {
 		assert.equal(out.isError, true);
 		assert.match(firstText(out), /Cancel requires runId/);
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -152,7 +153,7 @@ test("handleTeamTool 'cancel' cancels a running run", async () => {
 		assert.match(firstText(out), /Cancelled/);
 		assert.equal(out.details.action, "cancel");
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -167,7 +168,7 @@ test("handleTeamTool 'forget' returns error without runId", async () => {
 		assert.equal(out.isError, true);
 		assert.match(firstText(out), /Forget requires runId/);
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -179,7 +180,7 @@ test("handleTeamTool 'forget' returns error without confirm", async () => {
 		assert.equal(out.isError, true);
 		assert.match(firstText(out), /confirm: true/);
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -203,7 +204,7 @@ test("handleTeamTool 'forget' success removes state + artifacts", async () => {
 		assert.equal(fs.existsSync(stateRoot), false);
 		assert.equal(fs.existsSync(artifactsRoot), false);
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -221,7 +222,7 @@ test("handleTeamTool 'cleanup' without runId does PROJECT cleanup (Issue #35)", 
 		assert.equal(out.isError, false);
 		assert.match(firstText(out), /Project cleanup for pi-crew:/);
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -234,7 +235,7 @@ test("handleTeamTool 'cleanup' succeeds for a valid run", async () => {
 		assert.match(firstText(out), /Worktree cleanup/);
 		assert.equal(out.details.action, "cleanup");
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -252,7 +253,7 @@ test("handleTeamTool 'settings' returns settings list", async () => {
 		assert.match(text, /Config file:/);
 		assert.equal(out.details.action, "settings");
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -272,7 +273,7 @@ test("intent-gated 'cancel' rejects without config.intent", async () => {
 		assert.equal(out.isError, true);
 		assert.match(firstText(out), /requires config\.intent/);
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -283,7 +284,7 @@ test("intent-gated 'prune' rejects without config.intent", async () => {
 		assert.equal(out.isError, true);
 		assert.match(firstText(out), /requires config\.intent/);
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -295,7 +296,7 @@ test("intent-gated 'forget' rejects without config.intent", async () => {
 		assert.equal(out.isError, true);
 		assert.match(firstText(out), /requires config\.intent/);
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });
 
@@ -307,6 +308,6 @@ test("intent-gated 'cleanup' with force rejects without config.intent", async ()
 		assert.equal(out.isError, true);
 		assert.match(firstText(out), /requires config\.intent/);
 	} finally {
-		cleanupCwd(cwd);
+		await cleanupCwd(cwd);
 	}
 });

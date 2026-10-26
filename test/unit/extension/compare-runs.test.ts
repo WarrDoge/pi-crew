@@ -8,6 +8,7 @@ import type { TeamContext } from "../../../src/extension/team-tool/context.ts";
 import { handleCompare } from "../../../src/extension/team-tool/lifecycle-actions.ts";
 import type { TeamRunManifest, TeamTaskState, UsageState } from "../../../src/state/types.ts";
 import { resolveCanonicalDir } from "../../fixtures/test-tempdir.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 /**
  * US-021 (2026-09-22): run comparison.
@@ -103,7 +104,7 @@ function fixtures(): { cwd: string; a: RunFixture; b: RunFixture } {
 	return { cwd, a, b };
 }
 
-test("US-021 AC-2: known-delta fixtures produce accurate per-field deltas", () => {
+test("US-021 AC-2: known-delta fixtures produce accurate per-field deltas", async () => {
 	const { a, b } = fixtures();
 	try {
 		const { comparison } = runCompareBundle(a.manifest, a.tasks, b.manifest, b.tasks);
@@ -136,12 +137,12 @@ test("US-021 AC-2: known-delta fixtures produce accurate per-field deltas", () =
 		assert.equal(comparison.usage.tokensDelta, 29_000 - 16_500);
 		assert.ok(Math.abs(comparison.usage.costDelta - 0.045) < 1e-9);
 	} finally {
-		fs.rmSync(a.manifest.stateRoot, { recursive: true, force: true });
-		fs.rmSync(b.manifest.stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(a.manifest.stateRoot, a.manifest.eventsPath);
+		await cleanupStateRoot(b.manifest.stateRoot, b.manifest.eventsPath);
 	}
 });
 
-test("US-021 AC-1: self-comparison is identical with zero deltas", () => {
+test("US-021 AC-1: self-comparison is identical with zero deltas", async () => {
 	const { a, b } = fixtures();
 	try {
 		const { comparison, markdownPath } = runCompareBundle(a.manifest, a.tasks, a.manifest, a.tasks);
@@ -153,12 +154,12 @@ test("US-021 AC-1: self-comparison is identical with zero deltas", () => {
 		assert.ok(md.includes("Comparison: identical"), md);
 		assert.match(md, /Δtok=0/);
 	} finally {
-		fs.rmSync(a.manifest.stateRoot, { recursive: true, force: true });
-		fs.rmSync(b.manifest.stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(a.manifest.stateRoot, a.manifest.eventsPath);
+		await cleanupStateRoot(b.manifest.stateRoot, b.manifest.eventsPath);
 	}
 });
 
-test("US-021 AC-3: repeated comparisons are byte-identical", () => {
+test("US-021 AC-3: repeated comparisons are byte-identical", async () => {
 	const { a, b } = fixtures();
 	try {
 		const first = runCompareBundle(a.manifest, a.tasks, b.manifest, b.tasks);
@@ -169,12 +170,12 @@ test("US-021 AC-3: repeated comparisons are byte-identical", () => {
 		assert.ok(firstBytes.includes("Δdur=+30.0s"), firstBytes);
 		assert.ok(firstBytes.includes("Only in b: t3"), firstBytes);
 	} finally {
-		fs.rmSync(a.manifest.stateRoot, { recursive: true, force: true });
-		fs.rmSync(b.manifest.stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(a.manifest.stateRoot, a.manifest.eventsPath);
+		await cleanupStateRoot(b.manifest.stateRoot, b.manifest.eventsPath);
 	}
 });
 
-test("US-021 AC-4/AC-5: handleCompare — missing id errors with no partial artifact; valid call writes under run A", () => {
+test("US-021 AC-4/AC-5: handleCompare — missing id errors with no partial artifact; valid call writes under run A", async () => {
 	const { cwd, a, b } = fixtures();
 	const ctx = { cwd } as TeamContext;
 	try {
@@ -192,6 +193,6 @@ test("US-021 AC-4/AC-5: handleCompare — missing id errors with no partial arti
 		const badParams = handleCompare({ action: "compare", runIds: [a.manifest.runId] }, ctx);
 		assert.equal(badParams.isError, true);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

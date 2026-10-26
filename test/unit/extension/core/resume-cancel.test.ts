@@ -6,6 +6,7 @@ import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import { sleepSync } from "../../../../src/utils/sleep.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("cancel marks run cancelled and resume can complete it", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-resume-test-"));
@@ -40,7 +41,7 @@ test("cancel marks run cancelled and resume can complete it", async () => {
 		// already passed, and /tmp is swept by the OS.
 		for (let attempt = 0; attempt < 5; attempt++) {
 			try {
-				fs.rmSync(cwd, { recursive: true, force: true });
+				await removeDirWithRetry(cwd);
 				break;
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY" || attempt === 4) {

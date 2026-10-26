@@ -32,6 +32,7 @@ import { createRunManifest } from "../../../../../src/state/stores/state-store.t
 import type { TeamConfig } from "../../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../../src/workflows/workflow-config.ts";
 import { resolveCanonicalDir } from "../../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../../helpers/rm-retry.ts";
 
 type Handler = (args: string, ctx: never) => Promise<void>;
 
@@ -176,7 +177,7 @@ test("team-events truncated listing ends with the on-disk events log path and st
 			`expected footer with ${created.paths.eventsPath}, got tail: ${JSON.stringify(text.slice(-160))}`,
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

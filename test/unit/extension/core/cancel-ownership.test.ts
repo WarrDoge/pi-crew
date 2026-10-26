@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { abortOwned, handleCancel } from "../../../../src/extension/team-tool/cancel.ts";
 import { readEvents } from "../../../../src/state/event-log/event-log.ts";
 import { createRunManifest, loadRunManifestById, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function createOwnedRun(ownerSessionId: string): {
 	cwd: string;
@@ -61,7 +62,7 @@ describe("abortOwned", () => {
 		});
 	});
 
-	it("classifies tasks as foreign when session owner mismatches", () => {
+	it("classifies tasks as foreign when session owner mismatches", async () => {
 		const run = createOwnedRun("session-a");
 		try {
 			saveRunTasks(run.manifest, [
@@ -86,11 +87,11 @@ describe("abortOwned", () => {
 				foreignIds: ["task-1"],
 			});
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 
-	it("requires force to be the literal boolean true for foreign tasks", () => {
+	it("requires force to be the literal boolean true for foreign tasks", async () => {
 		const run = createOwnedRun("session-a");
 		try {
 			saveRunTasks(run.manifest, [
@@ -118,7 +119,7 @@ describe("abortOwned", () => {
 				foreignIds: [],
 			});
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 
@@ -166,7 +167,7 @@ describe("abortOwned", () => {
 			assert.equal(loaded?.tasks[0]?.terminalEvidence?.[0]?.operation, "worker");
 			assert.equal(loaded?.tasks[0]?.terminalEvidence?.[0]?.status, "cancelled");
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 
@@ -217,7 +218,7 @@ describe("abortOwned", () => {
 				),
 			);
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 
@@ -240,7 +241,7 @@ describe("abortOwned", () => {
 			assert.equal(out.isError, true);
 			assert.equal(loadRunManifestById(run.cwd, run.runId)?.tasks[0]?.status, "running");
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 
@@ -266,7 +267,7 @@ describe("abortOwned", () => {
 			assert.equal(out.isError, true);
 			assert.equal(loadRunManifestById(run.cwd, run.runId)?.tasks[0]?.status, "running");
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 });

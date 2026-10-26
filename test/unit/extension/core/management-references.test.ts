@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("delete agent is blocked when referenced by a team unless forced", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ref-test-"));
@@ -50,6 +51,6 @@ test("delete agent is blocked when referenced by a team unless forced", async ()
 		assert.equal(forced.isError, false);
 		assert.equal(fs.existsSync(path.join(cwd, ".crew", "agents", "worker.md")), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

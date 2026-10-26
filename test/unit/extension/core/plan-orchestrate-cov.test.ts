@@ -18,23 +18,24 @@ import {
 	parsePlanDocumentSimple,
 	TAG_TO_CHAIN,
 } from "../../../../src/extension/plan-orchestrate.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
-function withTempFile(content: string, fn: (filePath: string) => void): void {
+async function withTempFile(content: string, fn: (filePath: string) => void): Promise<void> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-orch-cov-"));
 	const filePath = path.join(dir, "plan.md");
 	fs.writeFileSync(filePath, content);
 	try {
-		fn(filePath);
+		await fn(filePath);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 }
 
 // ─── parsePlanDocument edge cases ────────────────────────────────────────────
 
 describe("parsePlanDocument skips empty sections", () => {
-	it("returns no steps when tag has no content after it", () => {
-		withTempFile("# Phase\n<!-- tag: design -->\n\n\n", (filePath) => {
+	it("returns no steps when tag has no content after it", async () => {
+		await withTempFile("# Phase\n<!-- tag: design -->\n\n\n", (filePath) => {
 			const steps = parsePlanDocument(filePath);
 			assert.equal(steps.length, 0, "empty section after tag should be skipped");
 		});
@@ -42,8 +43,8 @@ describe("parsePlanDocument skips empty sections", () => {
 });
 
 describe("parsePlanDocument handles plan with only comments and whitespace", () => {
-	it("returns empty for file with tag but only comment lines", () => {
-		withTempFile("<!-- tag: design -->\n<!-- another comment -->\n", (filePath) => {
+	it("returns empty for file with tag but only comment lines", async () => {
+		await withTempFile("<!-- tag: design -->\n<!-- another comment -->\n", (filePath) => {
 			const steps = parsePlanDocument(filePath);
 			assert.equal(steps.length, 0);
 		});
@@ -51,7 +52,7 @@ describe("parsePlanDocument handles plan with only comments and whitespace", () 
 });
 
 describe("parsePlanDocument assigns correct step IDs for multiple tags", () => {
-	it("pads step number to 2 digits", () => {
+	it("pads step number to 2 digits", async () => {
 		const content = [
 			"<!-- tag: design -->",
 			"Design step.",
@@ -60,7 +61,7 @@ describe("parsePlanDocument assigns correct step IDs for multiple tags", () => {
 			"<!-- tag: test -->",
 			"Test step.",
 		].join("\n");
-		withTempFile(content, (filePath) => {
+		await withTempFile(content, (filePath) => {
 			const steps = parsePlanDocument(filePath);
 			assert.equal(steps[0].stepId, "step-01-design");
 			assert.equal(steps[1].stepId, "step-02-impl");
@@ -72,8 +73,8 @@ describe("parsePlanDocument assigns correct step IDs for multiple tags", () => {
 // ─── parsePlanDocumentSimple implicit tag detection ──────────────────────────
 
 describe("parsePlanDocumentSimple detects implicit design tag", () => {
-	it("detects 'design' keyword and returns a step", () => {
-		withTempFile("We need to design the system architecture carefully.", (filePath) => {
+	it("detects 'design' keyword and returns a step", async () => {
+		await withTempFile("We need to design the system architecture carefully.", (filePath) => {
 			const steps = parsePlanDocumentSimple(filePath);
 			assert.equal(steps.length, 1);
 			assert.equal(steps[0].tag, "design");
@@ -82,8 +83,8 @@ describe("parsePlanDocumentSimple detects implicit design tag", () => {
 });
 
 describe("parsePlanDocumentSimple detects implicit impl tag", () => {
-	it("detects 'implement' keyword", () => {
-		withTempFile("Please implement the feature.", (filePath) => {
+	it("detects 'implement' keyword", async () => {
+		await withTempFile("Please implement the feature.", (filePath) => {
 			const steps = parsePlanDocumentSimple(filePath);
 			assert.equal(steps.length, 1);
 			assert.equal(steps[0].tag, "impl");
@@ -92,8 +93,8 @@ describe("parsePlanDocumentSimple detects implicit impl tag", () => {
 });
 
 describe("parsePlanDocumentSimple detects implicit security tag", () => {
-	it("detects 'security' keyword", () => {
-		withTempFile("Review the security of this module.", (filePath) => {
+	it("detects 'security' keyword", async () => {
+		await withTempFile("Review the security of this module.", (filePath) => {
 			const steps = parsePlanDocumentSimple(filePath);
 			assert.equal(steps.length, 1);
 			assert.equal(steps[0].tag, "security");
@@ -102,8 +103,8 @@ describe("parsePlanDocumentSimple detects implicit security tag", () => {
 });
 
 describe("parsePlanDocumentSimple detects implicit build tag", () => {
-	it("detects 'build' keyword", () => {
-		withTempFile("Fix the build errors in the project.", (filePath) => {
+	it("detects 'build' keyword", async () => {
+		await withTempFile("Fix the build errors in the project.", (filePath) => {
 			const steps = parsePlanDocumentSimple(filePath);
 			assert.equal(steps.length, 1);
 			assert.equal(steps[0].tag, "build");
@@ -112,8 +113,8 @@ describe("parsePlanDocumentSimple detects implicit build tag", () => {
 });
 
 describe("parsePlanDocumentSimple detects implicit test tag", () => {
-	it("detects 'test' keyword", () => {
-		withTempFile("Add test coverage for utils.", (filePath) => {
+	it("detects 'test' keyword", async () => {
+		await withTempFile("Add test coverage for utils.", (filePath) => {
 			const steps = parsePlanDocumentSimple(filePath);
 			assert.equal(steps.length, 1);
 			assert.equal(steps[0].tag, "test");
@@ -122,8 +123,8 @@ describe("parsePlanDocumentSimple detects implicit test tag", () => {
 });
 
 describe("parsePlanDocumentSimple detects implicit review tag", () => {
-	it("detects 'review' keyword", () => {
-		withTempFile("Please review the pull request.", (filePath) => {
+	it("detects 'review' keyword", async () => {
+		await withTempFile("Please review the pull request.", (filePath) => {
 			const steps = parsePlanDocumentSimple(filePath);
 			assert.equal(steps.length, 1);
 			assert.equal(steps[0].tag, "review");
@@ -166,10 +167,10 @@ describe("buildChainData returns structured data", () => {
 // ─── formatPlanOverview truncation ───────────────────────────────────────────
 
 describe("formatPlanOverview truncates long prompts", () => {
-	it("shows ellipsis for prompts longer than 60 chars", () => {
+	it("shows ellipsis for prompts longer than 60 chars", async () => {
 		const longPrompt = "A".repeat(100);
 		const content = `# Phase\n<!-- tag: design -->\n${longPrompt}\n`;
-		withTempFile(content, (filePath) => {
+		await withTempFile(content, (filePath) => {
 			const overview = formatPlanOverview(filePath);
 			assert.ok(overview.includes("..."));
 			assert.ok(!overview.includes("A".repeat(100)), "should truncate long prompt");
@@ -181,7 +182,7 @@ describe("formatPlanOverview truncates long prompts", () => {
 
 describe("orchestratePlan falls back to simple parser", () => {
 	it("parses plan with implicit tags when no explicit tags found", async () => {
-		withTempFile("Please implement the feature carefully.", async (filePath) => {
+		await withTempFile("Please implement the feature carefully.", async (filePath) => {
 			const result = await orchestratePlan({ planPath: filePath });
 			assert.ok(result.steps.length >= 1);
 			assert.equal(result.steps[0].tag, "impl");

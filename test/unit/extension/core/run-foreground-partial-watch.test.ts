@@ -26,6 +26,7 @@ import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { clearRunPromisesForTest } from "../../../../src/runtime/run-tracker.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("foreground run: watch-window expiry reports partial-watch and does NOT cancel the run", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-partial-watch-"));
@@ -88,6 +89,6 @@ test("foreground run: watch-window expiry reports partial-watch and does NOT can
 		if (previousAllowMock === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = previousAllowMock;
 		clearRunPromisesForTest();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

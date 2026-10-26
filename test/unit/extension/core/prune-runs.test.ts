@@ -7,6 +7,7 @@ import { listRuns } from "../../../../src/extension/run-index.ts";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { projectCrewRoot } from "../../../../src/utils/paths.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("prune removes old finished runs after confirmation", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-prune-test-"));
@@ -49,7 +50,7 @@ test("prune removes old finished runs after confirmation", async () => {
 		assert.equal(audit.keep, 1);
 		assert.equal(audit.removed.length, 2);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -84,6 +85,6 @@ test("prune dryRun previews without deleting (no confirm required)", async () =>
 		assert.equal(real.isError, false);
 		assert.equal(ownRuns().length, 1);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 import { initializeProject } from "../../../../src/extension/project-init.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * v0.8.14 regression (Issue #35): pi-crew must NOT modify AGENTS.md on init.
@@ -26,11 +27,11 @@ describe("init does NOT modify AGENTS.md (v0.8.14, Issue #35)", () => {
 		// Minimal git marker so findRepoRoot anchors at tempCwd.
 		fs.mkdirSync(path.join(tempCwd, ".git"), { recursive: true });
 	});
-	afterEach(() => {
+	afterEach(async () => {
 		if (prevHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = prevHome;
-		fs.rmSync(tempCwd, { recursive: true, force: true });
-		fs.rmSync(tempHome, { recursive: true, force: true });
+		await removeDirWithRetry(tempCwd);
+		await removeDirWithRetry(tempHome);
 	});
 
 	it("does NOT create AGENTS.md when none exists", () => {

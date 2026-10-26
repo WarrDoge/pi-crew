@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { describe, it } from "node:test";
 import { abortOwned, retryShortCircuitsCompleted } from "../../../../src/extension/team-tool/cancel.ts";
 import type { TeamContext } from "../../../../src/extension/team-tool/context.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * abortOwned is the primary pure-logic export from cancel.ts.
@@ -74,37 +75,37 @@ describe("retryShortCircuitsCompleted", () => {
 });
 
 describe("abortOwned", () => {
-	it("returns all IDs as missing when runId does not resolve to a cwd", () => {
+	it("returns all IDs as missing when runId does not resolve to a cwd", async () => {
 		const ctx: TeamContext = { cwd: makeEmptyCwd() };
 		const result = abortOwned("nonexistent-run", ["t1", "t2"], ctx);
 		assert.deepEqual(result.missingIds, ["t1", "t2"]);
 		assert.deepEqual(result.abortedIds, []);
 		assert.deepEqual(result.foreignIds, []);
-		fs.rmSync(ctx.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(ctx.cwd);
 	});
 
-	it("returns empty abortedIds for non-existent run", () => {
+	it("returns empty abortedIds for non-existent run", async () => {
 		const ctx: TeamContext = { cwd: makeEmptyCwd() };
 		const result = abortOwned("fake-run-id-12345", undefined, ctx);
 		assert.deepEqual(result.abortedIds, []);
 		assert.deepEqual(result.missingIds, []);
 		assert.deepEqual(result.foreignIds, []);
-		fs.rmSync(ctx.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(ctx.cwd);
 	});
 
-	it("returns all IDs as missing when taskIds are provided but run not found", () => {
+	it("returns all IDs as missing when taskIds are provided but run not found", async () => {
 		const ctx: TeamContext = { cwd: makeEmptyCwd() };
 		const result = abortOwned("nonexistent", ["x", "y", "z"], ctx);
 		assert.deepEqual(result.missingIds, ["x", "y", "z"]);
 		assert.deepEqual(result.abortedIds, []);
-		fs.rmSync(ctx.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(ctx.cwd);
 	});
 
-	it("returns empty missingIds when taskIds is undefined and run not found", () => {
+	it("returns empty missingIds when taskIds is undefined and run not found", async () => {
 		const ctx: TeamContext = { cwd: makeEmptyCwd() };
 		const result = abortOwned("nonexistent", undefined, ctx);
 		assert.deepEqual(result.missingIds, []);
-		fs.rmSync(ctx.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(ctx.cwd);
 	});
 
 	it("returns empty lists when cwd is an empty string", () => {
@@ -114,11 +115,11 @@ describe("abortOwned", () => {
 		assert.deepEqual(result.missingIds, ["t1"]);
 	});
 
-	it("returns all IDs as missing when taskIds is empty array", () => {
+	it("returns all IDs as missing when taskIds is empty array", async () => {
 		const ctx: TeamContext = { cwd: makeEmptyCwd() };
 		const result = abortOwned("nonexistent", [], ctx);
 		assert.deepEqual(result.missingIds, []);
 		assert.deepEqual(result.abortedIds, []);
-		fs.rmSync(ctx.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(ctx.cwd);
 	});
 });

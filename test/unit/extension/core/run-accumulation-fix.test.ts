@@ -17,6 +17,7 @@ import { createRunManifest, updateRunStatus } from "../../../../src/state/stores
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import { userCrewRoot } from "../../../../src/utils/paths.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "ari",
@@ -33,23 +34,23 @@ const workflow: WorkflowConfig = {
 	steps: [{ id: "explore", role: "explorer", task: "Explore" }],
 };
 
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-run-accum-home-"));
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await cleanupStateRoot(home);
 	}
 }
 
 // ─── Bug 4: registerActiveRun filters terminal entries ───
 
-test("registerActiveRun filters out terminal entries before writing", () => {
-	withIsolatedHome(() => {
+test("registerActiveRun filters out terminal entries before writing", async () => {
+	await withIsolatedHome(async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-reg-filter-"));
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 		try {
@@ -86,13 +87,13 @@ test("registerActiveRun filters out terminal entries before writing", () => {
 			assert.equal(entries.length, 1, "Registry should contain only 1 active entry after filtering terminal ones");
 			assert.equal(entries[0]!.runId, created2.manifest.runId, "Remaining entry should be the second run");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
 
-test("registerActiveRun filters out entries with missing manifest files", () => {
-	withIsolatedHome(() => {
+test("registerActiveRun filters out entries with missing manifest files", async () => {
+	await withIsolatedHome(async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-reg-missing-"));
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 		try {
@@ -124,13 +125,13 @@ test("registerActiveRun filters out entries with missing manifest files", () => 
 			assert.equal(entries.length, 1, "Registry should only have the entry with existing manifest");
 			assert.equal(entries[0]!.runId, created2.manifest.runId);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
 
-test("registerActiveRun keeps active entries intact", () => {
-	withIsolatedHome(() => {
+test("registerActiveRun keeps active entries intact", async () => {
+	await withIsolatedHome(async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-reg-active-"));
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 		try {
@@ -156,15 +157,15 @@ test("registerActiveRun keeps active entries intact", () => {
 			const entries = readActiveRunRegistry();
 			assert.equal(entries.length, 2, "Both active entries should be preserved");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
 
 // ─── Bug 3: pruneUserLevelRuns ───
 
-test("pruneUserLevelRuns removes old finished user-level runs", () => {
-	withIsolatedHome(() => {
+test("pruneUserLevelRuns removes old finished user-level runs", async () => {
+	await withIsolatedHome(() => {
 		const crewRoot = userCrewRoot();
 		const runsRoot = path.join(crewRoot, DEFAULT_PATHS.state.runsSubdir);
 		fs.mkdirSync(runsRoot, { recursive: true });
@@ -212,8 +213,8 @@ test("pruneUserLevelRuns removes old finished user-level runs", () => {
 	});
 });
 
-test("pruneUserLevelRuns skips non-finished runs", () => {
-	withIsolatedHome(() => {
+test("pruneUserLevelRuns skips non-finished runs", async () => {
+	await withIsolatedHome(() => {
 		const crewRoot = userCrewRoot();
 		const runsRoot = path.join(crewRoot, DEFAULT_PATHS.state.runsSubdir);
 		fs.mkdirSync(runsRoot, { recursive: true });
@@ -248,8 +249,8 @@ test("pruneUserLevelRuns skips non-finished runs", () => {
 	});
 });
 
-test("pruneUserLevelRuns returns empty when no runs directory exists", () => {
-	withIsolatedHome(() => {
+test("pruneUserLevelRuns returns empty when no runs directory exists", async () => {
+	await withIsolatedHome(() => {
 		const result = pruneUserLevelRuns(10);
 		assert.equal(result.kept.length, 0);
 		assert.equal(result.removed.length, 0);

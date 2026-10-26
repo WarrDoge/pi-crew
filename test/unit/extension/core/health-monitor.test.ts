@@ -24,6 +24,7 @@ import { clearProjectRootCache } from "../../../../src/utils/paths.ts";
 import { sharedScanCache } from "../../../../src/utils/scan-cache.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { resolveCanonicalDir } from "../../../fixtures/test-tempdir.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 // ── Shared fixtures ──────────────────────────────────────────────────
 
@@ -47,7 +48,7 @@ const workflow: WorkflowConfig = {
  * Isolate PI_TEAMS_HOME to a temp dir so user-level state doesn't leak
  * between tests or into the developer's real home directory.
  */
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = resolveCanonicalDir(fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-health-home-")));
 	process.env.PI_TEAMS_HOME = home;
@@ -55,11 +56,11 @@ function withIsolatedHome<T>(fn: () => T): T {
 	sharedScanCache.clear();
 	__test__clearManifestCache();
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await cleanupStateRoot(home);
 		clearProjectRootCache();
 		sharedScanCache.clear();
 		__test__clearManifestCache();
@@ -96,8 +97,8 @@ function reportText(result: { content: Array<{ type: string; text?: string }> })
 // we create a scenario where the entry passes the registry's cwd-existence
 // check but the health monitor sees a manifest with a dead cwd.
 
-test("should detect ghost run when manifest cwd no longer exists but registry entry cwd does", () => {
-	withIsolatedHome(() => {
+test("should detect ghost run when manifest cwd no longer exists but registry entry cwd does", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 		// realDir stays alive — it is the cwd registered in the active-run index.
@@ -142,15 +143,15 @@ test("should detect ghost run when manifest cwd no longer exists but registry en
 			} catch {
 				/* best-effort */
 			}
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(realDir, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(realDir);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
-test("should not crash when ghost run is fully deleted (cwd gone, registry filtered)", () => {
-	withIsolatedHome(() => {
+test("should not crash when ghost run is fully deleted (cwd gone, registry filtered)", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 		const ghostCwd = resolveCanonicalDir(fs.mkdtempSync(path.join(isolatedTmp, "pi-crew-health-ghost-")));
@@ -185,21 +186,21 @@ test("should not crash when ghost run is fully deleted (cwd gone, registry filte
 			} catch {
 				/* best-effort */
 			}
-			fs.rmSync(projectCwd, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
 			try {
-				fs.rmSync(ghostCwd, { recursive: true, force: true });
+				await cleanupStateRoot(ghostCwd);
 			} catch {
 				/* already deleted */
 			}
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
 // ── 2. Orphaned run — stale async PID ───────────────────────────────
 
-test("should detect orphaned run with stale async PID past threshold", () => {
-	withIsolatedHome(() => {
+test("should detect orphaned run with stale async PID past threshold", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -235,16 +236,16 @@ test("should detect orphaned run with stale async PID past threshold", () => {
 			assert.match(text, /Orphaned \(stale process\): 1/);
 			assert.match(text, /stale-async-pid/);
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
 // ── 3. Orphaned run — non-async stale run with no progress ──────────
 
-test("should detect orphaned non-async stale run with no agent progress", () => {
-	withIsolatedHome(() => {
+test("should detect orphaned non-async stale run with no agent progress", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -293,16 +294,16 @@ test("should detect orphaned non-async stale run with no agent progress", () => 
 			assert.match(text, /Orphaned \(stale process\): 1/);
 			assert.match(text, /stale-no-progress/);
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
 // ── 4. Corrupted run detection ──────────────────────────────────────
 
-test("should detect corrupted run when artifacts root is missing", () => {
-	withIsolatedHome(() => {
+test("should detect corrupted run when artifacts root is missing", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -329,14 +330,14 @@ test("should detect corrupted run when artifacts root is missing", () => {
 			assert.ok(text.includes(running.runId), `report should contain runId ${running.runId}`);
 			assert.match(text, /Corrupted runs:/);
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
-test("should detect corrupted run when state root is missing", () => {
-	withIsolatedHome(() => {
+test("should detect corrupted run when state root is missing", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -374,16 +375,16 @@ test("should detect corrupted run when state root is missing", () => {
 			const { text, counts } = buildHealthReport({ cwd: projectCwd }, {}, { tmpDir: isolatedTmp });
 			assert.ok(text.includes("pi-crew health report"));
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
 // ── 5. Healthy run ──────────────────────────────────────────────────
 
-test("should report all runs healthy when no issues found", () => {
-	withIsolatedHome(() => {
+test("should report all runs healthy when no issues found", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -409,16 +410,16 @@ test("should report all runs healthy when no issues found", () => {
 			assert.doesNotMatch(text, /Orphaned \(stale process\): [1-9]/);
 			assert.doesNotMatch(text, /Corrupted \(missing state\): [1-9]/);
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
 // ── 6. Cross-scope scanning ─────────────────────────────────────────
 
-test("should scan both project and user level runs", () => {
-	withIsolatedHome(() => {
+test("should scan both project and user level runs", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -456,19 +457,19 @@ test("should scan both project and user level runs", () => {
 				assert.equal(counts.total, 2);
 				assert.match(text, /All runs healthy\./);
 			} finally {
-				fs.rmSync(userCwd, { recursive: true, force: true });
+				await cleanupStateRoot(userCwd);
 			}
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
 // ── 7. Empty scan ───────────────────────────────────────────────────
 
-test("should report zero runs and healthy when no runs exist", () => {
-	withIsolatedHome(() => {
+test("should report zero runs and healthy when no runs exist", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -478,16 +479,16 @@ test("should report zero runs and healthy when no runs exist", () => {
 			assert.equal(counts.total, 0);
 			assert.match(text, /All runs healthy\./);
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
 // ── 8. Mixed issues: orphaned + corrupted ───────────────────────────
 
-test("should report multiple issue types in a single scan", () => {
-	withIsolatedHome(() => {
+test("should report multiple issue types in a single scan", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -533,16 +534,16 @@ test("should report multiple issue types in a single scan", () => {
 			assert.match(text, /Orphaned \(stale process\): 1/);
 			assert.match(text, /Corrupted \(missing state\): 1/);
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
 // ── 9. Status counts ────────────────────────────────────────────────
 
-test("should count status accurately across runs", () => {
-	withIsolatedHome(() => {
+test("should count status accurately across runs", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -601,14 +602,14 @@ test("should count status accurately across runs", () => {
 			assert.equal(counts.running, 0);
 			assert.equal(counts.queued, 0);
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
-test("should count running and queued runs", () => {
-	withIsolatedHome(() => {
+test("should count running and queued runs", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -662,16 +663,16 @@ test("should count running and queued runs", () => {
 			assert.equal(counts.queued, 1);
 			assert.equal(counts.running, 1);
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
 // ── 10. Stuck task detection ────────────────────────────────────────
 
-test("should detect stuck tasks with stale heartbeat", () => {
-	withIsolatedHome(() => {
+test("should detect stuck tasks with stale heartbeat", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -736,14 +737,14 @@ test("should detect stuck tasks with stale heartbeat", () => {
 			assert.match(text, /Stuck tasks:/);
 			assert.ok(text.includes(staleTasks[0]!.id), "should list the stuck task ID");
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
-test("should not flag recently active tasks as stuck", () => {
-	withIsolatedHome(() => {
+test("should not flag recently active tasks as stuck", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -805,15 +806,15 @@ test("should not flag recently active tasks as stuck", () => {
 
 			assert.equal(counts.stuck, 0, "recently active task should not be stuck");
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
 // ── 11. Zombie /tmp/ workspace detection ────────────────────────────
 
-test("should count zombie /tmp/ workspaces with run manifests", () => {
+test("should count zombie /tmp/ workspaces with run manifests", async () => {
 	const isolatedTmp = createIsolatedTmpDir();
 
 	try {
@@ -873,11 +874,11 @@ test("should count zombie /tmp/ workspaces with run manifests", () => {
 		assert.equal(ws1Zombie!.runCount, 1);
 		assert.equal(ws2Zombie!.runCount, 2);
 	} finally {
-		fs.rmSync(isolatedTmp, { recursive: true, force: true });
+		await cleanupStateRoot(isolatedTmp);
 	}
 });
 
-test("should not count non-pi-crew dirs as zombie workspaces", () => {
+test("should not count non-pi-crew dirs as zombie workspaces", async () => {
 	const isolatedTmp = createIsolatedTmpDir();
 
 	try {
@@ -890,14 +891,14 @@ test("should not count non-pi-crew dirs as zombie workspaces", () => {
 		const zombies = scanZombieTempWorkspaces(isolatedTmp, Date.now());
 		assert.equal(zombies.length, 0, "non-pi-crew dirs should not be zombies");
 	} finally {
-		fs.rmSync(isolatedTmp, { recursive: true, force: true });
+		await cleanupStateRoot(isolatedTmp);
 	}
 });
 
 // ── 12. Compact TUI summary format ─────────────────────────────────
 
-test("should include compact TUI summary line", () => {
-	withIsolatedHome(() => {
+test("should include compact TUI summary line", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -920,14 +921,14 @@ test("should include compact TUI summary line", () => {
 			// Verify compact summary format
 			assert.match(text, /Summary: total=1 running=0 completed=1 failed=0 cancelled=0 blocked=0 \| stuck=0 zombie=0/);
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
 
-test("should include structured data in result details", () => {
-	withIsolatedHome(() => {
+test("should include structured data in result details", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -962,8 +963,8 @@ test("should include structured data in result details", () => {
 			assert.ok(toolResult.details.data, "details should have a data object");
 			assert.equal(typeof (toolResult.details.data as Record<string, unknown>).total, "number");
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
@@ -1005,8 +1006,8 @@ test("countStatuses should handle empty runs", () => {
 
 // ── 14. Multi-workspace scan ────────────────────────────────────────
 
-test("should merge temp workspace runs with primary runs", () => {
-	withIsolatedHome(() => {
+test("should merge temp workspace runs with primary runs", async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -1058,8 +1059,8 @@ test("should merge temp workspace runs with primary runs", () => {
 			assert.equal(counts.completed, 1);
 			assert.equal(counts.running, 1);
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });
@@ -1068,8 +1069,8 @@ test("should merge temp workspace runs with primary runs", () => {
 
 test("NEW-R2: corrupt tasks.json → detectStuckTasks returns [] gracefully and quarantines", {
 	skip: process.platform === "win32" ? "Windows file-quarantine rename timing flakes. Follow up: make Windows-tolerant." : undefined,
-}, () => {
-	withIsolatedHome(() => {
+}, async () => {
+	await withIsolatedHome(async () => {
 		const isolatedTmp = createIsolatedTmpDir();
 		const projectCwd = createProjectCwd(isolatedTmp);
 
@@ -1100,8 +1101,8 @@ test("NEW-R2: corrupt tasks.json → detectStuckTasks returns [] gracefully and 
 				`NEW-R2: tasks.json quarantined: ${corrupt.join(", ")}`,
 			);
 		} finally {
-			fs.rmSync(projectCwd, { recursive: true, force: true });
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(projectCwd);
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 });

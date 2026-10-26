@@ -29,6 +29,7 @@ import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { handleTeamTool } from "../../../src/extension/team-tool.ts";
 import { textFromToolResult } from "../../../src/extension/tool-result.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const REPO_THEMES_DIR = path.join(process.cwd(), "themes");
 const NON_BUILTIN_THEME = "crew-gruvbox-dark";
@@ -85,15 +86,15 @@ before(() => {
 	installThemeFixture();
 });
 
-after(() => {
+after(async () => {
 	if (savedHome === undefined) delete process.env.HOME;
 	else process.env.HOME = savedHome;
 	if (savedUserProfile === undefined) delete process.env.USERPROFILE;
 	else process.env.USERPROFILE = savedUserProfile;
 	if (savedCrewHome === undefined) delete process.env.PI_CREW_HOME;
 	else process.env.PI_CREW_HOME = savedCrewHome;
-	fs.rmSync(tmpHome, { recursive: true, force: true });
-	fs.rmSync(tmpCwd, { recursive: true, force: true });
+	await removeDirWithRetry(tmpHome);
+	await removeDirWithRetry(tmpCwd);
 });
 
 describe("M1-3 P0-1: /team-settings theme <non-builtin>", () => {
@@ -150,7 +151,7 @@ describe("M1-3 P0-1: /team-settings theme <non-builtin>", () => {
 		} finally {
 			process.env.HOME = saved;
 			process.env.USERPROFILE = tmpHome;
-			fs.rmSync(emptyHome, { recursive: true, force: true });
+			await removeDirWithRetry(emptyHome);
 		}
 	});
 

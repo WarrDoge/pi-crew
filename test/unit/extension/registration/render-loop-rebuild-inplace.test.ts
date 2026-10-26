@@ -30,6 +30,7 @@ import { installLazyConfigurers } from "../../../../src/extension/registration/l
 import { installSessionLifecycleHandlers } from "../../../../src/extension/registration/lifecycle-handlers.ts";
 import { installRuntimeCleanup } from "../../../../src/extension/registration/runtime-cleanup.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // --- Harness primitives (mirrored from preload-idle-render.test.ts) ---
 
@@ -188,7 +189,7 @@ function makeLoopHarness(cwd: string, events: ReturnType<typeof createEventBus>)
 }
 
 /** Common per-test sandbox: isolated PI_CREW_HOME + tracked temp cwd + config. */
-function makeSandbox(): { home: string; cwd: string; restore: () => void } {
+async function makeSandbox(): Promise<{ home: string; cwd: string; restore: () => void }> {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "l2-pin-home-"));
 	const cwd = createTrackedTempDir("l2-pin-cwd-");
 	const prevHome = process.env.PI_CREW_HOME;
@@ -199,17 +200,17 @@ function makeSandbox(): { home: string; cwd: string; restore: () => void } {
 	return {
 		home,
 		cwd,
-		restore: () => {
+		restore: async () => {
 			if (prevHome === undefined) delete process.env.PI_CREW_HOME;
 			else process.env.PI_CREW_HOME = prevHome;
-			fs.rmSync(home, { recursive: true, force: true });
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(home);
+			await removeDirWithRetry(cwd);
 		},
 	};
 }
 
 test("L2 pin: a TERMINAL run keeps its snapshot entry defined across forced renderTicks (GATE 1)", async () => {
-	const sandbox = makeSandbox();
+	const sandbox = await makeSandbox();
 	try {
 		const runId = "run-l2-terminal";
 		writeRunFixture(sandbox.cwd, { runId, status: "completed" });
@@ -240,12 +241,12 @@ test("L2 pin: a TERMINAL run keeps its snapshot entry defined across forced rend
 		harness.pi.emitLifecycle("session_shutdown", harness.sessionCtx, { reason: "quit" });
 		await sleep(25);
 	} finally {
-		sandbox.restore();
+		await sandbox.restore();
 	}
 });
 
 test("L2 pin: a task-status DIVERGENT run keeps its snapshot entry defined across a forced renderTick (GATE 3)", async () => {
-	const sandbox = makeSandbox();
+	const sandbox = await makeSandbox();
 	try {
 		const runId = "run-l2-divergent";
 		const stateRoot = writeRunFixture(sandbox.cwd, { runId, status: "running", tasks: [makeTask(runId, "running")] });
@@ -281,6 +282,6 @@ test("L2 pin: a task-status DIVERGENT run keeps its snapshot entry defined acros
 		harness.pi.emitLifecycle("session_shutdown", harness.sessionCtx, { reason: "quit" });
 		await sleep(25);
 	} finally {
-		sandbox.restore();
+		await sandbox.restore();
 	}
 });

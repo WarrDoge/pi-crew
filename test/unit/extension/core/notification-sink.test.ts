@@ -4,8 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { createJsonlSink } from "../../../../src/extension/notification-sink.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
-test("JSONL notification sink writes daily redacted records", () => {
+test("JSONL notification sink writes daily redacted records", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-sink-"));
 	try {
 		const sink = createJsonlSink(root, 7);
@@ -20,11 +21,11 @@ test("JSONL notification sink writes daily redacted records", () => {
 		assert.equal(fs.existsSync(file), true);
 		assert.match(fs.readFileSync(file, "utf-8"), /hello/);
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });
 
-test("JSONL notification sink prunes old files on date change", () => {
+test("JSONL notification sink prunes old files on date change", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-sink-prune-"));
 	try {
 		const dir = path.join(root, "state", "notifications");
@@ -41,11 +42,11 @@ test("JSONL notification sink prunes old files on date change", () => {
 		});
 		assert.equal(fs.existsSync(oldFile), false);
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });
 
-test("JSONL notification sink redacts sensitive fields", () => {
+test("JSONL notification sink redacts sensitive fields", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-sink-redact-"));
 	try {
 		const sink = createJsonlSink(root, 7);
@@ -59,6 +60,6 @@ test("JSONL notification sink redacts sensitive fields", () => {
 		const text = fs.readFileSync(path.join(root, "state", "notifications", "2026-01-03.jsonl"), "utf-8");
 		assert.doesNotMatch(text, /abc/);
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });

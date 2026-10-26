@@ -18,7 +18,7 @@
  * exposes nothing that touches disk (cwd is a throw-away tmpdir).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -26,6 +26,7 @@ import { liveConversationNotice, openLiveConversation } from "../../../../src/ex
 import { clearLiveAgentsForTest, registerLiveAgent } from "../../../../src/runtime/live-session/live-agent-manager.ts";
 import { createRunManifest, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 type HostComponent = {
 	render(width: number): string[];
@@ -41,9 +42,9 @@ type HostOptions = {
 
 const tmpDirs: string[] = [];
 
-afterEach(() => {
+afterEach(async () => {
 	clearLiveAgentsForTest();
-	for (const dir of tmpDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	for (const dir of tmpDirs.splice(0)) await removeDirWithRetry(dir);
 });
 
 /**

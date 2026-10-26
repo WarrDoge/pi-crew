@@ -7,8 +7,9 @@ import { initializeProject } from "../../../../src/extension/project-init.ts";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { resolveCanonicalDir } from "../../../fixtures/test-tempdir.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
-function withIsolatedHome(fn: () => Promise<void> | void): () => Promise<void> {
+async function withIsolatedHome(fn: () => Promise<void> | void): Promise<() => Promise<void>> {
 	return async () => {
 		const cwd = resolveCanonicalDir(fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-init-test-")));
 		const previousHome = process.env.PI_TEAMS_HOME;
@@ -35,14 +36,14 @@ function withIsolatedHome(fn: () => Promise<void> | void): () => Promise<void> {
 			else process.env.HOME = previousOsHome;
 			if (previousUserProfile === undefined) delete process.env.USERPROFILE;
 			else process.env.USERPROFILE = previousUserProfile;
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	};
 }
 
 test(
 	"project init creates directories and gitignore entries idempotently",
-	withIsolatedHome(async () => {
+	await withIsolatedHome(async () => {
 		const cwd = process.env.PI_TEAMS_HOME!;
 		const first = initializeProject(cwd);
 		assert.ok(first.gitignoreUpdated);
@@ -92,7 +93,7 @@ test(
 
 test(
 	"project init with ignoreMethod=exclude writes to .git/info/exclude",
-	withIsolatedHome(async () => {
+	await withIsolatedHome(async () => {
 		const cwd = process.env.PI_TEAMS_HOME!;
 		// Create .git/info/ to simulate git repo
 		fs.mkdirSync(path.join(cwd, ".git", "info"), { recursive: true });
@@ -111,7 +112,7 @@ test(
 
 test(
 	"project init with ignoreMethod=exclude creates .git/info/ if missing",
-	withIsolatedHome(async () => {
+	await withIsolatedHome(async () => {
 		const cwd = process.env.PI_TEAMS_HOME!;
 		// No .git directory at all
 		const result = initializeProject(cwd, { ignoreMethod: "exclude" });
@@ -124,7 +125,7 @@ test(
 
 test(
 	"project init: overwriting an existing config backs it up and reports the path (F13-A)",
-	withIsolatedHome(async () => {
+	await withIsolatedHome(async () => {
 		const cwd = process.env.PI_TEAMS_HOME!;
 		initializeProject(cwd);
 		const configPath = path.join(cwd, ".pi", "agent", "pi-crew.json");
@@ -149,7 +150,7 @@ test(
 
 test(
 	"project init: without overwrite an existing config is preserved (and says so)",
-	withIsolatedHome(async () => {
+	await withIsolatedHome(async () => {
 		const cwd = process.env.PI_TEAMS_HOME!;
 		initializeProject(cwd);
 		const configPath = path.join(cwd, ".pi", "agent", "pi-crew.json");

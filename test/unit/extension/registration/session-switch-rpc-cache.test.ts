@@ -21,6 +21,7 @@ import test from "node:test";
 import { registerPiTeams } from "../../../../src/extension/register.ts";
 import { buildRegistrationContext } from "../../../../src/extension/registration/context-builder.ts";
 import { createRunSnapshotCache } from "../../../../src/ui/run-snapshot-cache.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function createEventBus() {
 	const handlers = new Map<string, Set<(payload: unknown) => void>>();
@@ -154,12 +155,12 @@ test("F13: RPC subscriptions survive a session switch and rpc:ping keeps answeri
 	} finally {
 		if (prevHome === undefined) delete process.env.PI_CREW_HOME;
 		else process.env.PI_CREW_HOME = prevHome;
-		fs.rmSync(home, { recursive: true, force: true });
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(home);
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("F13: disposed caches are recreated even when the cwd is unchanged", () => {
+test("F13: disposed caches are recreated even when the cwd is unchanged", async () => {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "f13-cache-home-"));
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "f13-cache-cwd-"));
 	const prevHome = process.env.PI_CREW_HOME;
@@ -198,7 +199,7 @@ test("F13: disposed caches are recreated even when the cwd is unchanged", () => 
 	} finally {
 		if (prevHome === undefined) delete process.env.PI_CREW_HOME;
 		else process.env.PI_CREW_HOME = prevHome;
-		fs.rmSync(home, { recursive: true, force: true });
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(home);
+		await removeDirWithRetry(cwd);
 	}
 });

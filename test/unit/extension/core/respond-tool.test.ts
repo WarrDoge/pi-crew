@@ -6,6 +6,7 @@ import test from "node:test";
 import { handleRespond } from "../../../../src/extension/team-tool/respond.ts";
 import { readMailbox } from "../../../../src/state/coordination/mailbox.ts";
 import { createRunManifest, loadRunManifestById, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function createRun(ownerSessionId?: string): {
 	cwd: string;
@@ -38,7 +39,7 @@ function createRun(ownerSessionId?: string): {
 	return { cwd, runId: created.manifest.runId, manifest: created.manifest };
 }
 
-test("handleRespond writes task mailbox and re-queues only waiting task", () => {
+test("handleRespond writes task mailbox and re-queues only waiting task", async () => {
 	const run = createRun();
 	try {
 		saveRunTasks(run.manifest, [
@@ -81,11 +82,11 @@ test("handleRespond writes task mailbox and re-queues only waiting task", () => 
 		assert.equal(mailbox[0]?.body, "continue");
 		assert.equal(mailbox[0]?.taskId, "wait");
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });
 
-test("handleRespond rejects foreign owned run", () => {
+test("handleRespond rejects foreign owned run", async () => {
 	const run = createRun("owner-session");
 	try {
 		saveRunTasks(run.manifest, [
@@ -119,11 +120,11 @@ test("handleRespond rejects foreign owned run", () => {
 			false,
 		);
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });
 
-test("handleRespond allows owning session", () => {
+test("handleRespond allows owning session", async () => {
 	const run = createRun("owner-session");
 	try {
 		saveRunTasks(run.manifest, [
@@ -151,11 +152,11 @@ test("handleRespond allows owning session", () => {
 		const loaded = loadRunManifestById(run.cwd, run.runId);
 		assert.equal(loaded?.tasks.find((task) => task.id === "wait")?.status, "queued");
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });
 
-test("handleRespond rejects non-waiting task", () => {
+test("handleRespond rejects non-waiting task", async () => {
 	const run = createRun();
 	try {
 		saveRunTasks(run.manifest, [
@@ -186,6 +187,6 @@ test("handleRespond rejects non-waiting task", () => {
 		// readMailbox would throw (no task subdirectory); skip validation since the
 		// core assertion (out.isError + message) already passed above.
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });

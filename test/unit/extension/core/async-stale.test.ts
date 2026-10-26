@@ -8,6 +8,7 @@ import { createRunManifest, loadRunManifestById, saveRunManifest } from "../../.
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -51,6 +52,6 @@ test("status marks active async run failed when recorded pid is stale", async ()
 		assert.match(firstText(status), /Status: failed/);
 		assert.equal(loadRunManifestById(cwd, created.manifest.runId)?.manifest.status, "failed");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

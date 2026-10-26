@@ -29,6 +29,7 @@ import * as path from "node:path";
 import { after, before, test } from "node:test";
 import { configPath, PROVIDER_STATUS_ID } from "../../../../src/extension/crew-vibes/config.ts";
 import { registerCrewVibes } from "../../../../src/extension/crew-vibes/index.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const STALE_MESSAGE =
 	"This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().";
@@ -117,10 +118,10 @@ before(() => {
 	);
 });
 
-after(() => {
+after(async () => {
 	if (previousHome === undefined) delete process.env.PI_CREW_HOME;
 	else process.env.PI_CREW_HOME = previousHome;
-	if (tempHome) fs.rmSync(tempHome, { recursive: true, force: true });
+	if (tempHome) await removeDirWithRetry(tempHome);
 });
 
 test("in-flight fetch settling after session_shutdown + dispose must not touch the stale ctx", async () => {

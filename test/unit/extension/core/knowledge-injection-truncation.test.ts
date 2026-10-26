@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { knowledgePath, readKnowledge } from "../../../../src/extension/knowledge-injection.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * Option B (preservation) tee-recovery for knowledge.md head-only truncation.
@@ -15,7 +16,7 @@ import { knowledgePath, readKnowledge } from "../../../../src/extension/knowledg
  * across tests.
  */
 
-test("readKnowledge truncates >2KB and embeds the absolute file path in the marker", () => {
+test("readKnowledge truncates >2KB and embeds the absolute file path in the marker", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-knowledge-trunc-"));
 	try {
 		const crewDir = path.join(cwd, ".crew");
@@ -47,11 +48,11 @@ test("readKnowledge truncates >2KB and embeds the absolute file path in the mark
 		// Mentions the read tool hint.
 		assert.match(out, /use the `read` tool/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("readKnowledge does NOT add a truncation marker when content is under threshold", () => {
+test("readKnowledge does NOT add a truncation marker when content is under threshold", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-knowledge-small-"));
 	try {
 		const crewDir = path.join(cwd, ".crew");
@@ -64,11 +65,11 @@ test("readKnowledge does NOT add a truncation marker when content is under thres
 		assert.equal(out.includes("truncated at"), false, "no marker should appear under threshold");
 		assert.ok(out.includes("A short note."));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("readKnowledge mtime+size cache re-reads on mtime change (marker appears both reads)", () => {
+test("readKnowledge mtime+size cache re-reads on mtime change (marker appears both reads)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-knowledge-cache-"));
 	try {
 		const crewDir = path.join(cwd, ".crew");
@@ -98,11 +99,11 @@ test("readKnowledge mtime+size cache re-reads on mtime change (marker appears bo
 		assert.ok(out2.includes(kPath), "second read marker should embed absolute path");
 		assert.match(out2, /<!-- knowledge\.md truncated at 2000 bytes/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("readKnowledge returns empty string when knowledge file is absent", () => {
+test("readKnowledge returns empty string when knowledge file is absent", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-knowledge-absent-"));
 	try {
 		// No .crew dir, no knowledge.md.
@@ -110,6 +111,6 @@ test("readKnowledge returns empty string when knowledge file is absent", () => {
 		assert.equal(out, "");
 		assert.equal(out.includes("truncated"), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

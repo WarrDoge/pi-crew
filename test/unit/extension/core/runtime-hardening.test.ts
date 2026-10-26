@@ -6,6 +6,7 @@ import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("team run writes progress artifacts and API exposes state", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-runtime-hardening-"));
@@ -56,6 +57,6 @@ test("team run writes progress artifacts and API exposes state", async () => {
 		assert.equal(heartbeat.isError, false);
 		assert.match(firstText(heartbeat), /workerId/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

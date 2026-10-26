@@ -22,6 +22,7 @@ import { withRunLock } from "../../../../src/state/coordination/locks.ts";
 import { activeRunEntries, registerActiveRun, unregisterActiveRun } from "../../../../src/state/stores/active-run-registry.ts";
 import { loadRunManifestById, saveRunManifestAsync, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Use realpath to resolve symlinks (macOS /var/folders → /private/var/folders).
 // Several pi-crew code paths refuse to write through untrusted symlink paths.
@@ -32,7 +33,7 @@ const realTmp = fs.realpathSync(os.tmpdir());
  * registerActiveRun / activeRunEntries in this file never touch the real user
  * registry. Mirrors test/unit/state/stores/active-run-registry.test.ts.
  */
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(realTmp, "pi-crew-resume-live-home-"));
 	// userPiRoot() validates the .pi/agent path exists and is owned by the
@@ -40,27 +41,17 @@ function withIsolatedHome<T>(fn: () => T): T {
 	fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
 /** macOS-CI teardown hardening — mirrors resume-cancel.test.ts. */
-function rmCwd(cwd: string): void {
-	for (let attempt = 0; attempt < 5; attempt++) {
-		try {
-			fs.rmSync(cwd, { recursive: true, force: true });
-			break;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY" || attempt === 4) {
-				console.error(`resume-liveness teardown: unable to remove ${cwd}: ${String(error)}`);
-				break;
-			}
-		}
-	}
+async function rmCwd(cwd: string): Promise<void> {
+	await removeDirWithRetry(cwd);
 }
 
 /** Seed a completed scaffold run and return its runId. */
@@ -122,7 +113,7 @@ test("G12: resume REFUSES a run that is live in the active-run registry — with
 			assert.equal(after.manifest.ownerSessionId, "session-owner", "refused resume must not adopt ownership");
 		} finally {
 			if (runId) unregisterActiveRun(runId);
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });
@@ -169,7 +160,7 @@ test("G12: resume REFUSES a run whose running task holds an unexpired worker cla
 			assert.ok(stillRunning);
 			assert.equal(stillRunning.status, "running", "refused resume must not reset the claimed task");
 		} finally {
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });
@@ -204,7 +195,7 @@ test("G4: forced resume of a DEAD foreign run succeeds and records a security ev
 			assert.equal(forcedEvents[0]?.data?.forcingSessionId, "session-intruder");
 			assert.equal(forcedEvents[0]?.data?.action, "resume");
 		} finally {
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });
@@ -242,7 +233,7 @@ test("review MAJOR: crashed coalesced run (running task WITHOUT claim) stays res
 			assert.ok(rerun);
 			assert.notEqual(rerun.status, "running", "the claim-less running task must have been reset and re-executed");
 		} finally {
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });
@@ -306,7 +297,7 @@ test("review F1: resume re-checks liveness INSIDE the run lock (adoption between
 			assert.equal(after.manifest.status, "running", "the live run must be untouched (no reset, no re-dispatch)");
 		} finally {
 			if (runId) unregisterActiveRun(runId);
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });
@@ -367,7 +358,7 @@ test("review F1: static resume registers in the active-run registry before dispa
 			assert.equal(done.isError, false, `first resume must complete after the freeze lifts: ${textFromToolResult(done)}`);
 		} finally {
 			if (runId) unregisterActiveRun(runId);
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });

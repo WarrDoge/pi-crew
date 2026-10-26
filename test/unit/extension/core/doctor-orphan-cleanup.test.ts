@@ -22,6 +22,7 @@ import { cleanupOrphanSurfacePanes, formatOrphanPaneReport } from "../../../../s
 import type { ZombieScanResult, ZombieSubagent } from "../../../../src/runtime/process/zombie-scanner.ts";
 import { LAUNCH_SCRIPT_TTL_MS } from "../../../../src/runtime/surface/launch-script.ts";
 import type { SurfaceHandle, SurfaceProvider } from "../../../../src/runtime/surface/surface-provider.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function fakeSurfaceProvider(
 	kind: "tmux" | "herdr",
@@ -147,7 +148,7 @@ test("cleanupOrphanSurfacePanes: closes zombie-scan panes through the matching p
 		assert.equal(out.closed.length, 2);
 		assert.equal(out.orphans.length, 2);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -166,7 +167,7 @@ test("cleanupOrphanSurfacePanes: terminal-run manifest panes are closed, active-
 		assert.deepEqual([...tmux.closed].sort(), ["%5", "%6"], "only TERMINAL run panes may be closed — active runs still own theirs");
 		assert.equal(out.orphans.length, 2, "active-run panes must not even be listed as orphans");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -183,7 +184,7 @@ test("cleanupOrphanSurfacePanes: same pane from both sources is deduped to one c
 		assert.deepEqual(tmux.closed, ["%12"], "pane reachable from scan AND manifest closes exactly once");
 		assert.equal(out.orphans.length, 1);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -204,7 +205,7 @@ test("cleanupOrphanSurfacePanes: undetected provider lists panes without closing
 			"note explains which provider was unavailable",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -233,7 +234,7 @@ test("cleanupOrphanSurfacePanes: attach() miss counts as gone, not failure", asy
 		assert.deepEqual(out.gone, ["%12"], "pane not found in mux is reported gone, not failed");
 		assert.equal(out.failures.length, 0);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -261,7 +262,7 @@ test("cleanupOrphanSurfacePanes: closeSurface throw is recorded as failure, scan
 		assert.equal(out.failures[0]?.paneId, "%12");
 		assert.deepEqual(out.closed, ["%13"], "a failing close must not abort the remaining panes");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -285,8 +286,8 @@ test("cleanupOrphanSurfacePanes: orphan launch scripts older than TTL are swept 
 		assert.ok(!fs.existsSync(stale), "stale launch script removed from disk");
 		assert.ok(fs.existsSync(fresh), "in-flight launch script preserved");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(tempBase, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(tempBase);
 	}
 });
 
@@ -313,7 +314,7 @@ test("Task 6: run terminal có surface.tabs → closeTabById từng tabId (KHÔN
 		assert.deepEqual(out.tabsClosed, ["w1", "w2"]);
 		assert.deepEqual(readBackTabs(cwd, "run-terminal").team_A, [], "entry cleared (giữ key rỗng) — cùng shape closeTabForRun");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -332,7 +333,7 @@ test("Task 6: tab đã chết từ trước (mux trả gone) → reported gone, 
 		assert.equal(out.tabFailures.length, 0, "tab mux không còn biết là 'gone', không phải failure");
 		assert.deepEqual(readBackTabs(cwd, "run-terminal").team_A, []);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -350,7 +351,7 @@ test("Task 6: run KHÔNG terminal (running) giữ nguyên tabs — không close,
 		assert.equal(out.orphanTabs.length, 0);
 		assert.deepEqual(readBackTabs(cwd, "run-active").team_A, ["w1"]);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -370,7 +371,7 @@ test("Task 6: closeTabById throw → tabFailures, entry manifest KHÔNG clear (t
 		assert.match(out.tabFailures[0]?.error ?? "", /mux refused/);
 		assert.deepEqual(readBackTabs(cwd, "run-terminal").team_A, ["w1", "w2"], "entry giữ nguyên làm evidence khi chưa dọn xong");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -391,7 +392,7 @@ test("Task 6: provider thiếu closeTabById → tab listed với note, không cl
 		);
 		assert.deepEqual(readBackTabs(cwd, "run-terminal").team_A, ["w1"]);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -408,7 +409,7 @@ test("Task 6: entry tabs rỗng (host đã closeTabForRun) không phải orphan 
 		assert.deepEqual(tab.closeByIdCalls, []);
 		assert.equal(out.orphanTabs.length, 0);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

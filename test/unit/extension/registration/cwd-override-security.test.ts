@@ -4,8 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { resolveCwdOverride } from "../../../../src/extension/registration/team-tool.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
-test("resolveCwdOverride rejects directories outside the base cwd", () => {
+test("resolveCwdOverride rejects directories outside the base cwd", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-cwd-"));
 	try {
 		const base = path.join(root, "base");
@@ -16,11 +17,11 @@ test("resolveCwdOverride rejects directories outside the base cwd", () => {
 		assert.equal(result.ok, false);
 		assert.match(result.error, /Invalid cwd override|outside/);
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });
 
-test("resolveCwdOverride allows contained child directories", () => {
+test("resolveCwdOverride allows contained child directories", async () => {
 	let root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-cwd-"));
 	try {
 		// Canonicalize to long-name form matching production code (projectCrewRoot uses .native)
@@ -36,6 +37,6 @@ test("resolveCwdOverride allows contained child directories", () => {
 		assert.equal(result.ok, true);
 		if (result.ok) assert.equal(result.cwd, fs.realpathSync.native(child));
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	}
 });

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("worker prompts include read-only contract and mailbox coordination bridge", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-gap-prompt-"));
@@ -31,7 +32,7 @@ test("worker prompts include read-only contract and mailbox coordination bridge"
 		assert.match(prompt, /READ-ONLY ROLE CONTRACT|## read-only-explorer/);
 		assert.match(prompt, /Crew Coordination Channel/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -91,6 +92,6 @@ test("nudge-agent records a mailbox message for the target agent", async () => {
 		);
 		assert.match(firstText(mailbox), /status please/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

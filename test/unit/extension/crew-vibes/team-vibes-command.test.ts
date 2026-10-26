@@ -21,6 +21,7 @@ import * as path from "node:path";
 import { after, before, test } from "node:test";
 import { configPath, loadConfig } from "../../../../src/extension/crew-vibes/config.ts";
 import { registerCrewVibes } from "../../../../src/extension/crew-vibes/index.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 type Handler = (args: string, ctx: never) => Promise<void>;
 
@@ -66,10 +67,10 @@ before(() => {
 	fs.writeFileSync(configPath(), JSON.stringify({ enabled: false, capacity: { enabled: true, providerUsage: false } }));
 });
 
-after(() => {
+after(async () => {
 	if (previousHome === undefined) delete process.env.PI_CREW_HOME;
 	else process.env.PI_CREW_HOME = previousHome;
-	if (tempHome) fs.rmSync(tempHome, { recursive: true, force: true });
+	if (tempHome) await removeDirWithRetry(tempHome);
 });
 
 test("no-arg → status output, no exceptions", async () => {

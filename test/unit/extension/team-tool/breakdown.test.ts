@@ -18,6 +18,7 @@ import { createRunManifest, saveRunManifest } from "../../../../src/state/stores
 import type { ArtifactDescriptor, TeamRunManifest } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeCtx(overrides: Partial<TeamContext> = {}): TeamContext {
 	return { cwd: "/tmp/breakdown-test", ...overrides };
@@ -101,7 +102,7 @@ describe("handleBreakdown", () => {
 		assert.ok(textFromToolResult(res).includes("runId"));
 	});
 
-	it("lists every task that has a breakdown, with per-task totals and the run total", () => {
+	it("lists every task that has a breakdown, with per-task totals and the run total", async () => {
 		const { cwd, runId } = makeRunWithBreakdowns({
 			"01_plan": { "system.agentDefinition": { chars: 1000, estTokens: 250 }, "prompt.task": { chars: 400, estTokens: 100 } },
 			"02_execute": {
@@ -124,11 +125,11 @@ describe("handleBreakdown", () => {
 			assert.equal(data.perTask.length, 2);
 			assert.equal(data.runTotal, 1050);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("filters to a single task when taskId is provided", () => {
+	it("filters to a single task when taskId is provided", async () => {
 		const { cwd, runId } = makeRunWithBreakdowns({
 			"01_plan": { "system.agentDefinition": { chars: 1000, estTokens: 250 } },
 			"02_execute": { "system.agentDefinition": { chars: 2000, estTokens: 500 } },
@@ -144,11 +145,11 @@ describe("handleBreakdown", () => {
 			assert.equal(data.perTask[0]?.taskId, "02_execute");
 			assert.equal(data.runTotal, 500);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("suggests enabling PI_CREW_PROMPT_BREAKDOWN=1 when the run has no breakdown artifacts", () => {
+	it("suggests enabling PI_CREW_PROMPT_BREAKDOWN=1 when the run has no breakdown artifacts", async () => {
 		const { cwd, runId } = makeRunWithBreakdowns({});
 		try {
 			const res = handleBreakdown(makeParams({ runId }), makeCtx({ cwd }));
@@ -158,11 +159,11 @@ describe("handleBreakdown", () => {
 			const data = res.details.data as { runTotal: number; perTask: unknown[] };
 			assert.equal(data.perTask.length, 0);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("reports the top-5 sections per task in descending estTokens order", () => {
+	it("reports the top-5 sections per task in descending estTokens order", async () => {
 		const sections: Record<string, { chars: number; estTokens: number }> = {
 			"section.a": { chars: 100, estTokens: 25 },
 			"section.b": { chars: 800, estTokens: 200 },
@@ -190,7 +191,7 @@ describe("handleBreakdown", () => {
 			);
 			assert.ok(task?.topSections.every((s, i, arr) => i === 0 || arr[i - 1].estTokens >= s.estTokens));
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

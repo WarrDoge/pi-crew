@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("import action stores exported run bundles", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-import-test-"));
@@ -35,6 +36,6 @@ test("import action stores exported run bundles", async () => {
 		assert.ok(fs.existsSync(path.join(importRoot, "README.md")));
 		assert.match(fs.readFileSync(path.join(importRoot, "README.md"), "utf-8"), /Imported pi-crew run/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -13,6 +13,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "test-team",
@@ -43,11 +44,11 @@ function beforeEachFn() {
 	// mutating the global cwd corrupts sibling test files. Pass cwd explicitly.
 }
 
-function afterEachFn() {
+async function afterEachFn() {
 	if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 	else process.env.PI_TEAMS_HOME = previousHome;
 	try {
-		fs.rmSync(tmpCwd, { recursive: true, force: true });
+		await removeDirWithRetry(tmpCwd);
 	} catch {
 		/* ignore */
 	}

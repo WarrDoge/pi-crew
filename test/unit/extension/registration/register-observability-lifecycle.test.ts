@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { registerPiTeams } from "../../../../src/extension/register.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function createEventBus() {
 	const handlers = new Map<string, Set<(payload: unknown) => void>>();
@@ -57,7 +58,7 @@ function createFakePi(events: ReturnType<typeof createEventBus>) {
 	};
 }
 
-test("registerPiTeams leaves no observability event subscriptions after repeated session shutdown", () => {
+test("registerPiTeams leaves no observability event subscriptions after repeated session shutdown", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-lifecycle-test-"));
 	try {
 		fs.writeFileSync(path.join(cwd, "package.json"), "{}\n", "utf-8");
@@ -87,6 +88,6 @@ test("registerPiTeams leaves no observability event subscriptions after repeated
 			assert.equal(events.totalSubscriptions(), 0, `cycle ${index + 1} leaked event subscriptions`);
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

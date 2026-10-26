@@ -6,8 +6,9 @@ import test from "node:test";
 import { allAgents, discoverAgents } from "../../../../src/agents/discover-agents.ts";
 import { recommendTeam } from "../../../../src/extension/team-recommendation.ts";
 import { allTeams, discoverTeams } from "../../../../src/teams/discover-teams.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
-test("routing metadata is parsed and used by recommendation", () => {
+test("routing metadata is parsed and used by recommendation", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-routing-meta-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew", "agents"), { recursive: true });
@@ -29,6 +30,6 @@ test("routing metadata is parsed and used by recommendation", () => {
 		assert.equal(recommendation.team, "frontend");
 		assert.match(recommendation.reasons.join("\n"), /routing metadata/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

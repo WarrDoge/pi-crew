@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { locateRunCwd } from "../../../../src/extension/team-tool.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Minimal team/workflow stubs needed by createRunManifest
 const team = {
@@ -42,7 +43,7 @@ function mkNonProjectDir(prefix: string, base?: string): string {
 	return fs.mkdtempSync(path.join(base ?? os.tmpdir(), prefix));
 }
 
-test("finds run in same CWD", () => {
+test("finds run in same CWD", async () => {
 	const cwd = mkProjectDir("pi-crew-locate-same-");
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -54,11 +55,11 @@ test("finds run in same CWD", () => {
 		});
 		assert.equal(locateRunCwd(manifest.runId, cwd), cwd);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("finds run in child directory CWD", () => {
+test("finds run in child directory CWD", async () => {
 	const base = mkProjectDir("pi-crew-locate-child-");
 	const child = path.join(base, "child");
 	fs.mkdirSync(path.join(child, ".crew"), { recursive: true });
@@ -71,20 +72,20 @@ test("finds run in child directory CWD", () => {
 		});
 		assert.equal(locateRunCwd(manifest.runId, base), child);
 	} finally {
-		fs.rmSync(base, { recursive: true, force: true });
+		await removeDirWithRetry(base);
 	}
 });
 
-test("returns undefined for non-existent run", () => {
+test("returns undefined for non-existent run", async () => {
 	const cwd = mkProjectDir("pi-crew-locate-none-");
 	try {
 		assert.equal(locateRunCwd("does_not_exist_abc123", cwd), undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("returns undefined for a cwd unrelated to the run's project root", () => {
+test("returns undefined for a cwd unrelated to the run's project root", async () => {
 	// Isolation boundary that still holds: a run living under project A's root
 	// is NOT discoverable from an unrelated cwd B (no ancestor relationship, no
 	// user-root hit). The reverse case — a run in a CHILD project being found
@@ -109,8 +110,8 @@ test("returns undefined for a cwd unrelated to the run's project root", () => {
 		);
 		assert.equal(locateRunCwd(manifest.runId, unrelated), undefined);
 	} finally {
-		fs.rmSync(projectA, { recursive: true, force: true });
-		fs.rmSync(unrelated, { recursive: true, force: true });
+		await removeDirWithRetry(projectA);
+		await removeDirWithRetry(unrelated);
 	}
 });
 
@@ -124,7 +125,7 @@ test("returns undefined for a cwd unrelated to the run's project root", () => {
  * Measured live in the real session: `action='list'` returned 10 user-root
  * runs and `action='status'` failed 10/10 of them.
  */
-test("finds a run that lives under the USER root from a project cwd (list/status parity)", () => {
+test("finds a run that lives under the USER root from a project cwd (list/status parity)", async () => {
 	const prevHome = process.env.PI_CREW_HOME;
 	const prevTeams = process.env.PI_TEAMS_HOME;
 	const prevOsHome = process.env.HOME;
@@ -160,7 +161,7 @@ test("finds a run that lives under the USER root from a project cwd (list/status
 		else process.env.HOME = prevOsHome;
 		if (prevUserProfile === undefined) delete process.env.USERPROFILE;
 		else process.env.USERPROFILE = prevUserProfile;
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(fakeHome, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(fakeHome);
 	}
 });

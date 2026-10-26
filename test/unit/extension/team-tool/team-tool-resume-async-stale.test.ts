@@ -35,6 +35,7 @@ import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { textFromToolResult } from "../../../../src/extension/tool-result.ts";
 import { createRunManifest, loadRunManifestById, saveRunManifest, saveRunManifestAsync } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Use realpath to resolve symlinks (macOS /var/folders → /private/var/folders).
 const realTmp = fs.realpathSync(os.tmpdir());
@@ -52,7 +53,7 @@ test.after(() => {
 /** Isolate PI_TEAMS_HOME (the TEAMS??CREW mirror winner) so registerActiveRun /
  * activeRunEntries in this file never touch the real user registry. Mirrors
  * team-tool-resume-liveness.test.ts. */
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(realTmp, "pi-crew-resume-async-home-"));
 	// userPiRoot() validates the .pi/agent path exists and is owned by the
@@ -60,27 +61,17 @@ function withIsolatedHome<T>(fn: () => T): T {
 	fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
 /** macOS-CI teardown hardening — mirrors team-tool-resume-liveness.test.ts. */
-function rmCwd(cwd: string): void {
-	for (let attempt = 0; attempt < 5; attempt++) {
-		try {
-			fs.rmSync(cwd, { recursive: true, force: true });
-			break;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY" || attempt === 4) {
-				console.error(`resume-async teardown: unable to remove ${cwd}: ${String(error)}`);
-				break;
-			}
-		}
-	}
+async function rmCwd(cwd: string): Promise<void> {
+	await removeDirWithRetry(cwd);
 }
 
 /** Seed a completed scaffold run and return its runId. */
@@ -176,7 +167,7 @@ test("W-C2: resume of a completed ASYNC run drops the dead detached-runner point
 			const last = resumeRequested[resumeRequested.length - 1]?.data as Record<string, unknown> | undefined;
 			assert.equal(last?.clearedAsyncPid, deadPid, "run.resume_requested must audit clearedAsyncPid");
 		} finally {
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });
@@ -210,7 +201,7 @@ test("W-C2 guard: genuine dead detached runners STILL flip via status — the fi
 				"async.stale event must be recorded",
 			);
 		} finally {
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });
@@ -241,7 +232,7 @@ test("G12 pin: resume still REFUSES a run whose detached async pid is ALIVE (gat
 			assert.match(textFromToolResult(forced), /live/i);
 		} finally {
 			child.kill("SIGKILL");
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });
@@ -264,7 +255,7 @@ test("sync contrast: resume of a completed SYNC run (no async block) still compl
 			assert.equal(after.manifest.status, "completed");
 			assert.equal(after.manifest.async, undefined);
 		} finally {
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });
@@ -325,7 +316,7 @@ test("W-C2: special-kind adoption (dynamic-workflow) drops the stale async point
 			const last = resumeRequested[resumeRequested.length - 1]?.data as Record<string, unknown> | undefined;
 			assert.equal(last?.clearedAsyncPid, deadPid, "dwf run.resume_requested must audit clearedAsyncPid");
 		} finally {
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });

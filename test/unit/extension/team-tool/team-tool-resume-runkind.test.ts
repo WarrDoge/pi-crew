@@ -23,6 +23,7 @@ import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { textFromToolResult } from "../../../../src/extension/tool-result.ts";
 import { createRunManifest, loadRunManifestById, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Use realpath to resolve symlinks (macOS /var/folders → /private/var/folders).
 const realTmp = fs.realpathSync(os.tmpdir());
@@ -38,32 +39,22 @@ test.after(() => {
 
 /** Isolate PI_TEAMS_HOME (TEAMS??CREW mirror winner) so the resume path's
  * registerActiveRun/unregisterActiveRun never touch the real user registry. */
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(realTmp, "pi-crew-resume-kind-home-"));
 	fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
-function rmCwd(cwd: string): void {
-	for (let attempt = 0; attempt < 5; attempt++) {
-		try {
-			fs.rmSync(cwd, { recursive: true, force: true });
-			break;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOTEMPTY" || attempt === 4) {
-				console.error(`resume-runkind teardown: unable to remove ${cwd}: ${String(error)}`);
-				break;
-			}
-		}
-	}
+async function rmCwd(cwd: string): Promise<void> {
+	await removeDirWithRetry(cwd);
 }
 
 /** Craft a CRASHED special-kind run (mirrors run.ts creation shapes): a
@@ -128,7 +119,7 @@ test("G11: resume of a dynamic-workflow run dispatches the DWF engine and preser
 			const events = fs.readFileSync(after.manifest.eventsPath, "utf-8");
 			assert.match(events, /"type":"dwf\.started"/, "events must show the DWF runner started");
 		} finally {
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });
@@ -146,7 +137,7 @@ test("G11: resume of a goal-loop run without goal state gives an engine-level er
 			assert.doesNotMatch(text, /Team 'goal-/, "must NOT fail with the static team-lookup error");
 			assert.match(text, /GoalLoopState|goal-loop/i, "error must name the missing goal-loop state/engine");
 		} finally {
-			rmCwd(cwd);
+			await rmCwd(cwd);
 		}
 	});
 });

@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { getSecurityEventLog, registerDynamicAgent } from "../../../../src/agents/discover-agents.ts";
 import { buildTeamDoctorReport } from "../../../../src/extension/team-tool/doctor.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("doctor report includes structured sections", () => {
 	const report = buildTeamDoctorReport({
@@ -31,7 +32,7 @@ test("doctor report includes structured sections", () => {
 	assert.equal(report.hasErrors, false);
 });
 
-test("doctor report does not create missing state directories", () => {
+test("doctor report does not create missing state directories", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-doctor-report-"));
 	const projectState = path.join(cwd, ".crew");
 	const artifactsRoot = path.join(projectState, "artifacts");
@@ -49,7 +50,7 @@ test("doctor report does not create missing state directories", () => {
 		assert.ok(!fs.existsSync(projectState));
 		assert.ok(!fs.existsSync(artifactsRoot));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

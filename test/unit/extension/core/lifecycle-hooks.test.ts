@@ -15,6 +15,7 @@ import {
 	saveRunTasks,
 	updateRunStatus,
 } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function createRun(ownerSessionId = "session-a"): {
 	cwd: string;
@@ -79,7 +80,7 @@ describe("before_cancel hook", () => {
 				events.some((e) => e.type === "hook.executed" && e.data?.hookName === "before_cancel" && e.data?.outcome === "allow"),
 			);
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 
@@ -124,7 +125,7 @@ describe("before_cancel hook", () => {
 			assert.equal(after.manifest.status, "completed");
 			assert.equal(after.tasks[0].status, "completed");
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 
@@ -165,7 +166,7 @@ describe("before_cancel hook", () => {
 			assert.equal(after.tasks[0].status, "running");
 			assert.equal(after.manifest.status, "running");
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 
@@ -197,7 +198,7 @@ describe("before_cancel hook", () => {
 			assert.match(textFromToolResult(out), /Maintenance window/);
 			assert.equal(loadRunManifestById(run.cwd, run.runId)?.manifest.status, "queued");
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 });
@@ -221,7 +222,7 @@ describe("before_forget hook", () => {
 			assert.ok(!fs.existsSync(stateRoot));
 			assert.ok(!fs.existsSync(artifactsRoot));
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 
@@ -241,7 +242,7 @@ describe("before_forget hook", () => {
 			assert.match(textFromToolResult(out), /Audit hold/);
 			assert.ok(fs.existsSync(run.manifest.stateRoot));
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 });
@@ -316,7 +317,7 @@ describe("before_retry hook gap regression (R13-1)", () => {
 			assert.equal(after.tasks[0].finishedAt, "2026-08-13T00:01:00.000Z");
 			assert.ok(after.tasks[0].terminalEvidence?.some((e) => e.status === "completed"));
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 });
@@ -369,7 +370,7 @@ describe("before_retry ownership re-check (Security S1)", () => {
 			const after = loadRunManifestById(run.cwd, run.runId)!;
 			assert.equal(after.tasks[0].status, "failed");
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 
@@ -391,7 +392,7 @@ describe("before_retry ownership re-check (Security S1)", () => {
 			const after = loadRunManifestById(run.cwd, run.runId)!;
 			assert.equal(after.tasks[0].status, "queued");
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 });
@@ -418,7 +419,7 @@ describe("before_cleanup hook", () => {
 				events.some((e) => e.type === "hook.executed" && e.data?.hookName === "before_cleanup" && e.data?.outcome === "allow"),
 			);
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 
@@ -440,7 +441,7 @@ describe("before_cleanup hook", () => {
 			assert.equal(out.isError, true);
 			assert.match(textFromToolResult(out), /Active worktrees/);
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(run.cwd);
 		}
 	});
 });

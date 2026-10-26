@@ -8,6 +8,7 @@ import { handleCancel } from "../../../../src/extension/team-tool/cancel.ts";
 import { handleCleanup } from "../../../../src/extension/team-tool/lifecycle-actions.ts";
 import { textFromToolResult } from "../../../../src/extension/tool-result.ts";
 import { createRunManifest, loadRunManifestById, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const policy = { policy: { requireIntentForDestructiveActions: true } };
 
@@ -75,7 +76,7 @@ test("cancel is blocked by intent policy before state mutation", async () => {
 		assert.equal(loadRunManifestById(run.cwd, run.runId)?.manifest.status, "queued");
 		assert.equal(loadRunManifestById(run.cwd, run.runId)?.tasks[0]?.status, "running");
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });
 
@@ -110,7 +111,7 @@ test("cancel proceeds when required intent is supplied", async () => {
 		assert.equal(out.details.intent, "stop runaway background worker");
 		assert.equal(loadRunManifestById(run.cwd, run.runId)?.manifest.status, "cancelled");
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });
 
@@ -137,6 +138,6 @@ test("cleanup requires intent only when force is set", async () => {
 		assert.equal(forced.isError, true);
 		assert.match(textFromToolResult(forced), /requires config\.intent/);
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });

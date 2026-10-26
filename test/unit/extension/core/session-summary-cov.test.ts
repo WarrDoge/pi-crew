@@ -40,6 +40,7 @@ import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../../sr
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import { clearProjectRootCache } from "../../../../src/utils/paths.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 interface MockCtx {
 	cwd: string;
@@ -61,7 +62,7 @@ function makeCtx(dir: string): MockCtx {
 }
 
 describe("notifyActiveRuns does not crash with empty temp cwd", () => {
-	it("executes without throwing on a directory with no project markers", () => {
+	it("executes without throwing on a directory with no project markers", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-summary-cov-"));
 		clearProjectRootCache();
 		// No .git, no .crew — findRepoRoot returns undefined
@@ -72,7 +73,7 @@ describe("notifyActiveRuns does not crash with empty temp cwd", () => {
 			assert.ok(true, "should complete without error");
 		} finally {
 			clearProjectRootCache();
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 });
@@ -132,7 +133,7 @@ const workflow: WorkflowConfig = {
 /* Vector #11: notifyActiveRuns must never surface another session's runs in the
  * active-runs toast — session B must not advertise session A's in-flight runs. */
 describe("notifyActiveRuns filters out runs owned by another session (vector #11)", () => {
-	it("skips a run owned by a different pi session, surfaces it for the owning session", () => {
+	it("skips a run owned by a different pi session, surfaces it for the owning session", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "session-summary-xsession-"));
 		fs.mkdirSync(path.join(dir, ".crew"));
 		const calls: string[] = [];
@@ -177,7 +178,7 @@ describe("notifyActiveRuns filters out runs owned by another session (vector #11
 			assert.match(calls[0]!, /pi-crew active runs/);
 		} finally {
 			clearProjectRootCache();
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 });

@@ -11,6 +11,7 @@ import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts
 import { allTeams, discoverTeams } from "../../../../src/teams/discover-teams.ts";
 import { allWorkflows, discoverWorkflows } from "../../../../src/workflows/discover-workflows.ts";
 import { validateWorkflowForTeam } from "../../../../src/workflows/validate-workflow.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function restoreEnv(name: string, previous: string | undefined): void {
 	if (previous === undefined) delete process.env[name];
@@ -163,7 +164,7 @@ test("implementation run injects planner-selected multi-agent ready batches", as
 		if (runId) unregisterActiveRun(runId);
 		restoreEnv("PI_TEAMS_EXECUTE_WORKERS", previousExecute);
 		restoreEnv("PI_TEAMS_MOCK_CHILD_PI", previousMock);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -206,6 +207,6 @@ test("default workflow is adaptive — the plan comes from the goal, not phase t
 		if (runId) unregisterActiveRun(runId);
 		restoreEnv("PI_TEAMS_EXECUTE_WORKERS", previousExecute);
 		restoreEnv("PI_TEAMS_MOCK_CHILD_PI", previousMock);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("management create persists routing metadata", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-management-routing-"));
@@ -33,6 +34,6 @@ test("management create persists routing metadata", async () => {
 		assert.match(content, /cost: cheap/);
 		assert.match(content, /category: routing/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

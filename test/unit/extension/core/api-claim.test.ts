@@ -18,6 +18,7 @@ import { createRunManifest, loadRunManifestById, saveRunTasks } from "../../../.
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("api supports claim, transition, and release task claim", async () => {
 	const cwd = createTrackedTempDir("pi-crew-api-claim-");
@@ -77,7 +78,7 @@ test("api supports claim, transition, and release task claim", async () => {
 		);
 		assert.equal(release.isError, false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -171,7 +172,7 @@ test("R13-S1: transition-task-status rejects when task became terminal on disk (
 		assert.equal(after.tasks[0]!.status, "completed");
 		assert.equal(after.tasks[0]!.claim?.owner, "tester");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -197,7 +198,7 @@ test("R13-S1: claim-task derives from fresh tasks (terminal status on disk is no
 		const after = loadRunManifestById(cwd, runId)!;
 		assert.equal(after.tasks[0]!.status, "failed");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -223,7 +224,7 @@ test("R13-S1: write-heartbeat does not resurrect a task that became terminal on 
 		assert.equal(after.tasks[0]!.status, "completed");
 		assert.equal(after.tasks[0]!.heartbeat, undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -255,6 +256,6 @@ test("R13-S1: release-task-claim derives from fresh tasks (terminal status prese
 		assert.equal(after.tasks[0]!.status, "completed");
 		assert.equal(after.tasks[0]!.claim, undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

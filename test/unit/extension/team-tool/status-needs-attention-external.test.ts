@@ -17,6 +17,7 @@ import { textFromToolResult } from "../../../../src/extension/tool-result.ts";
 import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -37,7 +38,7 @@ const workflow: WorkflowConfig = {
 const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
 
 describe("status needsAttention external signal (R48-N1)", () => {
-	it("surfaces a stale running task even when the worker never self-reports needs_attention", () => {
+	it("surfaces a stale running task even when the worker never self-reports needs_attention", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-n1-"));
 		try {
 			fs.writeFileSync(path.join(cwd, "package.json"), "{}\n");
@@ -60,11 +61,11 @@ describe("status needsAttention external signal (R48-N1)", () => {
 			assert.match(out, new RegExp(`- needsAttention=${taskId}`), "stale task folded into needsAttention");
 			assert.match(out, /- unresponsive=.*stale/, "external heartbeat-age signal surfaced");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("keeps needsAttention=none for a recently active task (no false positive)", () => {
+	it("keeps needsAttention=none for a recently active task (no false positive)", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-n1-"));
 		try {
 			fs.writeFileSync(path.join(cwd, "package.json"), "{}\n");
@@ -85,7 +86,7 @@ describe("status needsAttention external signal (R48-N1)", () => {
 			assert.match(out, /- needsAttention=none/);
 			assert.match(out, /- unresponsive=none/);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

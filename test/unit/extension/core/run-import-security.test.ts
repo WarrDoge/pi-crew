@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { importRunBundle } from "../../../../src/extension/run-import.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function isUsableDirectoryLink(linkPath: string): boolean {
 	try {
@@ -64,7 +65,7 @@ function bundle(runId: string) {
 	};
 }
 
-test("importRunBundle rejects unsafe run ids", () => {
+test("importRunBundle rejects unsafe run ids", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-import-safe-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -73,11 +74,11 @@ test("importRunBundle rejects unsafe run ids", () => {
 		assert.throws(() => importRunBundle(cwd, bundlePath), /Invalid runId/);
 		assert.equal(fs.existsSync(path.join(cwd, "outside", "run-export.json")), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("importRunBundle rejects symlinked imports root", (t) => {
+test("importRunBundle rejects symlinked imports root", async (t) => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-import-root-symlink-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -94,11 +95,11 @@ test("importRunBundle rejects symlinked imports root", (t) => {
 		assert.throws(() => importRunBundle(cwd, bundlePath), /Invalid import root|Path is outside/);
 		assert.equal(fs.existsSync(path.join(outside, runId, "run-export.json")), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("importRunBundle rejects symlinked import directories", (t) => {
+test("importRunBundle rejects symlinked import directories", async (t) => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-import-symlink-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew", "imports"), { recursive: true });
@@ -115,6 +116,6 @@ test("importRunBundle rejects symlinked import directories", (t) => {
 		assert.throws(() => importRunBundle(cwd, bundlePath), /Invalid import directory|Path is outside/);
 		assert.equal(fs.existsSync(path.join(outside, "run-export.json")), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

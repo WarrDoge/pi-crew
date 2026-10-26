@@ -19,6 +19,7 @@ import type { TeamToolParamsValue } from "../../../../src/schema/team-tool-schem
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeCtx(overrides: Partial<TeamContext> = {}): TeamContext {
 	return { cwd: "/tmp/inspect-test", ...overrides };
@@ -99,7 +100,7 @@ describe("handleEvents", () => {
 		assert.strictEqual(res.details.action, "events");
 	});
 
-	it("shows a truncation indicator and drops the oldest events when the run exceeds 500 events", () => {
+	it("shows a truncation indicator and drops the oldest events when the run exceeds 500 events", async () => {
 		const { cwd, runId } = makeRunWithEvents(505);
 		try {
 			const res = handleEvents(makeParams({ runId }), makeCtx({ cwd }));
@@ -117,11 +118,11 @@ describe("handleEvents", () => {
 			assert.ok(!text.includes("ev-0005"), "5th-oldest event must be dropped by the 500-event slice");
 			assert.equal((text.match(/ev-\d{4}/g) ?? []).length, 500, "exactly 500 events displayed");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("shows no truncation indicator when the run has 500 or fewer events", () => {
+	it("shows no truncation indicator when the run has 500 or fewer events", async () => {
 		const { cwd, runId } = makeRunWithEvents(3);
 		try {
 			const res = handleEvents(makeParams({ runId }), makeCtx({ cwd }));
@@ -130,7 +131,7 @@ describe("handleEvents", () => {
 			assert.ok(!text.includes("showing last"), `no indicator expected, got: ${text.slice(0, 200)}`);
 			assert.ok(text.includes("ev-0001"), "all events displayed");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

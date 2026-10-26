@@ -16,6 +16,7 @@ import {
 	parsePlanDocumentSimple,
 	TAG_TO_CHAIN,
 } from "../../../../src/extension/plan-orchestrate.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ─── TAG_TO_CHAIN ────────────────────────────────────────────────────────────
 
@@ -30,7 +31,7 @@ test("TAG_TO_CHAIN maps all expected tags to agent chains", () => {
 
 // ─── parsePlanDocument ────────────────────────────────────────────────────────
 
-test("parsePlanDocument parses tagged sections from a plan document", () => {
+test("parsePlanDocument parses tagged sections from a plan document", async () => {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-orchestrate-"));
 	const tempFile = path.join(tempDir, "plan.md");
 	fs.writeFileSync(
@@ -66,10 +67,10 @@ Write unit tests for the auth middleware.
 	assert.deepStrictEqual(steps[2].chain, ["test-engineer", "verifier"]);
 	assert.strictEqual(steps[2].stepId, "step-03-test");
 
-	fs.rmSync(tempDir, { recursive: true, force: true });
+	await removeDirWithRetry(tempDir);
 });
 
-test("parsePlanDocument handles multiple sections with same tag", () => {
+test("parsePlanDocument handles multiple sections with same tag", async () => {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-orchestrate-"));
 	const tempFile = path.join(tempDir, "plan2.md");
 	fs.writeFileSync(
@@ -90,14 +91,14 @@ Second design section.
 	assert.strictEqual(steps[0].stepId, "step-01-design");
 	assert.strictEqual(steps[1].stepId, "step-02-design");
 
-	fs.rmSync(tempDir, { recursive: true, force: true });
+	await removeDirWithRetry(tempDir);
 });
 
 test("parsePlanDocument throws when file not found", () => {
 	assert.throws(() => parsePlanDocument("/nonexistent/plan.md"), /Plan document not found/);
 });
 
-test("parsePlanDocument handles unknown tags gracefully", () => {
+test("parsePlanDocument handles unknown tags gracefully", async () => {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-orchestrate-"));
 	const tempFile = path.join(tempDir, "plan3.md");
 	fs.writeFileSync(
@@ -114,10 +115,10 @@ Content with unknown tag.
 	assert.strictEqual(steps[0].tag, "unknown");
 	assert.deepStrictEqual(steps[0].chain, []);
 
-	fs.rmSync(tempDir, { recursive: true, force: true });
+	await removeDirWithRetry(tempDir);
 });
 
-test("parsePlanDocument handles multiline prompts", () => {
+test("parsePlanDocument handles multiline prompts", async () => {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-orchestrate-"));
 	const tempFile = path.join(tempDir, "plan4.md");
 	fs.writeFileSync(
@@ -137,12 +138,12 @@ Third paragraph for completeness.
 	assert.ok(steps[0].prompt.includes("Second paragraph"));
 	assert.ok(steps[0].prompt.includes("Third paragraph"));
 
-	fs.rmSync(tempDir, { recursive: true, force: true });
+	await removeDirWithRetry(tempDir);
 });
 
 // ─── parsePlanDocumentSimple ─────────────────────────────────────────────────
 
-test("parsePlanDocumentSimple parses sections using simple tag-based splitting", () => {
+test("parsePlanDocumentSimple parses sections using simple tag-based splitting", async () => {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-orchestrate-"));
 	const tempFile = path.join(tempDir, "plan-simple.md");
 	fs.writeFileSync(
@@ -167,10 +168,10 @@ Review the implementation.
 	assert.strictEqual(steps[1].tag, "impl");
 	assert.strictEqual(steps[2].tag, "review");
 
-	fs.rmSync(tempDir, { recursive: true, force: true });
+	await removeDirWithRetry(tempDir);
 });
 
-test("parsePlanDocumentSimple handles sections with heading before tag", () => {
+test("parsePlanDocumentSimple handles sections with heading before tag", async () => {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-orchestrate-"));
 	const tempFile = path.join(tempDir, "plan-simple2.md");
 	fs.writeFileSync(
@@ -187,10 +188,10 @@ Write the code here.
 	assert.strictEqual(steps[0].tag, "impl");
 	assert.strictEqual(steps[0].heading, "Implementation Phase");
 
-	fs.rmSync(tempDir, { recursive: true, force: true });
+	await removeDirWithRetry(tempDir);
 });
 
-test("parsePlanDocumentSimple returns empty array for plan with no tags", () => {
+test("parsePlanDocumentSimple returns empty array for plan with no tags", async () => {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-orchestrate-"));
 	const tempFile = path.join(tempDir, "plan-empty.md");
 	fs.writeFileSync(tempFile, "No tagged sections in this plan.");
@@ -199,7 +200,7 @@ test("parsePlanDocumentSimple returns empty array for plan with no tags", () => 
 
 	assert.strictEqual(steps.length, 0);
 
-	fs.rmSync(tempDir, { recursive: true, force: true });
+	await removeDirWithRetry(tempDir);
 });
 
 // ─── buildAgentChain ─────────────────────────────────────────────────────────
@@ -263,7 +264,7 @@ test("buildChainData returns structured data with commands", () => {
 
 // ─── formatPlanOverview ─────────────────────────────────────────────────────
 
-test("formatPlanOverview formats overview with step count and breakdown", () => {
+test("formatPlanOverview formats overview with step count and breakdown", async () => {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-orchestrate-"));
 	const tempFile = path.join(tempDir, "overview-plan.md");
 	fs.writeFileSync(
@@ -285,10 +286,10 @@ Implement the feature.
 	assert.ok(overview.includes("impl: 1 step(s)"));
 	assert.ok(overview.includes("step-01-design"));
 
-	fs.rmSync(tempDir, { recursive: true, force: true });
+	await removeDirWithRetry(tempDir);
 });
 
-test("formatPlanOverview indicates when no tags found", () => {
+test("formatPlanOverview indicates when no tags found", async () => {
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "plan-orchestrate-"));
 	const tempFile = path.join(tempDir, "no-tags.md");
 	fs.writeFileSync(tempFile, "No tagged sections here.");
@@ -297,7 +298,7 @@ test("formatPlanOverview indicates when no tags found", () => {
 
 	assert.ok(overview.includes("No tagged sections"));
 
-	fs.rmSync(tempDir, { recursive: true, force: true });
+	await removeDirWithRetry(tempDir);
 });
 
 // ─── orchestratePlan ─────────────────────────────────────────────────────────
@@ -321,7 +322,7 @@ Review the authentication implementation for vulnerabilities.
 	assert.ok(result.chain[0].includes("security-reviewer"));
 	assert.ok(result.overview.includes("Security Review"));
 
-	fs.rmSync(tempDir, { recursive: true, force: true });
+	await removeDirWithRetry(tempDir);
 });
 
 test("orchestratePlan throws when no tags found", async () => {
@@ -333,5 +334,5 @@ test("orchestratePlan throws when no tags found", async () => {
 		message: /No tagged sections found/,
 	});
 
-	fs.rmSync(tempDir, { recursive: true, force: true });
+	await removeDirWithRetry(tempDir);
 });

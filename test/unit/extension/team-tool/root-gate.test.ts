@@ -21,6 +21,7 @@ import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { textFromToolResult } from "../../../../src/extension/tool-result.ts";
 import type { TeamToolParamsValue } from "../../../../src/schema/team-tool-schema.ts";
 import { userPiRoot } from "../../../../src/utils/paths.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const WORKER_ENV = { PI_CREW_KIND: "subagent", PI_CREW_DEPTH: "1" } as const;
 const ROOT_ENV = { PI_CREW_KIND: "", PI_CREW_DEPTH: "0" } as const;
@@ -248,14 +249,14 @@ describe("handleTeamTool root-gate (end-to-end, round-6 probe env)", () => {
 		process.env.PI_CREW_DEPTH = "1";
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		process.env.PI_CREW_KIND = savedEnv.PI_CREW_KIND;
 		process.env.PI_CREW_DEPTH = savedEnv.PI_CREW_DEPTH;
 		process.env.PI_TEAMS_HOME = savedEnv.PI_TEAMS_HOME;
 		process.env.PI_CREW_HOME = savedEnv.PI_CREW_HOME;
 		if (savedHome === undefined) delete process.env.HOME;
 		else process.env.HOME = savedHome;
-		fs.rmSync(homeDir, { recursive: true, force: true });
+		await removeDirWithRetry(homeDir);
 	});
 
 	async function run(params: TeamToolParamsValue, ctx: TeamContext) {
@@ -272,7 +273,7 @@ describe("handleTeamTool root-gate (end-to-end, round-6 probe env)", () => {
 			// nothing reached the user tier
 			assert.equal(fs.existsSync(path.join(homeDir, ".pi")), false);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 
@@ -282,7 +283,7 @@ describe("handleTeamTool root-gate (end-to-end, round-6 probe env)", () => {
 			const r = await run({ action: "config", config: { broker: { enabled: true }, scope: "project" } } as TeamToolParamsValue, ctx);
 			assert.doesNotMatch(r.text, /root-session required/);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 
@@ -293,7 +294,7 @@ describe("handleTeamTool root-gate (end-to-end, round-6 probe env)", () => {
 			assert.equal(r.isError, true);
 			assert.match(r.text, /root-session required/);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 
@@ -307,7 +308,7 @@ describe("handleTeamTool root-gate (end-to-end, round-6 probe env)", () => {
 			const r3 = await run({ action: "scheduled" } as TeamToolParamsValue, ctx);
 			assert.doesNotMatch(r3.text, /root-session required/);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 
@@ -320,7 +321,7 @@ describe("handleTeamTool root-gate (end-to-end, round-6 probe env)", () => {
 			assert.doesNotMatch(r.text, /root-session required/);
 			assert.notEqual(r.isError, true);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 
@@ -339,7 +340,7 @@ describe("handleTeamTool root-gate (end-to-end, round-6 probe env)", () => {
 			const r2 = await run({ action: "goal", config: { subAction: "status" } } as TeamToolParamsValue, ctx);
 			assert.doesNotMatch(r2.text, /root-session required/);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 
@@ -367,7 +368,7 @@ describe("handleTeamTool root-gate (end-to-end, round-6 probe env)", () => {
 			assert.match(rUser.text, /root-session required/);
 			assert.equal(fs.existsSync(path.join(homeDir, ".pi", "agent", "agents", "gate-probe.md")), false);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 
@@ -391,7 +392,7 @@ describe("handleTeamTool root-gate (end-to-end, round-6 probe env)", () => {
 			assert.equal(fs.existsSync(path.join(dir, ".crew", "workflows", "pwn.dwf.ts")), false);
 			assert.equal(fs.existsSync(userTierPath("workflows", "pwn.dwf.ts")), false);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 
@@ -421,7 +422,7 @@ describe("handleTeamTool root-gate (end-to-end, round-6 probe env)", () => {
 			assert.notEqual(rUser.isError, true);
 			assert.ok(fs.existsSync(userTierPath("workflows", "ok-user-wf.dwf.ts")), "user-tier write via config.scope");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 
@@ -459,7 +460,7 @@ describe("handleTeamTool root-gate (end-to-end, round-6 probe env)", () => {
 			// the user tier stays clean in BOTH directions
 			assert.equal(fs.existsSync(userTierPath("agents", "evil.md")), false);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 });

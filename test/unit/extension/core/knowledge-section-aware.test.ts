@@ -19,6 +19,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { knowledgePath, readKnowledge } from "../../../../src/extension/knowledge-injection.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const CONVENTIONS = `## Code Style
 - Use TABS for indentation (not spaces)
@@ -61,19 +62,19 @@ function buildKnowledgeFile(cwd: string): string {
 	return kPath;
 }
 
-function makeTmpCrewDir(prefix: string): {
+async function makeTmpCrewDir(prefix: string): Promise<{
 	cwd: string;
 	crewDir: string;
-	cleanup: () => void;
-} {
+	cleanup: () => Promise<void>;
+}> {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	const crewDir = path.join(cwd, ".crew");
 	return {
 		cwd,
 		crewDir,
-		cleanup: () => {
+		cleanup: async () => {
 			try {
-				fs.rmSync(cwd, { recursive: true, force: true });
+				await removeDirWithRetry(cwd);
 			} catch {
 				/* best-effort */
 			}
@@ -81,8 +82,8 @@ function makeTmpCrewDir(prefix: string): {
 	};
 }
 
-test("B2: conventions are ALWAYS injected regardless of query", () => {
-	const { cwd, crewDir, cleanup } = makeTmpCrewDir("b2-conv-");
+test("B2: conventions are ALWAYS injected regardless of query", async () => {
+	const { cwd, crewDir, cleanup } = await makeTmpCrewDir("b2-conv-");
 	try {
 		buildKnowledgeFile(cwd);
 		// Irrelevant query — should still get all conventions, no session-log body.
@@ -96,12 +97,12 @@ test("B2: conventions are ALWAYS injected regardless of query", () => {
 		assert.match(out, /## Testing Convention/);
 		assert.match(out, /## Release Process/);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("B2: zero-match query → conventions + section-index, NO session-log body", () => {
-	const { cwd, crewDir, cleanup } = makeTmpCrewDir("b2-zero-");
+test("B2: zero-match query → conventions + section-index, NO session-log body", async () => {
+	const { cwd, crewDir, cleanup } = await makeTmpCrewDir("b2-zero-");
 	try {
 		buildKnowledgeFile(cwd);
 		const out = readKnowledge(cwd, { goal: "zzz unrelated zzz" });
@@ -116,12 +117,12 @@ test("B2: zero-match query → conventions + section-index, NO session-log body"
 		// And path-hint present for `read` recovery.
 		assert.match(out, /use `read`/);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("B2: matched query injects the relevant session-log section", () => {
-	const { cwd, crewDir, cleanup } = makeTmpCrewDir("b2-match-");
+test("B2: matched query injects the relevant session-log section", async () => {
+	const { cwd, crewDir, cleanup } = await makeTmpCrewDir("b2-match-");
 	try {
 		buildKnowledgeFile(cwd);
 		// Query about redaction → should surface the "redaction env hardening" section.
@@ -136,12 +137,12 @@ test("B2: matched query injects the relevant session-log section", () => {
 		// But their headers still appear in the index.
 		assert.match(out, /parallel-research reliability incident/);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("B2: IDF-weighting — rare token beats common token", () => {
-	const { cwd, crewDir, cleanup } = makeTmpCrewDir("b2-idf-");
+test("B2: IDF-weighting — rare token beats common token", async () => {
+	const { cwd, crewDir, cleanup } = await makeTmpCrewDir("b2-idf-");
 	try {
 		buildKnowledgeFile(cwd);
 		// "incident" is rare (1/3 session-log headers); "research" appears in 1 too.
@@ -152,12 +153,12 @@ test("B2: IDF-weighting — rare token beats common token", () => {
 		assert.match(out, /parallel-research reliability incident/);
 		assert.match(out, /unresponsive after 8 turns/);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("B2: session-log bytes capped at MAX_SESSION_LOG_BYTES (drop-whole)", () => {
-	const { cwd, crewDir, cleanup } = makeTmpCrewDir("b2-cap-");
+test("B2: session-log bytes capped at MAX_SESSION_LOG_BYTES (drop-whole)", async () => {
+	const { cwd, crewDir, cleanup } = await makeTmpCrewDir("b2-cap-");
 	try {
 		// Write a knowledge.md with a HUGE matching section (>5000 bytes) plus
 		// several smaller matching sections. Verify only what fits is included.
@@ -191,12 +192,12 @@ ${"z".repeat(1500)}
 		// At least one section fit (head-slice fallback guarantees non-empty).
 		assert.ok(xCount + yCount + zCount >= 1, "at least one matching section must be injected");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("B2: head-slice fallback — best match injected even if alone it exceeds budget", () => {
-	const { cwd, crewDir, cleanup } = makeTmpCrewDir("b2-headslice-");
+test("B2: head-slice fallback — best match injected even if alone it exceeds budget", async () => {
+	const { cwd, crewDir, cleanup } = await makeTmpCrewDir("b2-headslice-");
 	try {
 		// One matching section WAY bigger than budget, nothing else matches.
 		const content = `${CONVENTIONS}
@@ -215,12 +216,12 @@ unrelated content here.
 		// Not the full 20k — must be capped.
 		assert.equal((out.match(/q{20000}/g) ?? []).length, 0, "20k section must NOT be injected whole");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("B2: no-query call (legacy path) unchanged — head-only, no section logic", () => {
-	const { cwd, crewDir, cleanup } = makeTmpCrewDir("b2-legacy-");
+test("B2: no-query call (legacy path) unchanged — head-only, no section logic", async () => {
+	const { cwd, crewDir, cleanup } = await makeTmpCrewDir("b2-legacy-");
 	try {
 		buildKnowledgeFile(cwd);
 		// readKnowledge(cwd) with no query → old head-only path.
@@ -231,12 +232,12 @@ test("B2: no-query call (legacy path) unchanged — head-only, no section logic"
 		// Session-index NOT present (that's a section-aware-only feature).
 		assert.equal(out.includes("Session-log sections in knowledge.md"), false, "legacy path must not emit section index");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("B2: role field accepted but does not affect scoring yet (reserved)", () => {
-	const { cwd, crewDir, cleanup } = makeTmpCrewDir("b2-role-");
+test("B2: role field accepted but does not affect scoring yet (reserved)", async () => {
+	const { cwd, crewDir, cleanup } = await makeTmpCrewDir("b2-role-");
 	try {
 		buildKnowledgeFile(cwd);
 		const outNoRole = readKnowledge(cwd, {
@@ -252,12 +253,12 @@ test("B2: role field accepted but does not affect scoring yet (reserved)", () =>
 		assert.equal(outNoRole.includes("redact auth headers"), outWithRole.includes("redact auth headers"));
 		assert.match(outWithRole, /redact auth headers/);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("B2: mtime+size cache — re-read happens when file changes", () => {
-	const { cwd, crewDir, cleanup } = makeTmpCrewDir("b2-cache-");
+test("B2: mtime+size cache — re-read happens when file changes", async () => {
+	const { cwd, crewDir, cleanup } = await makeTmpCrewDir("b2-cache-");
 	try {
 		const kPath = buildKnowledgeFile(cwd);
 		const out1 = readKnowledge(cwd, { goal: "redaction" });
@@ -274,6 +275,6 @@ brand new redaction detail.
 		assert.match(out2, /newredaction section/);
 		assert.equal(out2.includes("redact auth headers"), false, "old content must be evicted after cache invalidation");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });

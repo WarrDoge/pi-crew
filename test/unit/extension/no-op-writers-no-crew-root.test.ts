@@ -32,6 +32,7 @@ import { pruneFinishedRuns } from "../../../src/extension/run-maintenance.ts";
 import { createMetricRegistry } from "../../../src/observability/metric-registry.ts";
 import { createMetricFileSink } from "../../../src/observability/metric-sink.ts";
 import { clearProjectRootCache, projectCrewRoot } from "../../../src/utils/paths.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 /** Temp project dir with a `.git` marker; NO crew root (that is the point). */
 function makeBareProject(prefix: string): string {
@@ -47,12 +48,12 @@ function makeBareProject(prefix: string): string {
 	return dir;
 }
 
-function cleanup(dir: string): void {
+async function cleanup(dir: string): Promise<void> {
 	clearProjectRootCache();
-	fs.rmSync(dir, { recursive: true, force: true });
+	await removeDirWithRetry(dir);
 }
 
-test("prune audit: no crew root ⇒ no directory created and no auditPath", () => {
+test("prune audit: no crew root ⇒ no directory created and no auditPath", async () => {
 	const project = makeBareProject("pi-crew-noop-prune-");
 	try {
 		const crewRoot = projectCrewRoot(project);
@@ -65,11 +66,11 @@ test("prune audit: no crew root ⇒ no directory created and no auditPath", () =
 		assert.equal(fs.existsSync(crewRoot), false, "prune must not materialise the crew root");
 		assert.equal(fs.existsSync(path.join(project, ".crew")), false, "no .crew/ either");
 	} finally {
-		cleanup(project);
+		await cleanup(project);
 	}
 });
 
-test("prune audit: an existing crew root still gets its audit line (positive control)", () => {
+test("prune audit: an existing crew root still gets its audit line (positive control)", async () => {
 	const project = makeBareProject("pi-crew-noop-prune-pos-");
 	try {
 		const crewRoot = projectCrewRoot(project);
@@ -107,7 +108,7 @@ test("prune audit: an existing crew root still gets its audit line (positive con
 		assert.equal(typeof result.auditPath, "string", "a real prune still writes its audit");
 		assert.ok(fs.existsSync(result.auditPath!), "audit file exists");
 	} finally {
-		cleanup(project);
+		await cleanup(project);
 	}
 });
 
@@ -137,7 +138,7 @@ test("metric sink: a PRODUCTION-shaped snapshot (metrics registered at init) ⇒
 			sink.dispose();
 		}
 	} finally {
-		cleanup(project);
+		await cleanup(project);
 	}
 });
 
@@ -160,7 +161,7 @@ test("metric sink: crew root EXISTS ⇒ empty tick still writes (HEAD parity)", 
 			sink.dispose();
 		}
 	} finally {
-		cleanup(project);
+		await cleanup(project);
 	}
 });
 
@@ -183,11 +184,11 @@ test("metric sink: crew root EXISTS ⇒ real snapshot still writes (positive con
 			sink.dispose();
 		}
 	} finally {
-		cleanup(project);
+		await cleanup(project);
 	}
 });
 
-test("notification sink: no crew root ⇒ nothing created for an info notification", () => {
+test("notification sink: no crew root ⇒ nothing created for an info notification", async () => {
 	const project = makeBareProject("pi-crew-noop-notify-");
 	try {
 		const crewRoot = projectCrewRoot(project);
@@ -200,11 +201,11 @@ test("notification sink: no crew root ⇒ nothing created for an info notificati
 		assert.equal(fs.existsSync(crewRoot), false, "notification sink must not materialise the crew root");
 		assert.equal(fs.existsSync(path.join(crewRoot, "state", "notifications")), false, "no notifications dir");
 	} finally {
-		cleanup(project);
+		await cleanup(project);
 	}
 });
 
-test("notification sink: an existing crew root still persists notifications (positive control)", () => {
+test("notification sink: an existing crew root still persists notifications (positive control)", async () => {
 	const project = makeBareProject("pi-crew-noop-notify-pos-");
 	try {
 		const crewRoot = projectCrewRoot(project);
@@ -217,7 +218,7 @@ test("notification sink: an existing crew root still persists notifications (pos
 		assert.ok(fs.existsSync(file), "notification persisted when the crew root exists");
 		assert.match(fs.readFileSync(file, "utf-8"), /hello/);
 	} finally {
-		cleanup(project);
+		await cleanup(project);
 	}
 });
 
@@ -226,7 +227,7 @@ test("notification sink: an existing crew root still persists notifications (pos
 // suppressed the audit line for a REAL prune over an existing crew root that
 // simply found nothing — a HEAD behavior change beyond the fix's scope.
 
-test("prune audit: crew root EXISTS ⇒ zero-candidate prune still audits (HEAD parity)", () => {
+test("prune audit: crew root EXISTS ⇒ zero-candidate prune still audits (HEAD parity)", async () => {
 	const project = makeBareProject("pi-crew-noop-prune-parity-");
 	try {
 		const crewRoot = projectCrewRoot(project);
@@ -240,6 +241,6 @@ test("prune audit: crew root EXISTS ⇒ zero-candidate prune still audits (HEAD 
 		assert.deepEqual(line.kept, []);
 		assert.deepEqual(line.removed, []);
 	} finally {
-		cleanup(project);
+		await cleanup(project);
 	}
 });

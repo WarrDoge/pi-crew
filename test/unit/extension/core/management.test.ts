@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("management create/update/delete project team with backups", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-mgmt-test-"));
@@ -54,6 +55,6 @@ test("management create/update/delete project team with backups", async () => {
 		assert.equal(deleted.isError, false);
 		assert.equal(fs.existsSync(filePath), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

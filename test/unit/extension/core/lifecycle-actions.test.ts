@@ -7,6 +7,7 @@ import { handleCleanup, handleWorktrees } from "../../../../src/extension/team-t
 import { readEvents } from "../../../../src/state/event-log/event-log.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import { textFromToolResult } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function createRun(): { cwd: string; runId: string; eventsPath: string } {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-lifecycle-"));
@@ -38,7 +39,7 @@ function createRun(): { cwd: string; runId: string; eventsPath: string } {
 	};
 }
 
-test("handleWorktrees lists worktrees for a run in cwd", () => {
+test("handleWorktrees lists worktrees for a run in cwd", async () => {
 	const run = createRun();
 	try {
 		const result = handleWorktrees({ action: "worktrees", runId: run.runId }, { cwd: run.cwd });
@@ -46,11 +47,11 @@ test("handleWorktrees lists worktrees for a run in cwd", () => {
 		assert.match(textFromToolResult(result), new RegExp(`Worktrees for ${run.runId}`));
 		assert.match(textFromToolResult(result), /- \(none\)/);
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });
 
-test("handleWorktrees resolves run in nested child .crew via locateRunCwd", () => {
+test("handleWorktrees resolves run in nested child .crew via locateRunCwd", async () => {
 	const parentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-worktrees-cross-"));
 	try {
 		const childDir = path.join(parentDir, "pi-crew");
@@ -80,7 +81,7 @@ test("handleWorktrees resolves run in nested child .crew via locateRunCwd", () =
 		assert.equal(result.isError, false);
 		assert.match(textFromToolResult(result), new RegExp(`Worktrees for ${created.manifest.runId}`));
 	} finally {
-		fs.rmSync(parentDir, { recursive: true, force: true });
+		await removeDirWithRetry(parentDir);
 	}
 });
 
@@ -103,6 +104,6 @@ test("handleCleanup records audit intent on worktree cleanup events", async () =
 			events.some((event) => event.type === "worktree.cleanup" && event.data?.intent === "clean temporary worktrees before release"),
 		);
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(run.cwd);
 	}
 });

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("events and artifacts actions inspect a durable run", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-inspect-test-"));
@@ -30,6 +31,6 @@ test("events and artifacts actions inspect a durable run", async () => {
 		assert.match(firstText(artifacts), /goal.md/);
 		assert.match(firstText(artifacts), /sha256=/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

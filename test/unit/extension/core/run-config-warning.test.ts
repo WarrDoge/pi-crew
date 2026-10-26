@@ -6,6 +6,7 @@ import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { readEvents } from "../../../../src/state/event-log/event-log.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * Round 16 F4: config errors must be surfaced (not silently swallowed) on the
@@ -53,7 +54,7 @@ test("run surfaces config.warning event when config is malformed", async () => {
 	} finally {
 		for (let attempt = 0; attempt < 5; attempt++) {
 			try {
-				fs.rmSync(cwd, { recursive: true, force: true });
+				await removeDirWithRetry(cwd);
 				break;
 			} catch {
 				/* retry */
@@ -86,7 +87,7 @@ test("run does NOT emit config.warning when config is clean", async () => {
 	} finally {
 		for (let attempt = 0; attempt < 5; attempt++) {
 			try {
-				fs.rmSync(cwd, { recursive: true, force: true });
+				await removeDirWithRetry(cwd);
 				break;
 			} catch {
 				/* retry */
