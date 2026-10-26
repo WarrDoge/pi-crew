@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+## [0.11.44] — fix wave 16: full-backlog burn-down — liveness wiring everywhere + rmSync sweep complete + T-6(b) harden (2026-10-26)
+
+Wave 15 left three open ends: the health-monitor/widget/powerbar/session-summary surfaces still judged liveness from
+`lastActivityAt` alone, the bare-`rmSync` sweep had three batches (2a/2b/3) outstanding, and `state-helpers-cas-contention`
+kept flaking on win32. This wave burns down all of them (SPEC-driven follow-ups to `fixwave15`/`fixwave13`).
+
+**Added — `heartbeatLiveForDisplay(run, tasks, now)` shared export.** Wrapped predicate in `src/runtime/process-status.ts`
+(manifest + tasks → active-or-fresh-heartbeat verdict). Wired into the remaining render surfaces: health-monitor
+(stale-no-progress guard, 0 extra I/O via hoisted task read), crew widget (active filter, snapshot tasks only — no disk
+reads), powerbar (active segment), session-summary (lazy coalesced read, fail-closed). Every UI surface now agrees with
+the watchdog on run liveness — the wave-13/15 "displayed stale while heartbeat fresh" class is closed across the fleet.
+
+**Fixed — the full bare-`rmSync` teardown backlog. All 4 sweep batches complete:** batch 2a extension+ui+workflows
+(120 files), batch 2b runtime (208 files, 821 sites), batch 3 integration (33 files, 89 sites) — migrated to
+`cleanupStateRoot`/`removeDirWithRetry`/drain-then-remove. Residual audit: the 44 remaining regex-matched lines are
+26 single-file deletes (intentional), 8 recursive-`force` false-positives, 10 intentional by test semantics — zero
+actionable.
+
+**Fixed — T-6(b) win32 flake (`state-helpers-cas-contention`).** Poll for tick-marker ≥1 after child exit (bounded 2 s)
+plus one flush→reload→settled retry — targets the Windows rename-visibility gap (CAS rename lands but reader sees stale
+cache) without changing test semantics.
+
+**Battery (PASS).** wiring ×3 (health-monitor 23, session-summary-cov 5, crew-widget 8, powerbar 12 + regressions),
+T-6b ×5 green, `test:critical` 124/124, full unit 10,078 pass / 0 fail / 4 skip, integration 144/0/4, static gates 0,
+dist MATCH (1,893,366 B), leak sweep clean. (Two external-wrapper OOM incidents during the run — no test failures;
+detached rerun completed green.)
+
+**Docs.** Battery report
+`docs/real-test/reports/real-test-2026-10-26-wave16-full-backlog-battery.md`.
+
 ## [0.11.43] — fix wave 15: render trusts task heartbeats + teardown sweep batch 1 (2026-10-25)
 
 Wave 13 fixed the watchdog's frozen-evidence hung verdicts by adding task heartbeats, but the render layer still
