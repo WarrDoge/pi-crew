@@ -29,6 +29,7 @@ import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../src/s
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
 import { createRunSnapshotCache } from "../../../src/ui/run-snapshot-cache.ts";
 import type { RunUiSnapshot } from "../../../src/ui/snapshot-types.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 function tempCwd(prefix: string): string {
 	let cwd = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -141,11 +142,11 @@ test("scheduleRefresh coalesces a watcher burst into one async rebuild", async (
 		assert.equal(final.progress.completed, 1, "the rebuilt snapshot must reflect the changed tasks.json");
 		cache.dispose?.();
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("scheduleRefresh is exposed on the cache API (watcher-facing contract)", () => {
+test("scheduleRefresh is exposed on the cache API (watcher-facing contract)", async () => {
 	const cwd = tempCwd("pi-crew-coalesced-refresh-api-");
 	try {
 		const { manifest } = fixtures(cwd);
@@ -157,6 +158,6 @@ test("scheduleRefresh is exposed on the cache API (watcher-facing contract)", ()
 		cache.scheduleRefresh("no-such-run");
 		cache.dispose?.();
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

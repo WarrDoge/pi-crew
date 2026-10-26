@@ -22,6 +22,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { type EventsStateFrame, eventsStateSource, eventsStateSourceRegistrySize } from "../../../src/ui/events-state-source.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -62,8 +63,8 @@ test.beforeEach(() => {
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-u7-source-"));
 });
 
-test.afterEach(() => {
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+test.afterEach(async () => {
+	await removeDirWithRetry(tmpDir);
 });
 
 // ── Snapshot: parse events.jsonl to the current seq ───────────────────────

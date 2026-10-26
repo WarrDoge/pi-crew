@@ -28,6 +28,7 @@ import { eventsStateSourceRegistrySize } from "../../../src/ui/events-state-sour
 import { createRunSnapshotCache } from "../../../src/ui/run-snapshot-cache.ts";
 import type { RunUiSnapshot } from "../../../src/ui/snapshot-types.ts";
 import { activeWidgetRuns } from "../../../src/ui/widget/widget-model.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -136,7 +137,7 @@ async function waitFor(ready: () => boolean, timeoutMs = 5000): Promise<void> {
 
 // ── DEFAULT: zero new I/O ─────────────────────────────────────────────────
 
-test("default cache attaches no events-state source (opt-in contract)", () => {
+test("default cache attaches no events-state source (opt-in contract)", async () => {
 	const cwd = tempCwd("pi-crew-u7-default-");
 	try {
 		const { manifest } = fixtures(cwd, "u7-default");
@@ -148,7 +149,7 @@ test("default cache attaches no events-state source (opt-in contract)", () => {
 		cache.dispose?.();
 		assert.equal(eventsStateSourceRegistrySize(), baseline);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -183,7 +184,7 @@ test("eventsState: external events append is discovered and committed without a 
 		assert.ok(cache.get(manifest.runId), "entry stays populated");
 		cache.dispose?.();
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -205,7 +206,7 @@ test("eventsState: source attached per built entry and released on invalidate/di
 		cache.dispose?.();
 		assert.equal(eventsStateSourceRegistrySize(), baseline, "dispose releases everything");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -294,6 +295,6 @@ test("parity: eventsState cache produces identical snapshots + widget runs as a 
 		plain.dispose?.();
 		layered.dispose?.();
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

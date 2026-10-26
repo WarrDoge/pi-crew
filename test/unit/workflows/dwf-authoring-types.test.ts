@@ -15,6 +15,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const typesFile = path.join(repoRoot, "types", "dwf.d.ts");
@@ -96,7 +97,7 @@ test("round-14 P1-1: package.json files[] includes the types/ directory", () => 
 	assert.ok(files.includes("types/"), "files[] must include 'types/' so the .d.ts ships to npm");
 });
 
-test("round-14 P1-1: a .dwf.ts using pi-crew/workflow authoring types compiles cleanly", () => {
+test("round-14 P1-1: a .dwf.ts using pi-crew/workflow authoring types compiles cleanly", async () => {
 	// Place the sample inside the repo so the `pi-crew` self-reference resolves.
 	const tmpDir = fs.mkdtempSync(path.join(repoRoot, ".tmp-dwf-types-"));
 	const samplePath = path.join(tmpDir, "sample.dwf.ts");
@@ -105,11 +106,11 @@ test("round-14 P1-1: a .dwf.ts using pi-crew/workflow authoring types compiles c
 		const out = runTsc(samplePath);
 		assert.equal(out.status, 0, `sample .dwf.ts must compile with zero errors. tsc output:\n${out.stdout}${out.stderr}`);
 	} finally {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		await removeDirWithRetry(tmpDir);
 	}
 });
 
-test("round-14 P1-1: mistyped ctx usage is REJECTED by the authoring types (negative check)", () => {
+test("round-14 P1-1: mistyped ctx usage is REJECTED by the authoring types (negative check)", async () => {
 	// A deliberately wrong call (agent returns AgentResult; accessing .nonexistent is an error)
 	// proves the types are actually enforcing the contract, not just permissive `any`.
 	const badDwf = `import type { WorkflowCtx } from "pi-crew/workflow";
@@ -126,6 +127,6 @@ export default async function run(ctx: WorkflowCtx): Promise<void> {
 		const out = runTsc(samplePath);
 		assert.equal(out.status, 0, "the @ts-expect-error should suppress the single error → status 0. Got:\n" + out.stdout + out.stderr);
 	} finally {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		await removeDirWithRetry(tmpDir);
 	}
 });

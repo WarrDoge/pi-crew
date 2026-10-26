@@ -24,6 +24,7 @@ import test from "node:test";
 import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest } from "../../../src/state/types.ts";
 import { __test__resetDashboardState, RunDashboard } from "../../../src/ui/run-dashboard.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const BEL = "\u0007";
 /** OSC-52 clipboard write — paste-to-execute on kitty/tmux set-clipboard-on. */
@@ -89,7 +90,7 @@ test("R11-F2/S3: run-list goal renders through sanitizeUntrustedLine (OSC-52/OSC
 	);
 });
 
-test("R31-S1: terminal-reason (worker stderr) renders through sanitizeUntrustedLine", () => {
+test("R31-S1: terminal-reason (worker stderr) renders through sanitizeUntrustedLine", async () => {
 	__test__resetDashboardState();
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ep1-reason-"));
 	try {
@@ -118,6 +119,6 @@ test("R31-S1: terminal-reason (worker stderr) renders through sanitizeUntrustedL
 			`terminal reason text missing: ${JSON.stringify(lines.filter((l) => l.includes("child-stderr")))}`,
 		);
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });

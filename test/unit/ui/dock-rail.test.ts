@@ -43,6 +43,7 @@ import type { CrewWidgetState, WidgetRun } from "../../../src/ui/widget/widget-t
 import { visibleWidth } from "../../../src/utils/visual.ts";
 import type { WorkflowConfig } from "../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir, removeTrackedTempDir } from "../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const FAKE_CWD = "/tmp/pi-crew-dock-rail-test";
 const T0 = new Date("2026-09-13T05:00:00.000Z");
@@ -404,11 +405,11 @@ const sidebarWorkflow: WorkflowConfig = {
 	],
 };
 
-function sidebarRun(records: (manifest: ReturnType<typeof createRunManifest>["manifest"]) => unknown[]): {
+async function sidebarRun(records: (manifest: ReturnType<typeof createRunManifest>["manifest"]) => unknown[]): Promise<{
 	sidebar: LiveRunSidebar;
 	runId: string;
 	lines: string[];
-} {
+}> {
 	const cwd = createTrackedTempDir("pi-crew-dock-rail-sidebar-");
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	const { manifest, tasks } = createRunManifest({ cwd, team: sidebarTeam, workflow: sidebarWorkflow, goal: "sidebar rail" });
@@ -422,13 +423,13 @@ function sidebarRun(records: (manifest: ReturnType<typeof createRunManifest>["ma
 	fs.writeFileSync(path.join(manifest.stateRoot, "agents.json"), JSON.stringify(records(manifest)));
 	const sidebar = new LiveRunSidebar({ cwd, runId: manifest.runId, done: () => undefined });
 	const lines = sidebar.render(80).map(stripAnsi);
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 	return { sidebar, runId: manifest.runId, lines };
 }
 
-test("sidebar: `┏ LIVE ▸ <runId8>` canopy, `┣ SECTION` headers, `┗ <hint>` cap — rounded box retired", () => {
+test("sidebar: `┏ LIVE ▸ <runId8>` canopy, `┣ SECTION` headers, `┗ <hint>` cap — rounded box retired", async () => {
 	const runId = "team_plan_test_run_id_abcdef";
-	const { lines } = sidebarRun(() => [
+	const { lines } = await sidebarRun(() => [
 		{
 			id: "a1",
 			runId,
@@ -461,8 +462,8 @@ test("sidebar: `┏ LIVE ▸ <runId8>` canopy, `┣ SECTION` headers, `┗ <hint
 	}
 });
 
-test("sidebar: an agents.json record missing every optional field still cannot print `undefined`", () => {
-	const { lines } = sidebarRun(() => [
+test("sidebar: an agents.json record missing every optional field still cannot print `undefined`", async () => {
+	const { lines } = await sidebarRun(() => [
 		// Only the fields readCrewAgents validates (id + taskId) are present.
 		{ id: "sparse-1", taskId: "sparse-task", status: "running" },
 	]);

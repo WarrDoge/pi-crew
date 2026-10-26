@@ -11,6 +11,7 @@ import type { TeamRunManifest } from "../../../src/state/types.ts";
 import { __test__resetDashboardState, RunDashboard, type RunDashboardSelection } from "../../../src/ui/run-dashboard.ts";
 import { createRunSnapshotCache } from "../../../src/ui/run-snapshot-cache.ts";
 import type { RunUiSnapshot } from "../../../src/ui/snapshot-types.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 function run(id: string, status: TeamRunManifest["status"]): TeamRunManifest {
 	return {
@@ -109,7 +110,7 @@ test("RunDashboard supports phase 5 observability hotkeys", () => {
 	});
 });
 
-test("RunDashboard renders compact agent preview", () => {
+test("RunDashboard renders compact agent preview", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-dashboard-agents-"));
 	try {
 		const manifest = run("team_agents", "running");
@@ -144,11 +145,11 @@ test("RunDashboard renders compact agent preview", () => {
 		);
 		assert.ok(lines.some((line) => line.includes("tool=bash")));
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });
 
-test("RunDashboard renders model and token details from task state", () => {
+test("RunDashboard renders model and token details from task state", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-dashboard-usage-"));
 	try {
 		const manifest = run("team_usage", "completed");
@@ -200,11 +201,11 @@ test("RunDashboard renders model and token details from task state", () => {
 			`compact usage dialect missing: ${JSON.stringify(lines.filter((l) => l.includes("↑") || l.includes("tok=")))}`,
 		);
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });
 
-test("RunDashboard switches live snapshot panes and shows mailbox badges", () => {
+test("RunDashboard switches live snapshot panes and shows mailbox badges", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-dashboard-panes-"));
 	try {
 		fs.mkdirSync(path.join(tmp, ".crew"), { recursive: true });
@@ -270,11 +271,11 @@ test("RunDashboard switches live snapshot panes and shows mailbox badges", () =>
 		assert.ok(lines.some((line) => line.includes("Output pane")));
 		assert.ok(lines.some((line) => line.includes("hello output")));
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });
 
-test("RunDashboard renders progress preview", () => {
+test("RunDashboard renders progress preview", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-dashboard-progress-"));
 	try {
 		const progressPath = path.join(tmp, "progress.md");
@@ -293,13 +294,13 @@ test("RunDashboard renders progress preview", () => {
 		assert.ok(lines.some((line) => line.includes("Progress:")));
 		assert.ok(lines.some((line) => line.includes("Task counts")));
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });
 
 // ─── L7/L9 (real-test 2026-10-07): dashboard dialect pins ──────────────────
 
-test("L7/L9: dashboard agent preview speaks the TUI dialect (no wire keys, correct plurals)", () => {
+test("L7/L9: dashboard agent preview speaks the TUI dialect (no wire keys, correct plurals)", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-dashboard-dialect-"));
 	try {
 		const manifest = run("team_dialect", "running");
@@ -357,7 +358,7 @@ test("L7/L9: dashboard agent preview speaks the TUI dialect (no wire keys, corre
 		);
 		assert.ok(!lines.some((line) => line.includes("1 turns")), "`1 turns` plural bug present");
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });
 
@@ -475,7 +476,7 @@ async function captureDashboardOverlayOptions(
 		else process.env.USERPROFILE = prev.USERPROFILE;
 		if (prev.PI_CREW_HOME === undefined) delete process.env.PI_CREW_HOME;
 		else process.env.PI_CREW_HOME = prev.PI_CREW_HOME;
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 }
 

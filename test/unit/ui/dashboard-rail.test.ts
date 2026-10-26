@@ -23,7 +23,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
@@ -37,6 +37,7 @@ import { RunDashboard } from "../../../src/ui/run-dashboard.ts";
 import { createSettingsOverlay } from "../../../src/ui/settings-overlay.ts";
 import type { CrewTheme } from "../../../src/ui/theme-adapter.ts";
 import { visibleWidth } from "../../../src/utils/visual.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 // ─── Harness ───────────────────────────────────────────────────────────────
 
@@ -72,10 +73,10 @@ const ansiTheme: CrewTheme = {
 
 let tmpDir: string | undefined;
 
-afterEach(() => {
+afterEach(async () => {
 	clearLiveAgentsForTest();
 	if (tmpDir) {
-		rmSync(tmpDir, { recursive: true, force: true });
+		await removeDirWithRetry(tmpDir);
 		tmpDir = undefined;
 	}
 });

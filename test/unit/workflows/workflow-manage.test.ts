@@ -17,6 +17,7 @@ import {
 	handleWorkflowList,
 	handleWorkflowSave,
 } from "../../../src/extension/team-tool/workflow-manage.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 function tmpCwd(): string {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-wf-manage-"));
@@ -30,7 +31,7 @@ function ctx(cwd: string) {
 
 const CLEAN_SCRIPT = `export default async function (ctx) { await ctx.agent({ role: "executor", prompt: "hi" }); ctx.setResult("/tmp/x"); }\n`;
 
-test("workflow-create REQUIRES confirm:true (defense-in-depth even if gate is bypassed)", () => {
+test("workflow-create REQUIRES confirm:true (defense-in-depth even if gate is bypassed)", async () => {
 	const cwd = tmpCwd();
 	try {
 		const res = handleWorkflowCreate(
@@ -43,11 +44,11 @@ test("workflow-create REQUIRES confirm:true (defense-in-depth even if gate is by
 		assert.equal(res.isError, true);
 		assert.match((res.content[0] as { text: string }).text, /confirm:true/i);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("workflow-create rejects forbidden content (child_process / process.exit / network)", () => {
+test("workflow-create rejects forbidden content (child_process / process.exit / network)", async () => {
 	const cwd = tmpCwd();
 	try {
 		const cases = [`require('child_process')`, `process.exit(1)`, `import net from 'net'`, `import http from 'https'`];
@@ -67,11 +68,11 @@ test("workflow-create rejects forbidden content (child_process / process.exit / 
 			assert.match((res.content[0] as { text: string }).text, /forbidden pattern|rejected/i);
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("workflow-create writes a clean script to the project workflows dir", () => {
+test("workflow-create writes a clean script to the project workflows dir", async () => {
 	const cwd = tmpCwd();
 	try {
 		const res = handleWorkflowCreate(
@@ -87,11 +88,11 @@ test("workflow-create writes a clean script to the project workflows dir", () =>
 		assert.ok(fs.existsSync(filePath), "script written to project workflows dir");
 		assert.equal(fs.readFileSync(filePath, "utf-8"), CLEAN_SCRIPT);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("workflow-create requires config.name + config.script", () => {
+test("workflow-create requires config.name + config.script", async () => {
 	const cwd = tmpCwd();
 	try {
 		const noName = handleWorkflowCreate(
@@ -108,11 +109,11 @@ test("workflow-create requires config.name + config.script", () => {
 		assert.equal(noScript.isError, true);
 		assert.match((noScript.content[0] as { text: string }).text, /config\.script/i);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("workflow-list returns workflows with runtime discriminator", () => {
+test("workflow-list returns workflows with runtime discriminator", async () => {
 	const cwd = tmpCwd();
 	try {
 		// Create a dynamic workflow file directly.
@@ -121,11 +122,11 @@ test("workflow-list returns workflows with runtime discriminator", () => {
 		assert.equal(res.isError, false);
 		assert.match((res.content[0] as { text: string }).text, /demo/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("workflow-get returns the dynamic script source", () => {
+test("workflow-get returns the dynamic script source", async () => {
 	const cwd = tmpCwd();
 	try {
 		fs.writeFileSync(path.join(cwd, ".crew", "workflows", "demo.dwf.ts"), CLEAN_SCRIPT);
@@ -134,11 +135,11 @@ test("workflow-get returns the dynamic script source", () => {
 		assert.match((res.content[0] as { text: string }).text, /dynamic/);
 		assert.match((res.content[0] as { text: string }).text, /ctx\.agent/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("workflow-delete requires confirm:true + only deletes dynamic workflows inside allowed dirs", () => {
+test("workflow-delete requires confirm:true + only deletes dynamic workflows inside allowed dirs", async () => {
 	const cwd = tmpCwd();
 	try {
 		fs.writeFileSync(path.join(cwd, ".crew", "workflows", "demo.dwf.ts"), CLEAN_SCRIPT);
@@ -158,11 +159,11 @@ test("workflow-delete requires confirm:true + only deletes dynamic workflows ins
 		assert.equal(ok.isError, false);
 		assert.ok(!fs.existsSync(path.join(cwd, ".crew", "workflows", "demo.dwf.ts")), "file deleted");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("workflow-save REQUIRES confirm:true (H-1 — was unconfirmed arbitrary write)", () => {
+test("workflow-save REQUIRES confirm:true (H-1 — was unconfirmed arbitrary write)", async () => {
 	const cwd = tmpCwd();
 	try {
 		const blocked = handleWorkflowSave(
@@ -175,6 +176,6 @@ test("workflow-save REQUIRES confirm:true (H-1 — was unconfirmed arbitrary wri
 		assert.equal(blocked.isError, true);
 		assert.match((blocked.content[0] as { text: string }).text, /confirm:true/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

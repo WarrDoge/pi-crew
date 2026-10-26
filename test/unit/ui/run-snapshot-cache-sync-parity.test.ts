@@ -23,6 +23,7 @@ import { saveCrewAgents } from "../../../src/runtime/crew-agent-records.ts";
 import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
 import { createRunSnapshotCache } from "../../../src/ui/run-snapshot-cache.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 function tempCwd(prefix: string): string {
 	let cwd = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -116,7 +117,7 @@ function completedTasks(tasks: TeamTaskState[]): TeamTaskState[] {
 	}));
 }
 
-test("R10-4: sync build() tasks are identical to a direct tasks.json read", () => {
+test("R10-4: sync build() tasks are identical to a direct tasks.json read", async () => {
 	const cwd = tempCwd("pi-crew-snapshot-parity-sync-");
 	let cache: ReturnType<typeof createRunSnapshotCache> | undefined;
 	try {
@@ -130,7 +131,7 @@ test("R10-4: sync build() tasks are identical to a direct tasks.json read", () =
 		assert.equal(snapshot.usage.tokensIn, 10);
 	} finally {
 		cache?.dispose?.();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -150,7 +151,7 @@ test("R10-4: async buildAsync() tasks are identical to a direct tasks.json read"
 		assert.equal(snapshot.usage.tokensIn, 10);
 	} finally {
 		cache?.dispose?.();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -172,11 +173,11 @@ test("R10-4: sync build() and async buildAsync() produce identical tasks/progres
 	} finally {
 		syncCache?.dispose?.();
 		asyncCache?.dispose?.();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("R10-4: sync refreshIfStale still surfaces NEW tasks.json content via loaded.tasks", () => {
+test("R10-4: sync refreshIfStale still surfaces NEW tasks.json content via loaded.tasks", async () => {
 	const cwd = tempCwd("pi-crew-snapshot-parity-fresh-sync-");
 	let cache: ReturnType<typeof createRunSnapshotCache> | undefined;
 	try {
@@ -193,7 +194,7 @@ test("R10-4: sync refreshIfStale still surfaces NEW tasks.json content via loade
 		assert.equal(second.usage.tokensIn, 10);
 	} finally {
 		cache?.dispose?.();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -218,6 +219,6 @@ test("R10-4: async preloadStale still surfaces NEW tasks.json content via loaded
 	} finally {
 		primingCache?.dispose?.();
 		cache?.dispose?.();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

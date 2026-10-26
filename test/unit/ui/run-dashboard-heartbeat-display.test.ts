@@ -23,6 +23,7 @@ import type { CrewAgentRecord } from "../../../src/runtime/crew-agent-runtime.ts
 import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
 import { RunDashboard } from "../../../src/ui/run-dashboard.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const strip = (s: string): string => s.replace(/\u001b\[[0-9;]*m/g, "");
 
@@ -91,7 +92,7 @@ function tempCwd(prefix: string): string {
 	return cwd;
 }
 
-test("h2: stale manifest + fresh task heartbeat renders running and stays in Active", () => {
+test("h2: stale manifest + fresh task heartbeat renders running and stays in Active", async () => {
 	const cwd = tempCwd("pi-crew-w15-h2-live-");
 	try {
 		const manifest = makeStaleManifestRun(cwd, "w15-h2-heartbeat", { heartbeatAgeMs: 30_000 });
@@ -112,11 +113,11 @@ test("h2: stale manifest + fresh task heartbeat renders running and stays in Act
 			dashboard.dispose();
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("h2: same snapshot WITHOUT a fresh heartbeat stays stale (old behavior pinned)", () => {
+test("h2: same snapshot WITHOUT a fresh heartbeat stays stale (old behavior pinned)", async () => {
 	const cwd = tempCwd("pi-crew-w15-h2-stale-");
 	try {
 		const manifest = makeStaleManifestRun(cwd, "w15-h2-control", {});
@@ -136,11 +137,11 @@ test("h2: same snapshot WITHOUT a fresh heartbeat stays stale (old behavior pinn
 			dashboard.dispose();
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("h2: heartbeat older than the 5-min evidence TTL does NOT veto the stale label", () => {
+test("h2: heartbeat older than the 5-min evidence TTL does NOT veto the stale label", async () => {
 	const cwd = tempCwd("pi-crew-w15-h2-ttl-");
 	try {
 		const manifest = makeStaleManifestRun(cwd, "w15-h2-ttl", { heartbeatAgeMs: 6 * 60 * 1000 });
@@ -155,11 +156,11 @@ test("h2: heartbeat older than the 5-min evidence TTL does NOT veto the stale la
 			dashboard.dispose();
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("h2: heartbeat.alive === false is not evidence (explicit dead mark)", () => {
+test("h2: heartbeat.alive === false is not evidence (explicit dead mark)", async () => {
 	const cwd = tempCwd("pi-crew-w15-h2-dead-");
 	try {
 		const manifest = makeStaleManifestRun(cwd, "w15-h2-dead", {});
@@ -179,6 +180,6 @@ test("h2: heartbeat.alive === false is not evidence (explicit dead mark)", () =>
 			dashboard.dispose();
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

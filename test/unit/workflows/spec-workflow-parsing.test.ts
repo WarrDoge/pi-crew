@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { discoverWorkflows } from "../../../src/workflows/discover-workflows.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 function writeProjectWorkflow(content: string): string {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-specwf-"));
@@ -20,7 +21,7 @@ function writeProjectWorkflow(content: string): string {
 	return cwd;
 }
 
-test("step body specRefs/specStrict + frontmatter specStrict round-trip through discovery", () => {
+test("step body specRefs/specStrict + frontmatter specStrict round-trip through discovery", async () => {
 	const cwd = writeProjectWorkflow(`---
 name: specdemo
 description: spec wiring demo
@@ -59,11 +60,11 @@ Verify: {goal}
 		const merged = found.specStrict === true && build.specStrict === false;
 		assert.equal(merged, true, "workflow strict flows to the un-flagged step; explicit step false still opts out");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("workflow without spec fields is unchanged (no undefined leakage)", () => {
+test("workflow without spec fields is unchanged (no undefined leakage)", async () => {
 	const cwd = writeProjectWorkflow(`---
 name: specdemo
 description: plain
@@ -85,6 +86,6 @@ Do: {goal}
 			"absent step flag stays undefined so the workflow-level flag survives the ?? merge (round-1 P1-2)",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

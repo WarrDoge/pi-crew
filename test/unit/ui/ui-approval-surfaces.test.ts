@@ -43,6 +43,7 @@ import { RunDashboard, type RunDashboardSelection } from "../../../src/ui/run-da
 import type { RunUiSnapshot } from "../../../src/ui/snapshot-types.ts";
 import { buildWidgetLines } from "../../../src/ui/widget/widget-renderer.ts";
 import type { WidgetRun } from "../../../src/ui/widget/widget-types.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const PENDING_APPROVAL = {
 	required: true,
@@ -317,7 +318,7 @@ test("(e) approve: pending manifest dispatches the approve-plan api op and inval
 			"result surfaced via notifyCommandResult",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -335,7 +336,7 @@ test("(e) deny: pending manifest confirms then dispatches cancel-plan", async ()
 		assert.equal(calls[0]?.action, "api");
 		assert.equal(calls[0]?.config?.operation, "cancel-plan");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -357,7 +358,7 @@ test("(e) non-pending manifest: notify path, NO dispatch", async () => {
 			`depsNotify warning expected: ${JSON.stringify(notifications)}`,
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -386,7 +387,7 @@ test("(e) F5: runId not found → error notify, NO dispatch, NO cache invalidati
 			`error notify expected: ${JSON.stringify(notifications)}`,
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -409,7 +410,7 @@ test("(e) F5: deny aborted at the confirm overlay → NO dispatch (2-keystroke d
 		// runId-not-found test note); the safety property is zero DISPATCHES.
 		assert.ok(!notifications.some((n) => n.text.includes("op ok")), "no result notify on abort");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -446,7 +447,7 @@ test("(e) F4: backend rejection surfaces as an ERROR notify, not an info toast",
 		assert.ok(err, `error result must be notified: ${JSON.stringify(notifications)}`);
 		assert.equal(err?.level, "error", "isError result must notify at level error (F4)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -473,7 +474,7 @@ test("(e) F1: keybinding override collision on the new plan keys surfaces a warn
 			`collision revert warning expected: ${JSON.stringify(notifications)}`,
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

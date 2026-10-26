@@ -28,6 +28,7 @@ import type { RunSnapshotCache } from "../../../src/ui/run-snapshot-cache.ts";
 import type { RunUiSnapshot } from "../../../src/ui/snapshot-types.ts";
 import type { WorkflowConfig } from "../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir } from "../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "research",
@@ -148,7 +149,7 @@ function setupRun(label: string): { cwd: string; manifest: TeamRunManifest; task
 // L5 — paint path reads the cache only
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("L5: render() reads via readForRender only — never a sync refreshIfStale rebuild", () => {
+test("L5: render() reads via readForRender only — never a sync refreshIfStale rebuild", async () => {
 	const { cwd, manifest, tasks } = setupRun("l5-hit");
 	try {
 		const snapshot = buildSnapshot({ ...manifest, status: "running" }, tasks, "sig-v1");
@@ -162,11 +163,11 @@ test("L5: render() reads via readForRender only — never a sync refreshIfStale 
 		assert.equal(calls.scheduleRefresh, 0, "a cache hit schedules nothing");
 		sidebar.dispose();
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("L5: a missing entry paints the pre-load frame and schedules the async fill", () => {
+test("L5: a missing entry paints the pre-load frame and schedules the async fill", async () => {
 	const { cwd, manifest, tasks } = setupRun("l5-miss");
 	try {
 		const { cache, snapshots, calls } = makeSnapshotCache();
@@ -183,7 +184,7 @@ test("L5: a missing entry paints the pre-load frame and schedules the async fill
 		assert.ok(!second.includes("loading…"), "a filled cache paints the loaded frame");
 		sidebar.dispose();
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -191,7 +192,7 @@ test("L5: a missing entry paints the pre-load frame and schedules the async fill
 // L6 — one stable height across loading / loaded / shrunk frames
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("L6: pre-load, loaded and shrunk frames share ONE stable height (no ghost footprint)", () => {
+test("L6: pre-load, loaded and shrunk frames share ONE stable height (no ghost footprint)", async () => {
 	const { cwd, manifest, tasks } = setupRun("l6-height");
 	try {
 		const { cache, snapshots } = makeSnapshotCache();
@@ -230,7 +231,7 @@ test("L6: pre-load, loaded and shrunk frames share ONE stable height (no ghost f
 		}
 		sidebar.dispose();
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -238,7 +239,7 @@ test("L6: pre-load, loaded and shrunk frames share ONE stable height (no ghost f
 // L4 — fixed auto-close deadline
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("L4: the auto-close deadline is FIXED on first eligibility — trailing re-renders cannot slide it", (t) => {
+test("L4: the auto-close deadline is FIXED on first eligibility — trailing re-renders cannot slide it", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	const { cwd, manifest, tasks } = setupRun("l4-fixed");
 	try {
@@ -272,11 +273,11 @@ test("L4: the auto-close deadline is FIXED on first eligibility — trailing re-
 		sidebar.dispose();
 	} finally {
 		t.mock.timers.reset();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("L4: the countdown reads the FIXED deadline (remaining shrinks) and stays inside the frame", (t) => {
+test("L4: the countdown reads the FIXED deadline (remaining shrinks) and stays inside the frame", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	const { cwd, manifest, tasks } = setupRun("l4-countdown");
 	try {
@@ -308,11 +309,11 @@ test("L4: the countdown reads the FIXED deadline (remaining shrinks) and stays i
 		sidebar.dispose();
 	} finally {
 		t.mock.timers.reset();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("F5: the countdown advances across UNCHANGED-state renders (coarse time bucket in the signature)", (t) => {
+test("F5: the countdown advances across UNCHANGED-state renders (coarse time bucket in the signature)", async (t) => {
 	// Pre-fix: buildSignature only changes on state, so while NOTHING else
 	// moved the countdown line froze inside cachedLines ("3s…" until close).
 	// Post-fix: a per-second bucket joins the signature while the terminal
@@ -349,11 +350,11 @@ test("F5: the countdown advances across UNCHANGED-state renders (coarse time buc
 		sidebar.dispose();
 	} finally {
 		t.mock.timers.reset();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("L4: leaving the terminal window cancels the deadline; re-entry captures a NEW one", (t) => {
+test("L4: leaving the terminal window cancels the deadline; re-entry captures a NEW one", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	const { cwd, manifest, tasks } = setupRun("l4-rearm");
 	try {
@@ -387,11 +388,11 @@ test("L4: leaving the terminal window cancels the deadline; re-entry captures a 
 		sidebar.dispose();
 	} finally {
 		t.mock.timers.reset();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("L4: active agents reappearing cancels the pending close until they drain", (t) => {
+test("L4: active agents reappearing cancels the pending close until they drain", async (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	const { cwd, manifest, tasks } = setupRun("l4-agents");
 	try {
@@ -426,6 +427,6 @@ test("L4: active agents reappearing cancels the pending close until they drain",
 		sidebar.dispose();
 	} finally {
 		t.mock.timers.reset();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

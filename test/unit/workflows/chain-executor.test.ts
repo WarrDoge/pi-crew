@@ -47,6 +47,7 @@ import { ChainRunner, parseChainString } from "../../../src/runtime/chain-runner
 import { HandoffManager, type TaskPacket } from "../../../src/runtime/handoff-manager.ts";
 import { __test__clearManifestCache, loadRunManifestById } from "../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 // ─── fixtures / helpers ──────────────────────────────────────────────────
 
@@ -622,7 +623,7 @@ test("(v0.11.27) __chainPrevOutput renders a Previous Step Output block in the g
 	const goals0 = mock.receivedGoals[0] ?? "";
 	assert.doesNotMatch(goals0, /Previous Step Output/, "step 1 has no prev-output block");
 	try {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	} catch {
 		// best-effort temp cleanup
 	}
@@ -650,7 +651,7 @@ test("(v0.11.27 R14-C2) __chainStepTimeoutMs forwards timeoutMs to handleRun par
 	assert.equal(mock.receivedParams[0]?.timeoutMs, 90000, "--timeout 90 → runParams.timeoutMs 90000");
 	assert.equal(mock.receivedParams[1]?.timeoutMs, undefined, "no flag → no timeoutMs key (config/default deadline applies)");
 	try {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	} catch {
 		// best-effort temp cleanup
 	}

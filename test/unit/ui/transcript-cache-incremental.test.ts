@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { clearTranscriptCache, getTranscriptCacheEntry, readTranscriptLinesCached } from "../../../src/ui/transcript-cache.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 function tmpDir(prefix: string): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -27,7 +28,7 @@ function line(index: number): string {
 	return `line-${index.toString().padStart(4, "0")}-${"x".repeat(56)}`;
 }
 
-test("growing transcript reads only the appended bytes", () => {
+test("growing transcript reads only the appended bytes", async () => {
 	const tmp = tmpDir("pi-crew-tc-incremental-grow-");
 	try {
 		const transcriptPath = path.join(tmp, "growing.jsonl");
@@ -59,11 +60,11 @@ test("growing transcript reads only the appended bytes", () => {
 		assert.equal(seenTexts[1], first + appended);
 		assert.deepEqual(lines2, [...lines1, ...parseLines(appended)]);
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });
 
-test("shrinking or backdated transcript falls back to a full re-read", () => {
+test("shrinking or backdated transcript falls back to a full re-read", async () => {
 	const tmp = tmpDir("pi-crew-tc-incremental-shrink-");
 	try {
 		const transcriptPath = path.join(tmp, "rotated.jsonl");
@@ -94,11 +95,11 @@ test("shrinking or backdated transcript falls back to a full re-read", () => {
 		assert.equal(entry3?.bytesRead, Buffer.byteLength(backdated, "utf-8"));
 		assert.equal(entry3?.offset, 0);
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });
 
-test("tail cap front-trims while keeping byte offset bookkeeping across appends", () => {
+test("tail cap front-trims while keeping byte offset bookkeeping across appends", async () => {
 	const tmp = tmpDir("pi-crew-tc-incremental-tail-");
 	try {
 		const transcriptPath = path.join(tmp, "large.jsonl");
@@ -137,11 +138,11 @@ test("tail cap front-trims while keeping byte offset bookkeeping across appends"
 		// The newest content is always present in the tail.
 		assert.deepEqual(lines3.slice(-5), parseLines(more));
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });
 
-test("append ending mid-line or mid-codepoint matches a full read exactly", () => {
+test("append ending mid-line or mid-codepoint matches a full read exactly", async () => {
 	const tmp = tmpDir("pi-crew-tc-incremental-partial-");
 	try {
 		const transcriptPath = path.join(tmp, "partial.jsonl");
@@ -171,11 +172,11 @@ test("append ending mid-line or mid-codepoint matches a full read exactly", () =
 		const lines4 = readTranscriptLinesCached(transcriptPath, parseLines, Date.now());
 		assert.deepEqual(lines4, ["one", "two", "three-par€", "four"]);
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });
 
-test("full mode also grows incrementally without trimming", () => {
+test("full mode also grows incrementally without trimming", async () => {
 	const tmp = tmpDir("pi-crew-tc-incremental-full-");
 	try {
 		const transcriptPath = path.join(tmp, "full.jsonl");
@@ -200,6 +201,6 @@ test("full mode also grows incrementally without trimming", () => {
 		assert.equal(lines2[0], line(0));
 		assert.deepEqual(lines2.slice(-10), parseLines(appended));
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });

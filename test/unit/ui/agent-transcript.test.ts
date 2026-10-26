@@ -21,6 +21,7 @@ import {
 	resetAgentTranscriptCursor,
 	resetAllAgentTranscriptCursors,
 } from "../../../src/ui/inline-panel/agent-transcript.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const TASK = "task_1";
 const RUN = "run_1";
@@ -45,16 +46,16 @@ function writeEvents(fixture: Fixture, events: Array<Record<string, unknown>>, s
 	fs.appendFileSync(fixture.file, `${lines.join("\n")}\n`, "utf-8");
 }
 
-function cleanup(fixture: Fixture): void {
+async function cleanup(fixture: Fixture): Promise<void> {
 	resetAllAgentTranscriptCursors();
 	try {
-		fs.rmSync(fixture.dir, { recursive: true, force: true });
+		await removeDirWithRetry(fixture.dir);
 	} catch {
 		/* ignore */
 	}
 }
 
-test("tool start → end → message_end folds one tool card with its result", () => {
+test("tool start → end → message_end folds one tool card with its result", async () => {
 	const fixture = makeFixture();
 	try {
 		writeEvents(fixture, [
@@ -91,11 +92,11 @@ test("tool start → end → message_end folds one tool card with its result", (
 		assert.equal(assistant.type, "assistant");
 		if (assistant.type === "assistant") assert.equal(assistant.text, "Saw it.");
 	} finally {
-		cleanup(fixture);
+		await cleanup(fixture);
 	}
 });
 
-test("pi ≥0.84 role:toolResult message_end records fold FIFO into pending starts", () => {
+test("pi ≥0.84 role:toolResult message_end records fold FIFO into pending starts", async () => {
 	// Real-run shape (pi 0.84.2): results are their OWN message_end records
 	// with NO tool name, arriving in the originating message's toolCall order
 	// even when the executions complete out of order (concurrent tools).
@@ -138,11 +139,11 @@ test("pi ≥0.84 role:toolResult message_end records fold FIFO into pending star
 		// The role:toolResult records themselves must not become items.
 		assert.equal(items.filter((item) => item.type === "system").length, 0);
 	} finally {
-		cleanup(fixture);
+		await cleanup(fixture);
 	}
 });
 
-test("role:toolResult with isError marks the card and leaves later starts pending", () => {
+test("role:toolResult with isError marks the card and leaves later starts pending", async () => {
 	const fixture = makeFixture();
 	try {
 		writeEvents(fixture, [
@@ -163,11 +164,11 @@ test("role:toolResult with isError marks the card and leaves later starts pendin
 			assert.equal(read.result, undefined, "second card stays started until its result arrives");
 		}
 	} finally {
-		cleanup(fixture);
+		await cleanup(fixture);
 	}
 });
 
-test("assistant item keeps the full message (thinking + usage) normalized for the pane", () => {
+test("assistant item keeps the full message (thinking + usage) normalized for the pane", async () => {
 	const fixture = makeFixture();
 	try {
 		writeEvents(fixture, [
@@ -211,11 +212,11 @@ test("assistant item keeps the full message (thinking + usage) normalized for th
 			assert.equal((assistant.message.usage as Record<string, unknown>).input, 1200, "usage merged into the retained message");
 		}
 	} finally {
-		cleanup(fixture);
+		await cleanup(fixture);
 	}
 });
 
-test("user messages become user items", () => {
+test("user messages become user items", async () => {
 	const fixture = makeFixture();
 	try {
 		writeEvents(fixture, [
@@ -229,11 +230,11 @@ test("user messages become user items", () => {
 		assert.equal(items[0]?.type, "user");
 		assert.equal(items[0]?.type === "user" ? items[0].text : "", "Inspect the auth flow");
 	} finally {
-		cleanup(fixture);
+		await cleanup(fixture);
 	}
 });
 
-test("unknown events degrade to dim system lines only when they carry text", () => {
+test("unknown events degrade to dim system lines only when they carry text", async () => {
 	const fixture = makeFixture();
 	try {
 		writeEvents(fixture, [
@@ -245,11 +246,11 @@ test("unknown events degrade to dim system lines only when they carry text", () 
 		assert.equal(items.length, 1, "only the text-bearing system event survives");
 		assert.equal(items[0]?.type, "system");
 	} finally {
-		cleanup(fixture);
+		await cleanup(fixture);
 	}
 });
 
-test("cross-read pairing: a tool start on one read folds with its result on the next", () => {
+test("cross-read pairing: a tool start on one read folds with its result on the next", async () => {
 	const fixture = makeFixture();
 	try {
 		writeEvents(fixture, [{ type: "tool_execution_start", toolName: "bash", args: { command: "ls" } }]);
@@ -282,11 +283,11 @@ test("cross-read pairing: a tool start on one read folds with its result on the 
 			);
 		}
 	} finally {
-		cleanup(fixture);
+		await cleanup(fixture);
 	}
 });
 
-test("cursor accumulator returns full history, capped at MAX", () => {
+test("cursor accumulator returns full history, capped at MAX", async () => {
 	const fixture = makeFixture();
 	try {
 		// 510 assistant messages → ring buffer keeps the most recent 500.
@@ -302,11 +303,11 @@ test("cursor accumulator returns full history, capped at MAX", () => {
 		const last = items.at(-1);
 		assert.equal(last?.type === "assistant" ? last.text : "", "msg 509");
 	} finally {
-		cleanup(fixture);
+		await cleanup(fixture);
 	}
 });
 
-test("switch + teardown reset per-run::task state", () => {
+test("switch + teardown reset per-run::task state", async () => {
 	const fixture = makeFixture();
 	try {
 		writeEvents(fixture, [{ type: "tool_execution_start", toolName: "read", args: {} }]);
@@ -320,11 +321,11 @@ test("switch + teardown reset per-run::task state", () => {
 		const items = readAgentTranscript(fixture.manifest, TASK);
 		assert.equal(items.length, 1);
 	} finally {
-		cleanup(fixture);
+		await cleanup(fixture);
 	}
 });
 
-test("F3: transcript state is keyed by run::task — the same task id in another run starts fresh", () => {
+test("F3: transcript state is keyed by run::task — the same task id in another run starts fresh", async () => {
 	// Task ids are positional per run ("01_01-agent"), so the same name in a
 	// LATER run used to inherit the earlier run's cursor/buffer: its events
 	// were skipped as "already read" and the pane showed the OLD run's items.
@@ -351,12 +352,12 @@ test("F3: transcript state is keyed by run::task — the same task id in another
 		assert.ok(!__hasAgentTranscriptState("run_a", TASK), "A cleared");
 		assert.ok(__hasAgentTranscriptState("run_b", TASK), "B still holds its own state");
 	} finally {
-		cleanup(runA);
-		cleanup(runB);
+		await cleanup(runA);
+		await cleanup(runB);
 	}
 });
 
-test("malformed JSON lines are skipped, not fatal", () => {
+test("malformed JSON lines are skipped, not fatal", async () => {
 	const fixture = makeFixture();
 	try {
 		fs.appendFileSync(fixture.file, "not json\n", "utf-8");
@@ -365,11 +366,11 @@ test("malformed JSON lines are skipped, not fatal", () => {
 		assert.equal(items.length, 1);
 		assert.equal(items[0]?.type, "tool");
 	} finally {
-		cleanup(fixture);
+		await cleanup(fixture);
 	}
 });
 
-test("worker prompt artifact seeds the opening user message (session parity)", () => {
+test("worker prompt artifact seeds the opening user message (session parity)", async () => {
 	const fixture = makeFixture();
 	try {
 		fs.mkdirSync(path.join(fixture.dir, "prompts"), { recursive: true });
@@ -385,11 +386,11 @@ test("worker prompt artifact seeds the opening user message (session parity)", (
 		const again = readAgentTranscript(fixture.manifest, TASK);
 		assert.equal(again.filter((item) => item.type === "user").length, 1, "seeded exactly once");
 	} finally {
-		cleanup(fixture);
+		await cleanup(fixture);
 	}
 });
 
-test("missing prompt artifact is skipped without poisoning later reads", () => {
+test("missing prompt artifact is skipped without poisoning later reads", async () => {
 	const fixture = makeFixture();
 	try {
 		writeEvents(fixture, [{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "working" }] } }]);
@@ -408,6 +409,6 @@ test("missing prompt artifact is skipped without poisoning later reads", () => {
 		assert.equal(items[0]?.type, "user");
 		if (items[0]?.type === "user") assert.equal(items[0].text, "late prompt");
 	} finally {
-		cleanup(fixture);
+		await cleanup(fixture);
 	}
 });

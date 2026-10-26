@@ -35,6 +35,7 @@ import { MailboxDetailOverlay } from "../../../src/ui/overlays/mailbox-detail-ov
 import { formatHint } from "../../../src/ui/rail.ts";
 import { asCrewTheme, type CrewTheme } from "../../../src/ui/theme-adapter.ts";
 import { visibleWidth } from "../../../src/utils/visual.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const WIDTHS = [40, 80, 120] as const;
 const RAIL_GLYPHS = ["┏", "┣", "┃", "┗"];
@@ -164,12 +165,12 @@ function makeRun(): Fixture {
 	return { cwd, runId: created.manifest.runId, taskId };
 }
 
-function withRun(fn: (fixture: Fixture) => void): void {
+async function withRun(fn: (fixture: Fixture) => void): Promise<void> {
 	const fixture = makeRun();
 	try {
-		fn(fixture);
+		await fn(fixture);
 	} finally {
-		fs.rmSync(fixture.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(fixture.cwd);
 	}
 }
 
@@ -223,8 +224,8 @@ function recordingTheme(): { theme: CrewTheme; calls: Array<{ color: string; tex
 
 // ── 1. Agent picker ─────────────────────────────────────────────────────
 
-test("agent-picker: RAIL canopy + guarded disk fields (no `undefined`, `->` retired)", () => {
-	withRun(({ cwd, runId }) => {
+test("agent-picker: RAIL canopy + guarded disk fields (no `undefined`, `->` retired)", async () => {
+	await withRun(({ cwd, runId }) => {
 		const overlay = new AgentPickerOverlay({ cwd, runId, done: () => undefined, theme });
 		const lines = overlay.render(80);
 		const out = joined(lines);
@@ -324,8 +325,8 @@ test("help: canopy + `┣ SECTION` groups + no RAW TAB byte in the table", () =>
 
 // ── 4. Mailbox detail ───────────────────────────────────────────────────
 
-test("mailbox-detail: two-column body keeps `│` as an INNER separator only", () => {
-	withRun(({ cwd, runId }) => {
+test("mailbox-detail: two-column body keeps `│` as an INNER separator only", async () => {
+	await withRun(({ cwd, runId }) => {
 		const overlay = new MailboxDetailOverlay({ runId, cwd, done: () => undefined, theme });
 		const lines = overlay.render(100);
 		const bars = plain(lines);
@@ -349,12 +350,12 @@ test("mailbox-detail: two-column body keeps `│` as an INNER separator only", (
 	});
 });
 
-test("mailbox-detail: worker-sourced bodies render ESC-INERT (R4-B1 wave-2b gap)", () => {
+test("mailbox-detail: worker-sourced bodies render ESC-INERT (R4-B1 wave-2b gap)", async () => {
 	// The wave-2a sanitizeUntrustedLine sweep claimed the mailbox detail
 	// overlay but the code still rendered bodies RAW (A1 gap). A worker
 	// mailbox body carrying OSC-52/OSC-8 must render with no escape byte
 	// surviving.
-	withRun(({ cwd, runId, taskId }) => {
+	await withRun(({ cwd, runId, taskId }) => {
 		const poisoned = `${ESC}]52;c;${Buffer.from("rm -rf ~").toString("base64")}${ESC}\\ visible${ESC}]8;;file:///etc/passwd${ESC}\\click${ESC}]8;;${ESC}\\`;
 		const loaded = loadRunManifestById(cwd, runId);
 		assert.ok(loaded, "fixture manifest must load");
@@ -378,8 +379,8 @@ test("mailbox-detail: worker-sourced bodies render ESC-INERT (R4-B1 wave-2b gap)
 	});
 });
 
-test("mailbox-detail: the expanded message is a `┣ MESSAGE` section, not an inline rule", () => {
-	withRun(({ cwd, runId }) => {
+test("mailbox-detail: the expanded message is a `┣ MESSAGE` section, not an inline rule", async () => {
+	await withRun(({ cwd, runId }) => {
 		const overlay = new MailboxDetailOverlay({ runId, cwd, done: () => undefined, theme });
 		overlay.handleInput("\r");
 		const lines = overlay.render(80);
@@ -391,7 +392,7 @@ test("mailbox-detail: the expanded message is a `┣ MESSAGE` section, not an in
 	});
 });
 
-test("mailbox-detail: a truncated list uses the canonical `▼ n below` overflow hint", () => {
+test("mailbox-detail: a truncated list uses the canonical `▼ n below` overflow hint", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-overlays-rail-overflow-"));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	const team = {
@@ -419,7 +420,7 @@ test("mailbox-detail: a truncated list uses the canonical `▼ n below` overflow
 		assert.ok(out.includes("▼ 3 below"), `canonical overflow dialect expected (15 rows, 12 shown): ${out}`);
 		assert.equal(/↑ \d+ more above|↓\d+|…\d+ above/.test(out), false, "legacy overflow dialects are retired");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

@@ -17,6 +17,7 @@ import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../src/s
 import type { TeamRunManifest } from "../../../src/state/types.ts";
 import { createRunSnapshotCache } from "../../../src/ui/run-snapshot-cache.ts";
 import { activeWidgetRuns } from "../../../src/ui/widget/widget-model.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const CURRENT_WORKSPACE = "workspace-current";
 const FOREIGN_WORKSPACE = "workspace-foreign";
@@ -63,7 +64,7 @@ function makeActiveRun(cwd: string, goal: string, ownerSessionId?: string): Team
 	return manifest;
 }
 
-test("bystander sessions: activeWidgetRuns returns foreign-owned and ownerless runs, not just the current workspace's", () => {
+test("bystander sessions: activeWidgetRuns returns foreign-owned and ownerless runs, not just the current workspace's", async () => {
 	const cwd = tempCwd("pi-bystander-");
 	try {
 		const cache = createRunSnapshotCache(cwd, { ttlMs: 0 });
@@ -85,11 +86,11 @@ test("bystander sessions: activeWidgetRuns returns foreign-owned and ownerless r
 			"owned + foreign-owner + ownerless runs are all present",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("bystander sessions: workspaceId still flows into activeWidgetRuns (crash-recovery stays session-scoped)", () => {
+test("bystander sessions: workspaceId still flows into activeWidgetRuns (crash-recovery stays session-scoped)", async () => {
 	const cwd = tempCwd("pi-bystander-keep-");
 	try {
 		const cache = createRunSnapshotCache(cwd, { ttlMs: 0 });
@@ -105,6 +106,6 @@ test("bystander sessions: workspaceId still flows into activeWidgetRuns (crash-r
 		const noId = activeWidgetRuns(cwd, undefined, cache, [foreign], undefined);
 		assert.equal(noId.length, 1, "undefined workspaceId (legacy call shape) still renders the run");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

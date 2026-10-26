@@ -27,6 +27,7 @@ import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts
 import { AgentsJobsBrowser } from "../../../src/ui/agents-jobs-browser.ts";
 import { createRunSnapshotCache, type RunSnapshotCache } from "../../../src/ui/run-snapshot-cache.ts";
 import { activeWidgetRuns } from "../../../src/ui/widget/widget-model.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -145,7 +146,7 @@ test("default path renders agents from committed snapshots and tracks external c
 		assert.ok(explorer && explorer.kind === "agent" && explorer.status === "running", "the other agent is untouched");
 	} finally {
 		browser.dispose();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -168,7 +169,7 @@ test("default path parity: entries match the legacy disk projection", async () =
 		assert.equal(fromBrowser[0]?.[0], taskId);
 	} finally {
 		browser.dispose();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -188,7 +189,7 @@ test("dispose leaves injected caches alive (host ownership contract)", async () 
 		browser.dispose();
 		snapshotCache.dispose?.();
 		manifestCache.dispose();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -240,7 +241,7 @@ test("h3: legacy-uncovered active run with fresh heartbeat stays listed", async 
 		assert.equal(entries.length, 2, "both fixture agents listed via the heartbeat OR-branch");
 	} finally {
 		browser.dispose();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -261,6 +262,6 @@ test("h3: same fixture WITHOUT a fresh heartbeat stays hidden (old behavior pinn
 		);
 	} finally {
 		browser.dispose();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

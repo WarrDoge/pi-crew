@@ -7,6 +7,7 @@ import type { ScheduledJob } from "../../../src/runtime/scheduling/scheduler.ts"
 import { loadRunManifestById } from "../../../src/state/stores/state-store.ts";
 import { type AgentsBrowserAgentEntry, AgentsJobsBrowser } from "../../../src/ui/agents-jobs-browser.ts";
 import { visibleWidth } from "../../../src/utils/visual.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 // CI 3-OS parity (2026-10-16, 0.11.22 matrix): the product canonicalizes cwd
 // with realpathSync.NATIVE (paths.ts canonicalizePath) — plain realpathSync
@@ -74,8 +75,8 @@ beforeEach(() => {
 	tmpCwd = mkFixtureDir("agents-browser-");
 });
 
-afterEach(() => {
-	rmSync(tmpCwd, { recursive: true, force: true });
+afterEach(async () => {
+	await removeDirWithRetry(tmpCwd);
 });
 
 function makeBrowser(overrides: {
@@ -218,7 +219,7 @@ function bareAgentEntry(runId: string): AgentsBrowserAgentEntry {
 	return { kind: "agent", runId, taskId: "01_01-agent", role: "Explorer", status: "completed" };
 }
 
-test("R5-3: a manifest miss is not durably cached — a manifest created later is visible without force", () => {
+test("R5-3: a manifest miss is not durably cached — a manifest created later is visible without force", async () => {
 	// Pre-fix: the first miss cached null forever, so a manifest written while
 	// the overlay was open NEVER became visible (loadRunManifestById races
 	// writes lock-free; a transient read failure pinned the miss for life).
@@ -252,11 +253,11 @@ test("R5-3: a manifest miss is not durably cached — a manifest created later i
 		assert.match(after, /01_01-agent/, "detail renders from the just-written manifest (no force refresh)");
 		browser.dispose();
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("R5-3: refreshData(true) invalidates cached manifests — a deleted manifest.json stops serving after force", () => {
+test("R5-3: refreshData(true) invalidates cached manifests — a deleted manifest.json stops serving after force", async () => {
 	// Isolation trick: the RECORD (agents.json) is re-read every call, so only
 	// the manifest layer can explain a difference. Delete manifest.json but
 	// KEEP agents.json — while the manifest is cached, detail still renders
@@ -302,11 +303,11 @@ test("R5-3: refreshData(true) invalidates cached manifests — a deleted manifes
 		);
 		browser.dispose();
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("R5-3: detailLinesFor prefers the fresh entry.manifest over a disk re-read", () => {
+test("R5-3: detailLinesFor prefers the fresh entry.manifest over a disk re-read", async () => {
 	const dir = mkFixtureDir("crew-browser-manifest-entry-");
 	try {
 		const runId = "team_test_manifest_entry";
@@ -349,7 +350,7 @@ test("R5-3: detailLinesFor prefers the fresh entry.manifest over a disk re-read"
 		assert.match(lines, /01_01-agent/);
 		browser.dispose();
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -478,7 +479,7 @@ test("kitty-protocol key sequences navigate and close (freeze regression)", () =
 	browser.dispose();
 });
 
-test("default agents source mirrors the widget pipeline (state/runs agents.json)", () => {
+test("default agents source mirrors the widget pipeline (state/runs agents.json)", async () => {
 	// Regression (live probe 2026-09-14): Agent-tool subagents (foreground AND
 	// background) run as child processes and never registerLiveAgent() in the
 	// extension process — the old default (in-process live-agent registry) listed
@@ -541,7 +542,7 @@ test("default agents source mirrors the widget pipeline (state/runs agents.json)
 		assert.match(text, /Explorer/);
 		browser.dispose();
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -571,7 +572,7 @@ test("Enter on an agent fires onOpenTranscript seam; job still focuses inline de
 	browser.dispose();
 });
 
-test("transcriptPathFor falls back to status.json while the agent is RUNNING", () => {
+test("transcriptPathFor falls back to status.json while the agent is RUNNING", async () => {
 	// Live bug (2026-09-14): agents.json records for running agents carry
 	// transcriptPath=null; the live path only exists in the per-agent
 	// status.json (record.statusPath). Without the fallback, `p` died
@@ -613,11 +614,11 @@ test("transcriptPathFor falls back to status.json while the agent is RUNNING", (
 		}
 		browser.dispose();
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("transcriptPathFor tier 3: running agent resolves via artifacts convention", () => {
+test("transcriptPathFor tier 3: running agent resolves via artifacts convention", async () => {
 	// Live probe round 6 (2026-09-14): while RUNNING, neither agents.json nor
 	// status.json carries transcriptPath — but the transcript FILE exists from
 	// the first turn at <artifactsRoot>/transcripts/<taskId>.attempt-N.jsonl.
@@ -676,6 +677,6 @@ test("transcriptPathFor tier 3: running agent resolves via artifacts convention"
 		}
 		browser.dispose();
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });

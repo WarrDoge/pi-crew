@@ -14,8 +14,9 @@ import {
 	updatePiCrewPowerbar,
 } from "../../../src/ui/powerbar-publisher.ts";
 import type { RunUiSnapshot } from "../../../src/ui/snapshot-types.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
-test("powerbar publisher registers and updates active crew segments", () => {
+test("powerbar publisher registers and updates active crew segments", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-powerbar-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -61,7 +62,7 @@ test("powerbar publisher registers and updates active crew segments", () => {
 		updatePiCrewPowerbar(bus, cwd);
 		assert.ok(events.some((item) => item.event === "powerbar:update" && JSON.stringify(item.data).includes("pi-crew-active")));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -71,7 +72,7 @@ function payloadRecord(value: unknown): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
-test("powerbar progress uses task totals and respects model/token visibility", () => {
+test("powerbar progress uses task totals and respects model/token visibility", async () => {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-powerbar-tasks-home-"));
 	const previousHome = process.env.PI_TEAMS_HOME;
 	process.env.PI_TEAMS_HOME = home;
@@ -158,14 +159,14 @@ test("powerbar progress uses task totals and respects model/token visibility", (
 		assert.equal(payloadRecord(visibleActive?.data).suffix, "visible-model · 2k");
 		assert.equal(payloadRecord(visibleProgress?.data).suffix, "1/3 · 2k");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(home);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
 });
 
-test("powerbar mirrors status when no powerbar consumer is registered", () => {
+test("powerbar mirrors status when no powerbar consumer is registered", async () => {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-powerbar-fallback-home-"));
 	const previousHome = process.env.PI_TEAMS_HOME;
 	process.env.PI_TEAMS_HOME = home;
@@ -228,14 +229,14 @@ test("powerbar mirrors status when no powerbar consumer is registered", () => {
 		// setStatusFallback is intentionally NOT called - crew-widget manages "pi-crew" status
 		assert.equal(statuses.length, 0);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(home);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
 });
 
-test("powerbar skips status fallback when a powerbar consumer is registered", () => {
+test("powerbar skips status fallback when a powerbar consumer is registered", async () => {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-powerbar-consumer-home-"));
 	const previousHome = process.env.PI_TEAMS_HOME;
 	process.env.PI_TEAMS_HOME = home;
@@ -295,14 +296,14 @@ test("powerbar skips status fallback when a powerbar consumer is registered", ()
 		updatePiCrewPowerbar(bus, cwd, {}, undefined, undefined, ctx);
 		assert.equal(statuses.length, 0);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(home);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
 });
 
-test("powerbar active segment includes notification badge", () => {
+test("powerbar active segment includes notification badge", async () => {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-powerbar-badge-home-"));
 	const previousHome = process.env.PI_TEAMS_HOME;
 	process.env.PI_TEAMS_HOME = home;
@@ -360,8 +361,8 @@ test("powerbar active segment includes notification badge", () => {
 			.find((item) => item.id === "pi-crew-active" && typeof item.text === "string");
 		assert.match(String(active?.text ?? ""), /3/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(home);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
@@ -416,7 +417,7 @@ function findActivePayload(events: Array<{ event: string; data: unknown }>): Rec
 		.find((item) => item?.id === "pi-crew-active" && typeof item.text === "string");
 }
 
-test("powerbar self-derives workspaceId from ctx.sessionManager and filters runs by ownerSessionId (#10)", () => {
+test("powerbar self-derives workspaceId from ctx.sessionManager and filters runs by ownerSessionId (#10)", async () => {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-powerbar-session-home-"));
 	const previousHome = process.env.PI_TEAMS_HOME;
 	process.env.PI_TEAMS_HOME = home;
@@ -476,14 +477,14 @@ test("powerbar self-derives workspaceId from ctx.sessionManager and filters runs
 		// Only B (2) + ownerless (1) survive the owner filter → 3 running agents.
 		assert.match(String(active?.text ?? ""), /^⚙ 3 running/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(home);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
 });
 
-test("powerbar processes all runs when ctx has no sessionManager (back-compat, #10)", () => {
+test("powerbar processes all runs when ctx has no sessionManager (back-compat, #10)", async () => {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-powerbar-nosession-home-"));
 	const previousHome = process.env.PI_TEAMS_HOME;
 	process.env.PI_TEAMS_HOME = home;
@@ -538,14 +539,14 @@ test("powerbar processes all runs when ctx has no sessionManager (back-compat, #
 		// All three runs processed → 3 + 2 + 1 = 6 running agents.
 		assert.match(String(active?.text ?? ""), /^⚙ 6 running/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(home);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
 });
 
-test("powerbar dedups per-segment when payload unchanged across renders (1.8)", () => {
+test("powerbar dedups per-segment when payload unchanged across renders (1.8)", async () => {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-powerbar-dedup-home-"));
 	const previousHome = process.env.PI_TEAMS_HOME;
 	process.env.PI_TEAMS_HOME = home;
@@ -637,14 +638,14 @@ test("powerbar dedups per-segment when payload unchanged across renders (1.8)", 
 		// Run is no longer active (no running agents); publisher emits clear payloads ({id} only).
 		assert.ok(reactedUpdates.some((e) => payloadRecord(e.data).id === "pi-crew-active" && payloadRecord(e.data).text === undefined));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(home);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
 });
 
-test("powerbar plan segment shows plan:pending only while approval is pending (WP-3)", () => {
+test("powerbar plan segment shows plan:pending only while approval is pending (WP-3)", async () => {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-powerbar-plan-home-"));
 	const previousHome = process.env.PI_TEAMS_HOME;
 	process.env.PI_TEAMS_HOME = home;
@@ -759,8 +760,8 @@ test("powerbar plan segment shows plan:pending only while approval is pending (W
 		assert.ok(cleared, "plan clear payload must be emitted after approval");
 		assert.equal(cleared?.text, undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(home);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}

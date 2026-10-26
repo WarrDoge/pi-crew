@@ -41,6 +41,7 @@ import { AgentPickerOverlay } from "../../../src/ui/overlays/agent-picker-overla
 import { ConfirmOverlay } from "../../../src/ui/overlays/confirm-overlay.ts";
 import { MailboxComposeOverlay } from "../../../src/ui/overlays/mailbox-compose-overlay.ts";
 import { MailboxDetailOverlay } from "../../../src/ui/overlays/mailbox-detail-overlay.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const OVERLAY_FILES = ["agent-picker-overlay.ts", "confirm-overlay.ts", "mailbox-detail-overlay.ts", "mailbox-compose-overlay.ts"] as const;
 
@@ -62,18 +63,18 @@ afterEach(() => {
 });
 
 /** Run `fn` with `keybindings` written to `<tmp>/.crew/config.json` as cwd. */
-function withConfigKeybindings<T>(keybindings: Record<string, unknown>, fn: (cwd: string) => T): T {
+async function withConfigKeybindings<T>(keybindings: Record<string, unknown>, fn: (cwd: string) => T): Promise<T> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-overlay-kb-"));
 	try {
 		fs.mkdirSync(path.join(dir, ".crew"), { recursive: true });
 		fs.writeFileSync(path.join(dir, ".crew", "config.json"), JSON.stringify({ keybindings }), "utf-8");
 		process.chdir(dir);
 		__test__resetKeybindingCache();
-		return fn(dir);
+		return await fn(dir);
 	} finally {
 		process.chdir(origCwd);
 		__test__resetKeybindingCache();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 }
 
@@ -200,11 +201,11 @@ describe("M2-1 — overlay:* default keys are byte-identical to the pre-migratio
 // ─── (a) override through .crew/config.json changes behaviour ───────────────
 
 describe('M2-1 — keybindings["overlay:..."] override actually takes effect', () => {
-	it("agent-picker: close remapped via .crew/config.json → the OLD key stops closing and the NEW key closes", () => {
+	it("agent-picker: close remapped via .crew/config.json → the OLD key stops closing and the NEW key closes", async () => {
 		let doneCalls = 0;
 		const overlay = new AgentPickerOverlay({ cwd: "/nonexistent-run-dir", runId: "team_x", done: () => (doneCalls += 1) });
 
-		withConfigKeybindings({ "overlay:agent-picker:close": ["x"] }, () => {
+		await withConfigKeybindings({ "overlay:agent-picker:close": ["x"] }, () => {
 			// The resolver reflects the override…
 			assert.equal(overlayActionForKey("agent-picker", "x"), "close");
 			assert.equal(overlayActionForKey("agent-picker", "q"), undefined, "default 'q' is replaced, not merged");
@@ -217,11 +218,11 @@ describe('M2-1 — keybindings["overlay:..."] override actually takes effect', (
 		assert.equal(getKeybindingOverrideWarnings().length, 0, "valid overlay override → no collision warning");
 	});
 
-	it("confirm: the confirm key remapped via .crew/config.json changes which key confirms", () => {
+	it("confirm: the confirm key remapped via .crew/config.json changes which key confirms", async () => {
 		const decisions: boolean[] = [];
 		const overlay = new ConfirmOverlay({ title: "Delete run?", defaultAction: "confirm" }, (ok) => decisions.push(ok));
 
-		withConfigKeybindings({ "overlay:confirm:confirm": ["z"] }, () => {
+		await withConfigKeybindings({ "overlay:confirm:confirm": ["z"] }, () => {
 			overlay.handleInput("z");
 			overlay.handleInput("y"); // no longer bound → must do nothing
 			overlay.handleInput("\r"); // 'submit' still confirms (defaultAction = confirm)
@@ -229,9 +230,9 @@ describe('M2-1 — keybindings["overlay:..."] override actually takes effect', (
 		});
 	});
 
-	it("mailbox-compose: remapping 'nextField' keeps the free-text passthrough working", () => {
+	it("mailbox-compose: remapping 'nextField' keeps the free-text passthrough working", async () => {
 		const overlay = new MailboxComposeOverlay({ done: () => undefined });
-		withConfigKeybindings({ "overlay:mailbox-compose:nextField": ["w"] }, () => {
+		await withConfigKeybindings({ "overlay:mailbox-compose:nextField": ["w"] }, () => {
 			assert.equal(overlayActionForKey("mailbox-compose", "w"), "nextField");
 			assert.equal(overlayActionForKey("mailbox-compose", "\t"), undefined, "default Tab is replaced");
 			assert.equal(overlayActionForKey("mailbox-compose", "a"), undefined, "plain letters stay unbound (free text)");
@@ -242,10 +243,10 @@ describe('M2-1 — keybindings["overlay:..."] override actually takes effect', (
 		});
 	});
 
-	it("mailbox-detail: remapping 'ack' moves the ack key", () => {
+	it("mailbox-detail: remapping 'ack' moves the ack key", async () => {
 		const actions: unknown[] = [];
 		const overlay = new MailboxDetailOverlay({ runId: "team_y", cwd: "/nonexistent-run-dir", done: (a) => actions.push(a) });
-		withConfigKeybindings({ "overlay:mailbox-detail:ack": ["Z"] }, () => {
+		await withConfigKeybindings({ "overlay:mailbox-detail:ack": ["Z"] }, () => {
 			assert.equal(overlayActionForKey("mailbox-detail", "Z"), "ack");
 			assert.equal(overlayActionForKey("mailbox-detail", "A"), undefined, "default 'A' is replaced");
 			// 'A' no longer acks; 'X' (ack-all) is unrelated and keeps working.
@@ -254,8 +255,8 @@ describe('M2-1 — keybindings["overlay:..."] override actually takes effect', (
 		});
 	});
 
-	it("PI_CREW_KEYBINDINGS drives overlay keys too (same pipeline, env wins over config)", () => {
-		withConfigKeybindings({ "overlay:confirm:cancel": ["x"] }, () => {
+	it("PI_CREW_KEYBINDINGS drives overlay keys too (same pipeline, env wins over config)", async () => {
+		await withConfigKeybindings({ "overlay:confirm:cancel": ["x"] }, () => {
 			process.env.PI_CREW_KEYBINDINGS = JSON.stringify({ "overlay:confirm:cancel": ["w"] });
 			__test__resetKeybindingCache();
 			assert.equal(overlayActionForKey("confirm", "w"), "cancel", "env override applies");
@@ -264,18 +265,18 @@ describe('M2-1 — keybindings["overlay:..."] override actually takes effect', (
 		});
 	});
 
-	it("a dashboard override does not disturb overlay keys", () => {
-		withConfigKeybindings({ reload: ["z"] }, () => {
+	it("a dashboard override does not disturb overlay keys", async () => {
+		await withConfigKeybindings({ reload: ["z"] }, () => {
 			assert.equal(dashboardActionForKey("z", undefined), "reload");
 			assert.equal(overlayActionForKey("confirm", "q"), "cancel", "overlay defaults untouched");
 			assert.equal(overlayActionForKey("agent-picker", "q"), "close", "overlay defaults untouched");
 		});
 	});
 
-	it("an overlay override does not disturb dashboard keys", () => {
+	it("an overlay override does not disturb dashboard keys", async () => {
 		// US-020 note: "x" is now the dashboard's own cancel key, so the
 		// does-not-inherit example uses "z" (unbound everywhere by default).
-		withConfigKeybindings({ "overlay:agent-picker:close": ["z"] }, () => {
+		await withConfigKeybindings({ "overlay:agent-picker:close": ["z"] }, () => {
 			assert.equal(overlayActionForKey("agent-picker", "z"), "close");
 			assert.equal(dashboardActionForKey("q", undefined), "close", "dashboard 'q' untouched");
 			assert.equal(dashboardActionForKey("z", undefined), undefined, "dashboard does not inherit overlay keys");
@@ -286,8 +287,8 @@ describe('M2-1 — keybindings["overlay:..."] override actually takes effect', (
 // ─── collision handling inside one overlay ─────────────────────────────────
 
 describe("M2-1 — an overlay override that collides inside its own overlay is reverted", () => {
-	it("reverts and warns when the new key is already used by another action of the same overlay", () => {
-		withConfigKeybindings({ "overlay:agent-picker:close": ["j"] }, () => {
+	it("reverts and warns when the new key is already used by another action of the same overlay", async () => {
+		await withConfigKeybindings({ "overlay:agent-picker:close": ["j"] }, () => {
 			// 'j' is `down` in the same overlay → ambiguous → revert to defaults.
 			assert.equal(overlayActionForKey("agent-picker", "j"), "down", "collision loser keeps its default action");
 			assert.equal(overlayActionForKey("agent-picker", "q"), "close", "colliding override reverted to default key");
@@ -300,8 +301,8 @@ describe("M2-1 — an overlay override that collides inside its own overlay is r
 		});
 	});
 
-	it("keeps the override when it is unambiguous inside the overlay", () => {
-		withConfigKeybindings({ "overlay:mailbox-detail:close": ["z"] }, () => {
+	it("keeps the override when it is unambiguous inside the overlay", async () => {
+		await withConfigKeybindings({ "overlay:mailbox-detail:close": ["z"] }, () => {
 			assert.equal(overlayActionForKey("mailbox-detail", "z"), "close");
 			assert.equal(getKeybindingOverrideWarnings().length, 0, "no collision → no warning");
 		});

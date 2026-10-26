@@ -28,6 +28,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { discoverPiThemes, formatThemesListing, getActivePiTheme, setPiTheme } from "../../../src/ui/theme-discovery.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 const SOURCE_PATH = path.join(import.meta.dirname ?? __dirname, "../../../src/ui/theme-discovery.ts");
 
@@ -89,12 +90,12 @@ before(() => {
 	fs.writeFileSync(settingsFile(), `${JSON.stringify({ theme: ACTIVE_THEME, lastChangelogVersion: "0.85.1" }, null, 2)}\n`, "utf8");
 });
 
-after(() => {
+after(async () => {
 	if (originalHome === undefined) delete process.env.HOME;
 	else process.env.HOME = originalHome;
 	if (originalUserProfile === undefined) delete process.env.USERPROFILE;
 	else process.env.USERPROFILE = originalUserProfile;
-	fs.rmSync(tmpHome, { recursive: true, force: true });
+	await removeDirWithRetry(tmpHome);
 });
 
 describe("M1-1 P0-1: theme discovery works under ESM", () => {
@@ -173,7 +174,7 @@ describe("M1-1 P0-1: theme discovery works under ESM", () => {
 		}
 	});
 
-	it("reads only the sandboxed HOME — an empty HOME yields the 2 builtins", () => {
+	it("reads only the sandboxed HOME — an empty HOME yields the 2 builtins", async () => {
 		const emptyHome = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "pi-crew-theme-empty-"));
 		const savedHome = process.env.HOME;
 		const savedProfile = process.env.USERPROFILE;
@@ -190,7 +191,7 @@ describe("M1-1 P0-1: theme discovery works under ESM", () => {
 		} finally {
 			process.env.HOME = savedHome;
 			process.env.USERPROFILE = savedProfile;
-			fs.rmSync(emptyHome, { recursive: true, force: true });
+			await removeDirWithRetry(emptyHome);
 		}
 	});
 

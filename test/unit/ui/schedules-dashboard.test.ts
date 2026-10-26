@@ -33,6 +33,7 @@ import type { ScheduledJob } from "../../../src/runtime/scheduling/scheduler.ts"
 import type { TeamRunManifest } from "../../../src/state/types.ts";
 import { dashboardActionForKey } from "../../../src/ui/keybinding-map.ts";
 import { RunDashboard, type RunDashboardSelection, scheduleDashboardActionToSubAction } from "../../../src/ui/run-dashboard.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 function job(partial: Partial<ScheduledJob> & { id: string }): ScheduledJob {
 	return {
@@ -303,7 +304,7 @@ test("emitted schedule actions are consumable by the REAL extension layer (handl
 			);
 		}
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });
 

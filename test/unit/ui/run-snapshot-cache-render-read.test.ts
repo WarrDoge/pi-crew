@@ -29,6 +29,7 @@ import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../src/s
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
 import { createRunSnapshotCache } from "../../../src/ui/run-snapshot-cache.ts";
 import type { RunUiSnapshot } from "../../../src/ui/snapshot-types.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 function tempCwd(prefix: string): string {
 	let cwd = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -107,7 +108,7 @@ function completedTasks(tasks: TeamTaskState[]): TeamTaskState[] {
 	}));
 }
 
-test("readForRender returns the cached snapshot without a sync rebuild (pin a)", () => {
+test("readForRender returns the cached snapshot without a sync rebuild (pin a)", async () => {
 	const cwd = tempCwd("pi-crew-render-read-cached-");
 	let cache: ReturnType<typeof createRunSnapshotCache> | undefined;
 	try {
@@ -136,7 +137,7 @@ test("readForRender returns the cached snapshot without a sync rebuild (pin a)",
 		}
 	} finally {
 		cache?.dispose?.();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -176,7 +177,7 @@ test("readForRender schedules a coalesced async refresh when stamps go stale (pi
 		assert.equal(final.progress.completed, 1, "the async rebuild must reflect the changed tasks.json");
 	} finally {
 		cache?.dispose?.();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -207,11 +208,11 @@ test("readForRender returns undefined for an unknown runId without building (pin
 		assert.equal(cache.snapshotsByKey().size, 0);
 	} finally {
 		cache?.dispose?.();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("readForRender touches LRU/access so a paint read protects the entry from eviction", () => {
+test("readForRender touches LRU/access so a paint read protects the entry from eviction", async () => {
 	const cwd = tempCwd("pi-crew-render-read-lru-");
 	let cache: ReturnType<typeof createRunSnapshotCache> | undefined;
 	try {
@@ -233,7 +234,7 @@ test("readForRender touches LRU/access so a paint read protects the entry from e
 		assert.ok(cache.get(c.manifest.runId), "the freshly inserted entry must survive eviction");
 	} finally {
 		cache?.dispose?.();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -263,6 +264,6 @@ test("readForRender with a fresh TTL does zero work beyond the cache hit", async
 		assert.equal(snap?.progress.completed, 0);
 	} finally {
 		cache?.dispose?.();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

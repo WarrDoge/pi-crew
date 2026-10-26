@@ -13,6 +13,7 @@ import * as path from "node:path";
 import test from "node:test";
 import type { DwfCheckpointState } from "../../../src/runtime/dwf-state-store.ts";
 import { DWF_CHECKPOINT_VERSION, DwfStore } from "../../../src/runtime/dwf-state-store.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 function makeTmpStateRoot(): string {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-dwf-store-"));
@@ -33,7 +34,7 @@ function sampleState(runId: string): DwfCheckpointState {
 	};
 }
 
-test("DwfStore.save/load round-trip persists the full checkpoint state", () => {
+test("DwfStore.save/load round-trip persists the full checkpoint state", async () => {
 	const stateRoot = makeTmpStateRoot();
 	try {
 		const store = new DwfStore(stateRoot);
@@ -55,11 +56,11 @@ test("DwfStore.save/load round-trip persists the full checkpoint state", () => {
 		assert.equal(typeof loaded!.updatedAt, "string");
 		assert.ok(loaded!.updatedAt.length > 0);
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });
 
-test("DwfStore.save() stamps updatedAt (caller's value is overwritten)", () => {
+test("DwfStore.save() stamps updatedAt (caller's value is overwritten)", async () => {
 	const stateRoot = makeTmpStateRoot();
 	try {
 		const store = new DwfStore(stateRoot);
@@ -77,21 +78,21 @@ test("DwfStore.save() stamps updatedAt (caller's value is overwritten)", () => {
 		assert.notEqual(loaded.updatedAt, later, "save() must stamp its own updatedAt");
 		assert.equal(loaded.agentCount, 5);
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });
 
-test("DwfStore.load() returns undefined for a missing checkpoint (fresh run)", () => {
+test("DwfStore.load() returns undefined for a missing checkpoint (fresh run)", async () => {
 	const stateRoot = makeTmpStateRoot();
 	try {
 		const store = new DwfStore(stateRoot);
 		assert.equal(store.load(), undefined, "no checkpoint → undefined (fresh run)");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });
 
-test("DwfStore.delete() removes the checkpoint file", () => {
+test("DwfStore.delete() removes the checkpoint file", async () => {
 	const stateRoot = makeTmpStateRoot();
 	try {
 		const store = new DwfStore(stateRoot);
@@ -102,43 +103,43 @@ test("DwfStore.delete() removes the checkpoint file", () => {
 		assert.equal(store.load(), undefined, "checkpoint removed after delete");
 		assert.ok(!fs.existsSync(path.join(stateRoot, "dwf-checkpoint.json")), "file is gone");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });
 
-test("DwfStore.delete() is a no-op when no checkpoint exists (never throws)", () => {
+test("DwfStore.delete() is a no-op when no checkpoint exists (never throws)", async () => {
 	const stateRoot = makeTmpStateRoot();
 	try {
 		const store = new DwfStore(stateRoot);
 		assert.doesNotThrow(() => store.delete(), "delete on missing checkpoint must not throw");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });
 
-test("DwfStore.load() returns undefined for a corrupt JSON file", () => {
+test("DwfStore.load() returns undefined for a corrupt JSON file", async () => {
 	const stateRoot = makeTmpStateRoot();
 	try {
 		const store = new DwfStore(stateRoot);
 		fs.writeFileSync(path.join(stateRoot, "dwf-checkpoint.json"), "{not valid json");
 		assert.equal(store.load(), undefined, "corrupt JSON → undefined (treated as fresh run)");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });
 
-test("DwfStore.load() returns undefined when runId is missing/non-string", () => {
+test("DwfStore.load() returns undefined when runId is missing/non-string", async () => {
 	const stateRoot = makeTmpStateRoot();
 	try {
 		const store = new DwfStore(stateRoot);
 		fs.writeFileSync(path.join(stateRoot, "dwf-checkpoint.json"), JSON.stringify({ vars: {} }));
 		assert.equal(store.load(), undefined, "object without a string runId → undefined (corrupt-guard)");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });
 
-test("DwfStore.save() writes atomically to <stateRoot>/dwf-checkpoint.json", () => {
+test("DwfStore.save() writes atomically to <stateRoot>/dwf-checkpoint.json", async () => {
 	const stateRoot = makeTmpStateRoot();
 	try {
 		const store = new DwfStore(stateRoot);
@@ -149,11 +150,11 @@ test("DwfStore.save() writes atomically to <stateRoot>/dwf-checkpoint.json", () 
 		const raw = fs.readFileSync(expected, "utf-8");
 		assert.doesNotThrow(() => JSON.parse(raw), "persisted file is valid JSON");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });
 
-test("DwfStore.save() creates the stateRoot dir if it does not exist yet", () => {
+test("DwfStore.save() creates the stateRoot dir if it does not exist yet", async () => {
 	const parent = makeTmpStateRoot();
 	const nested = path.join(parent, "runs", "team_nested");
 	try {
@@ -161,11 +162,11 @@ test("DwfStore.save() creates the stateRoot dir if it does not exist yet", () =>
 		store.save(sampleState("team_nested"));
 		assert.ok(fs.existsSync(path.join(nested, "dwf-checkpoint.json")), "mkdirSync recursive created the dir tree");
 	} finally {
-		fs.rmSync(parent, { recursive: true, force: true });
+		await cleanupStateRoot(parent);
 	}
 });
 
-test("DwfStore.save() preserves large logs/spent across repeated saves (no truncation on disk)", () => {
+test("DwfStore.save() preserves large logs/spent across repeated saves (no truncation on disk)", async () => {
 	const stateRoot = makeTmpStateRoot();
 	try {
 		const store = new DwfStore(stateRoot);
@@ -186,7 +187,7 @@ test("DwfStore.save() preserves large logs/spent across repeated saves (no trunc
 		assert.equal(loaded.spent, 99999);
 		assert.equal(loaded.agentCount, 50);
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });
 
@@ -200,7 +201,7 @@ test("DwfStore.save() preserves large logs/spent across repeated saves (no trunc
 // survives an upgrade.
 // ---------------------------------------------------------------------------
 
-test("R6-12: save() stamps version=DWF_CHECKPOINT_VERSION (a bogus value is overwritten)", () => {
+test("R6-12: save() stamps version=DWF_CHECKPOINT_VERSION (a bogus value is overwritten)", async () => {
 	const stateRoot = makeTmpStateRoot();
 	try {
 		const store = new DwfStore(stateRoot);
@@ -212,22 +213,22 @@ test("R6-12: save() stamps version=DWF_CHECKPOINT_VERSION (a bogus value is over
 			"save() stamps the version like updatedAt — the persisted format is always current",
 		);
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });
 
-test("R6-12: load() REJECTS an unknown future version (version: 2)", () => {
+test("R6-12: load() REJECTS an unknown future version (version: 2)", async () => {
 	const stateRoot = makeTmpStateRoot();
 	try {
 		const store = new DwfStore(stateRoot);
 		fs.writeFileSync(path.join(stateRoot, "dwf-checkpoint.json"), JSON.stringify({ ...sampleState("team_dwf_future"), version: 2 }));
 		assert.equal(store.load(), undefined, "future-format checkpoint is rejected → fresh run (never mis-hydrated)");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });
 
-test("R6-12: load() rejects a non-numeric garbage version", () => {
+test("R6-12: load() rejects a non-numeric garbage version", async () => {
 	const stateRoot = makeTmpStateRoot();
 	try {
 		const store = new DwfStore(stateRoot);
@@ -237,11 +238,11 @@ test("R6-12: load() rejects a non-numeric garbage version", () => {
 		);
 		assert.equal(store.load(), undefined, "non-numeric version is unknown → rejected");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });
 
-test("R6-12: load() ACCEPTS a legacy checkpoint with no version field (upgrade-safe resume)", () => {
+test("R6-12: load() ACCEPTS a legacy checkpoint with no version field (upgrade-safe resume)", async () => {
 	const stateRoot = makeTmpStateRoot();
 	try {
 		const store = new DwfStore(stateRoot);
@@ -253,6 +254,6 @@ test("R6-12: load() ACCEPTS a legacy checkpoint with no version field (upgrade-s
 		assert.equal(loaded!.runId, "team_dwf_legacy");
 		assert.equal(loaded!.agentCount, 2);
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });

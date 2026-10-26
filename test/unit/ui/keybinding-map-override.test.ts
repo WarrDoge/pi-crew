@@ -13,11 +13,12 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { __test__resetKeybindingCache, dashboardActionForKey, getKeybindingOverrideWarnings } from "../../../src/ui/keybinding-map.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 describe("keybinding-map override (UI-2)", () => {
 	const origEnv = process.env.PI_CREW_KEYBINDINGS;
@@ -75,7 +76,7 @@ describe("keybinding-map override (UI-2)", () => {
 		);
 	});
 
-	it("reads overrides from .crew/config.json keybindings section", () => {
+	it("reads overrides from .crew/config.json keybindings section", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-crew-kb-"));
 		try {
 			mkdirSync(join(dir, ".crew"), { recursive: true });
@@ -89,11 +90,11 @@ describe("keybinding-map override (UI-2)", () => {
 			assert.equal(dashboardActionForKey("a", undefined), "artifacts");
 		} finally {
 			process.chdir(origCwd);
-			rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 
-	it("env override takes precedence over config override", () => {
+	it("env override takes precedence over config override", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "pi-crew-kb-prec-"));
 		try {
 			mkdirSync(join(dir, ".crew"), { recursive: true });
@@ -109,7 +110,7 @@ describe("keybinding-map override (UI-2)", () => {
 			assert.equal(dashboardActionForKey("r", undefined), undefined);
 		} finally {
 			process.chdir(origCwd);
-			rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 
@@ -134,7 +135,7 @@ describe("keybinding-map override (UI-2)", () => {
 	});
 });
 
-it("RR-020 A0-4: reads overrides from the .pi/teams layout too (no hardcoded .crew)", () => {
+it("RR-020 A0-4: reads overrides from the .pi/teams layout too (no hardcoded .crew)", async () => {
 	const origCwdLocal = process.cwd();
 	const dir = mkdtempSync(join(tmpdir(), "pi-crew-kb-pi-"));
 	try {
@@ -161,6 +162,6 @@ it("RR-020 A0-4: reads overrides from the .pi/teams layout too (no hardcoded .cr
 	} finally {
 		process.chdir(origCwdLocal);
 		__test__resetKeybindingCache();
-		rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });

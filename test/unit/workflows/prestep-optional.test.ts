@@ -10,6 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { allWorkflows, discoverWorkflows } from "../../../src/workflows/discover-workflows.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 function writeProjectWorkflow(cwd: string, body: string): void {
 	const dir = path.join(cwd, ".crew", "workflows");
@@ -17,7 +18,7 @@ function writeProjectWorkflow(cwd: string, body: string): void {
 	fs.writeFileSync(path.join(dir, "prestep-opt.workflow.md"), body);
 }
 
-test("discoverWorkflows parses preStepOptional=true from a workflow file", () => {
+test("discoverWorkflows parses preStepOptional=true from a workflow file", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-prestep-"));
 	try {
 		writeProjectWorkflow(
@@ -44,11 +45,11 @@ test("discoverWorkflows parses preStepOptional=true from a workflow file", () =>
 		assert.ok(step, "step 'run' present");
 		assert.equal(step!.preStepOptional, true, "preStepOptional='true' → true");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("discoverWorkflows parses preStepOptional=1 as true", () => {
+test("discoverWorkflows parses preStepOptional=1 as true", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-prestep-"));
 	try {
 		writeProjectWorkflow(
@@ -71,11 +72,11 @@ test("discoverWorkflows parses preStepOptional=1 as true", () => {
 		const step = wf!.steps.find((s) => s.id === "run")!;
 		assert.equal(step.preStepOptional, true, "preStepOptional='1' → true");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("discoverWorkflows defaults preStepOptional to false when absent", () => {
+test("discoverWorkflows defaults preStepOptional to false when absent", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-prestep-"));
 	try {
 		writeProjectWorkflow(
@@ -98,7 +99,7 @@ test("discoverWorkflows defaults preStepOptional to false when absent", () => {
 		const step = wf!.steps.find((s) => s.id === "run")!;
 		assert.notEqual(step.preStepOptional, true, "absent → not true (fail-fast default preserved)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
