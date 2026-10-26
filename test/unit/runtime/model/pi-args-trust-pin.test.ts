@@ -6,7 +6,7 @@
 // (security.md:57 — probe-verified /tmp/pi-r3impl probe2). Surface TUI spawns
 // strip the flag to keep the interactive trust prompt available.
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -19,6 +19,7 @@ import type {
 	SurfaceProvider,
 	SurfaceSpawnOpts,
 } from "../../../../src/runtime/surface/surface-provider.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function agent(fields: Partial<AgentConfig> = {}): AgentConfig {
 	return {
@@ -102,7 +103,7 @@ test("D1: surface TUI spawn strips --no-approve (interactive trust prompt stays)
 		// the captured script IS the pane pi command, just without the flag.
 		assert.ok(script.includes("--tui-mode"), "sanity: the launch script carries the surface pi command");
 	} finally {
-		rmSync(workRoot, { recursive: true, force: true });
-		rmSync(launchDir, { recursive: true, force: true });
+		await removeDirWithRetry(workRoot);
+		await removeDirWithRetry(launchDir);
 	}
 });

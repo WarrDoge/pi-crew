@@ -16,6 +16,7 @@ import { afterEach, describe, it } from "node:test";
 import { CrewError, ErrorCode } from "../../../../src/errors.ts";
 import { buildConfiguredModelRouting } from "../../../../src/runtime/model/model-fallback.ts";
 import { checkModelScope, isModelInScope, matchesModelPattern, patternToRegExp } from "../../../../src/runtime/model/model-scope.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Use a fresh temp cwd per test so configuredModelInfosFromPiConfig doesn't
 // leak the host project's pi settings into the routing candidates (otherwise
@@ -26,11 +27,11 @@ function freshCwd(): string {
 	tempDirs.push(dir);
 	return dir;
 }
-afterEach(() => {
+afterEach(async () => {
 	while (tempDirs.length > 0) {
 		const dir = tempDirs.pop()!;
 		try {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		} catch {
 			/* ignore */
 		}

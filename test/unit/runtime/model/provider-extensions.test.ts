@@ -5,17 +5,18 @@ import * as path from "node:path";
 import test from "node:test";
 import { discoverProviderExtensionPaths, discoverProviderExtensions } from "../../../../src/runtime/model/provider-extensions.ts";
 import { packageRoot } from "../../../../src/utils/paths.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ─── discoverProviderExtensions — pure discovery logic ─────────────────────
 
-function makeFakeRegistry(): { settingsPath: string; npmBase: string; cleanup: () => void } {
+function makeFakeRegistry(): { settingsPath: string; npmBase: string; cleanup: () => Promise<void> } {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-prov-ext-"));
 	const settingsPath = path.join(root, "settings.json");
 	const npmBase = path.join(root, "npm", "node_modules");
 	return {
 		settingsPath,
 		npmBase,
-		cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+		cleanup: () => removeDirWithRetry(root),
 	};
 }
 
@@ -33,7 +34,7 @@ function writePackage(pkgName: string, npmBase: string, piExtensions?: string[],
 	return dir;
 }
 
-test("discoverProviderExtensions: resolves npm: packages via pi.extensions", () => {
+test("discoverProviderExtensions: resolves npm: packages via pi.extensions", async () => {
 	const { settingsPath, npmBase, cleanup } = makeFakeRegistry();
 	try {
 		writePackage("pi-commandcode-provider", npmBase, ["./index.ts"]);
@@ -44,11 +45,11 @@ test("discoverProviderExtensions: resolves npm: packages via pi.extensions", () 
 		assert.ok(result[0].entryPath.endsWith("index.ts"));
 		assert.ok(result[0].entryPath.includes("pi-commandcode-provider"));
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("discoverProviderExtensions: skips self (pi-crew orchestrator) even when listed in settings", () => {
+test("discoverProviderExtensions: skips self (pi-crew orchestrator) even when listed in settings", async () => {
 	const { settingsPath, cleanup } = makeFakeRegistry();
 	try {
 		// packageRoot() is invariant; a settings.json that happens to list it
@@ -58,11 +59,11 @@ test("discoverProviderExtensions: skips self (pi-crew orchestrator) even when li
 		const result = discoverProviderExtensions(settingsPath);
 		assert.equal(result.length, 0, "self (pi-crew) must be skipped");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("discoverProviderExtensions: resolves local-path packages relative to settings.json dir", () => {
+test("discoverProviderExtensions: resolves local-path packages relative to settings.json dir", async () => {
 	const { settingsPath, npmBase, cleanup } = makeFakeRegistry();
 	try {
 		// Simulate a local-path provider extension (like pi-other-provider).
@@ -83,11 +84,11 @@ test("discoverProviderExtensions: resolves local-path packages relative to setti
 		// matches on Windows, where the resolved entryPath uses "\\" separators.
 		assert.ok(result[0].entryPath.endsWith(path.join("local-prov-ext", "index.ts")));
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("discoverProviderExtensions: skips git/file/http specs (only npm: and local paths)", () => {
+test("discoverProviderExtensions: skips git/file/http specs (only npm: and local paths)", async () => {
 	const { settingsPath, npmBase, cleanup } = makeFakeRegistry();
 	try {
 		writePackage("pi-commandcode-provider", npmBase, ["./index.ts"]);
@@ -101,22 +102,22 @@ test("discoverProviderExtensions: skips git/file/http specs (only npm: and local
 		const result = discoverProviderExtensions(settingsPath);
 		assert.equal(result.length, 0, "git/file/http specs should be skipped");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("discoverProviderExtensions: skips local-path spec when dir does not exist", () => {
+test("discoverProviderExtensions: skips local-path spec when dir does not exist", async () => {
 	const { settingsPath, cleanup } = makeFakeRegistry();
 	try {
 		fs.writeFileSync(settingsPath, JSON.stringify({ packages: ["../nonexistent-local-pkg"] }), "utf-8");
 		const result = discoverProviderExtensions(settingsPath);
 		assert.equal(result.length, 0, "missing local-path dir should be skipped");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("discoverProviderExtensions: falls back to index.ts when pi.extensions missing", () => {
+test("discoverProviderExtensions: falls back to index.ts when pi.extensions missing", async () => {
 	const { settingsPath, npmBase, cleanup } = makeFakeRegistry();
 	try {
 		writePackage("plain-ext", npmBase, undefined, undefined);
@@ -125,11 +126,11 @@ test("discoverProviderExtensions: falls back to index.ts when pi.extensions miss
 		assert.equal(result.length, 1);
 		assert.ok(result[0].entryPath.endsWith("index.ts"));
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("discoverProviderExtensions: skips packages with no resolvable entry", () => {
+test("discoverProviderExtensions: skips packages with no resolvable entry", async () => {
 	const { settingsPath, npmBase, cleanup } = makeFakeRegistry();
 	try {
 		fs.mkdirSync(path.join(npmBase, "empty-pkg"), { recursive: true });
@@ -138,30 +139,30 @@ test("discoverProviderExtensions: skips packages with no resolvable entry", () =
 		const result = discoverProviderExtensions(settingsPath);
 		assert.equal(result.length, 0, "package with no index.ts / pi.extensions should be skipped");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("discoverProviderExtensions: missing settings.json → empty", () => {
+test("discoverProviderExtensions: missing settings.json → empty", async () => {
 	const { settingsPath, cleanup } = makeFakeRegistry();
 	try {
 		assert.deepEqual(discoverProviderExtensions(settingsPath), []);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("discoverProviderExtensions: malformed settings.json → empty (no crash)", () => {
+test("discoverProviderExtensions: malformed settings.json → empty (no crash)", async () => {
 	const { settingsPath, cleanup } = makeFakeRegistry();
 	try {
 		fs.writeFileSync(settingsPath, "{ not json !!!", "utf-8");
 		assert.deepEqual(discoverProviderExtensions(settingsPath), []);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("discoverProviderExtensionPaths: returns entry paths only", () => {
+test("discoverProviderExtensionPaths: returns entry paths only", async () => {
 	const { settingsPath, npmBase, cleanup } = makeFakeRegistry();
 	try {
 		writePackage("pi-commandcode-provider", npmBase, ["./index.ts"]);
@@ -170,13 +171,13 @@ test("discoverProviderExtensionPaths: returns entry paths only", () => {
 		assert.equal(paths.length, 1);
 		assert.ok(paths[0].endsWith("index.ts"));
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
 // ─── GH #61: directory-based pi.extensions must resolve to entry FILE ──────
 
-test("GH#61: pi.extensions directory entry resolves to the entry file (no double-load identity)", () => {
+test("GH#61: pi.extensions directory entry resolves to the entry file (no double-load identity)", async () => {
 	const { settingsPath, npmBase, cleanup } = makeFakeRegistry();
 	try {
 		// pi-web-access layout: pi.extensions: ["./dist"], dist/index.js exists.
@@ -197,11 +198,11 @@ test("GH#61: pi.extensions directory entry resolves to the entry file (no double
 		);
 		assert.ok(fs.statSync(result[0].entryPath).isFile(), "injected extension path must never be a directory (GH #61)");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("GH#61: directory entry with nested pi-manifest resolves one level deeper", () => {
+test("GH#61: directory entry with nested pi-manifest resolves one level deeper", async () => {
 	const { settingsPath, npmBase, cleanup } = makeFakeRegistry();
 	try {
 		const dir = path.join(npmBase, "nested-prov");
@@ -215,11 +216,11 @@ test("GH#61: directory entry with nested pi-manifest resolves one level deeper",
 		assert.equal(result.length, 1);
 		assert.ok(result[0].entryPath.endsWith(path.join("build", "entry.ts")));
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("GH#61: unresolvable directory entry is skipped (never injected as dir)", () => {
+test("GH#61: unresolvable directory entry is skipped (never injected as dir)", async () => {
 	const { settingsPath, npmBase, cleanup } = makeFakeRegistry();
 	try {
 		// dist exists but has no index.* and no pi-manifest → Pi auto-load would
@@ -231,11 +232,11 @@ test("GH#61: unresolvable directory entry is skipped (never injected as dir)", (
 		const result = discoverProviderExtensions(settingsPath);
 		assert.equal(result.length, 0, "unresolvable dir entry must be skipped, not injected as a directory");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("GH#61: dir with BOTH index.mjs and index.js must pick index.js (identity match with Pi's ts→js order)", () => {
+test("GH#61: dir with BOTH index.mjs and index.js must pick index.js (identity match with Pi's ts→js order)", async () => {
 	const { settingsPath, npmBase, cleanup } = makeFakeRegistry();
 	try {
 		const dir = path.join(npmBase, "mjs-js-prov");
@@ -251,11 +252,11 @@ test("GH#61: dir with BOTH index.mjs and index.js must pick index.js (identity m
 			`must match Pi's pick (index.js), got: ${result[0].entryPath}`,
 		);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("GH#61: dir with only package.json main keeps loading (legacy jiti dir behaviour preserved)", () => {
+test("GH#61: dir with only package.json main keeps loading (legacy jiti dir behaviour preserved)", async () => {
 	const { settingsPath, npmBase, cleanup } = makeFakeRegistry();
 	try {
 		const dir = path.join(npmBase, "main-only-prov");
@@ -268,6 +269,6 @@ test("GH#61: dir with only package.json main keeps loading (legacy jiti dir beha
 		assert.equal(result.length, 1, "main-only dir must still inject (single instance — Pi does not auto-load it)");
 		assert.ok(result[0].entryPath.endsWith(path.join("dist", "plugin.js")));
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });

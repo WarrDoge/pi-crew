@@ -15,6 +15,7 @@ import {
 	prepareVerificationWorktree,
 	withVerificationWorktree,
 } from "../../../../src/runtime/verification/verification-worktree.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function withEnv(vars: Record<string, string | undefined>, fn: () => Promise<void>): Promise<void> {
 	const saved: Record<string, string | undefined> = {};
@@ -50,9 +51,9 @@ function makeTempGitRepo(): string {
 	return dir;
 }
 
-function rmrf(p: string): void {
+async function rmrf(p: string): Promise<void> {
 	try {
-		fs.rmSync(p, { recursive: true, force: true });
+		await removeDirWithRetry(p);
 	} catch {
 		/* best-effort */
 	}

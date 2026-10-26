@@ -29,6 +29,7 @@ import test from "node:test";
 import { CrewBroker } from "../../../../src/runtime/broker/crew-broker.ts";
 import { createRunManifest, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
 import { encodeBrokerFrame, NdjsonDecoder } from "../../../../src/utils/ndjson.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ── harness (mirrors crew-broker-handshake.test.ts) ─────────────────────
 
@@ -141,7 +142,7 @@ async function startBrokerWithRun(): Promise<BrokerFixture> {
 		cleanup: async () => {
 			await broker.stop();
 			try {
-				fs.rmSync(tmp, { recursive: true, force: true });
+				await removeDirWithRetry(tmp);
 			} catch {
 				/* best-effort */
 			}

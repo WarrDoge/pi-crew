@@ -29,6 +29,7 @@ import {
 import type { GrandchildSpawnInput, GrandchildSpawnResult } from "../../../../src/runtime/delegate-spawn.ts";
 import { createRunManifest, loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import { encodeBrokerFrame, NdjsonDecoder } from "../../../../src/utils/ndjson.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 // ── 1. registry semantics ────────────────────────────────────────────────────
 
@@ -243,7 +244,7 @@ test("R43-N3: broker.abortDelegatesForRun reaches the in-flight spawner signal a
 		}
 	} finally {
 		await broker?.stop();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -329,7 +330,7 @@ test("M4-R1(c): handleCancel aborts the run's in-flight delegates (running runs 
 		assert.deepEqual(seen, [{ runId: run.runId, reason: "run-cancelled" }], "cancel aborts the run's delegates (M4-R1c)");
 	} finally {
 		setActiveDelegateAborter(undefined);
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(run.cwd);
 	}
 });
 
@@ -353,6 +354,6 @@ test("M4-R1(c): handleForget aborts the run's in-flight delegates before deletin
 		assert.equal(loadRunManifestById(cwd, runId), undefined, "state is deleted after the abort call");
 	} finally {
 		setActiveDelegateAborter(undefined);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

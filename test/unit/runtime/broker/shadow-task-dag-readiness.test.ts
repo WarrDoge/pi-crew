@@ -52,6 +52,7 @@ import { createRunManifest, saveRunTasks } from "../../../../src/state/stores/st
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 type SchedulerCtx = Parameters<typeof __test__selectDispatchBatch>[0];
 
@@ -238,7 +239,7 @@ test("AC-8(c): real mergeUnitResult rebuilds ctx.tasks from disk — the shadow 
 		assert.ok(mergedShadow, "shadow record must survive the merge into ctx.tasks");
 		assert.equal(mergedShadow!.status, "queued", "merge does not touch the shadow status");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -328,7 +329,7 @@ test("AC-8(e): dispatchBatch on a leaked shadow throws ResourceNotFound (blast r
 		assert.ok(settled.error, "findStep on the shadow must throw (no stepId ⇒ no workflow step match)");
 		assert.match(settled.error!.message, /Workflow step 'undefined' not found for task 'gc-blast'/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 

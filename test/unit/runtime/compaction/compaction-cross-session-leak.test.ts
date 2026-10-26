@@ -29,6 +29,7 @@ import { findRepoRoot } from "../../../../src/utils/paths.ts";
 import { extractSessionId } from "../../../../src/utils/session-utils.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -59,10 +60,10 @@ function makeRun(cwd: string, goal: string, ownerSessionId?: string): string {
 	return createRunManifest({ cwd, team, workflow, goal, ownerSessionId }).manifest.runId;
 }
 
-afterEach(() => {
+afterEach(async () => {
 	for (const dir of createdDirs.splice(0)) {
 		try {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		} catch {
 			/* ignore */
 		}

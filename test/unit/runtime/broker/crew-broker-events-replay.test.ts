@@ -25,6 +25,7 @@ import type { TeamEvent } from "../../../../src/state/event-log/event-log.ts";
 import { appendEventAsync } from "../../../../src/state/event-log/event-log.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import { teardownCwd } from "../../../fixtures/teardown-cwd.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 interface Recorded {
 	errors: Array<{ id: string; code: string; message: string }>;
@@ -110,7 +111,7 @@ test("events.since: unknown run answers no-manifest with the run id named", asyn
 		assert.equal(seen.errors[0].code, "no-manifest");
 		assert.match(seen.errors[0].message, /run-does-not-exist/);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });
 

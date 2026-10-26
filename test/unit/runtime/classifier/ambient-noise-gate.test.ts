@@ -34,6 +34,7 @@ import { __test__resetClassifierLogOnce, type ClassifyRequest } from "../../../.
 import { executeWithRetry } from "../../../../src/runtime/recovery/retry-executor.ts";
 import { readEvents } from "../../../../src/state/event-log/event-log.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 /** Fake classifier-surface registry (classifier-service.test.ts pattern). */
 function fakeRegistry(opts: { classifyAnswer?: boolean; available?: unknown[]; confidence?: number; throwOnClassify?: boolean } = {}) {
@@ -181,7 +182,7 @@ test("[gate-2] enabled + classifier answers AMBIENT NOISE → retry proceeds + d
 	} finally {
 		restoreEnv(prev);
 		metricRegistry.dispose();
-		fs.rmSync(path.dirname(eventsPath), { recursive: true, force: true });
+		await cleanupStateRoot(path.dirname(eventsPath), eventsPath);
 	}
 });
 
@@ -204,7 +205,7 @@ test("[gate-3] enabled + classifier answers REAL FAILURE → queued retry skippe
 	} finally {
 		restoreEnv(prev);
 		metricRegistry.dispose();
-		fs.rmSync(path.dirname(eventsPath), { recursive: true, force: true });
+		await cleanupStateRoot(path.dirname(eventsPath), eventsPath);
 	}
 });
 
@@ -232,7 +233,7 @@ test("[gate-4] enabled + provider unconfigured (no credentialed classifier) → 
 	} finally {
 		restoreEnv(prev);
 		metricRegistry.dispose();
-		fs.rmSync(path.dirname(eventsPath), { recursive: true, force: true });
+		await cleanupStateRoot(path.dirname(eventsPath), eventsPath);
 	}
 });
 
@@ -249,7 +250,7 @@ test("[gate-5] enabled + classify throws → caller fallback (soft: never fails 
 		assert.equal(noiseGateEvents(eventsPath).length, 0, "throwing classify must not emit a decision event");
 	} finally {
 		restoreEnv(prev);
-		fs.rmSync(path.dirname(eventsPath), { recursive: true, force: true });
+		await cleanupStateRoot(path.dirname(eventsPath), eventsPath);
 	}
 });
 
@@ -286,7 +287,7 @@ test("[gate-7] confidence passthrough: wrapped answer {value, confidence} → ev
 	} finally {
 		restoreEnv(prev);
 		metricRegistry.dispose();
-		fs.rmSync(path.dirname(eventsPath), { recursive: true, force: true });
+		await cleanupStateRoot(path.dirname(eventsPath), eventsPath);
 	}
 });
 

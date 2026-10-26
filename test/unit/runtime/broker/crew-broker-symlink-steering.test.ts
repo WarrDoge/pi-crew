@@ -7,6 +7,7 @@ import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { CrewBroker } from "../../../../src/runtime/broker/crew-broker.ts";
 import { CrewBrokerClient } from "../../../../src/runtime/broker/crew-broker-client.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function isSymlinkTestUnsupportedOn(): boolean {
 	return process.platform === "win32" || process.platform === "darwin";
@@ -68,7 +69,7 @@ test("steer.push does not follow a symlinked steering directory outside artifact
 		if (!senderTaskId || !targetTaskId) throw new Error("expected two scaffold tasks");
 
 		const steeringDir = path.join(loaded.manifest.artifactsRoot, "steering");
-		fs.rmSync(steeringDir, { recursive: true, force: true });
+		await removeDirWithRetry(steeringDir);
 		fs.symlinkSync(outsideDir, steeringDir, "dir");
 
 		broker = new CrewBroker({
@@ -94,7 +95,7 @@ test("steer.push does not follow a symlinked steering directory outside artifact
 	} finally {
 		await client?.close();
 		await broker?.stop();
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(outsideDir, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(outsideDir);
 	}
 });

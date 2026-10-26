@@ -19,6 +19,7 @@ import {
 	splitThinkingSuffix,
 	warnOutOfScopeSoft,
 } from "../../../../src/runtime/model/model-fallback.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("splitThinkingSuffix preserves model suffix", () => {
 	assert.deepEqual(splitThinkingSuffix("claude-sonnet:high"), {
@@ -121,7 +122,7 @@ test("buildConfiguredModelCandidates falls back to Pi default when no configured
 	);
 });
 
-test("buildConfiguredModelCandidates preserves explicit configured models without Pi registry", () => {
+test("buildConfiguredModelCandidates preserves explicit configured models without Pi registry", async () => {
 	const previous = process.env.PI_CODING_AGENT_DIR;
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-models-"));
 	process.env.PI_CODING_AGENT_DIR = tempDir;
@@ -139,11 +140,11 @@ test("buildConfiguredModelCandidates preserves explicit configured models withou
 	} finally {
 		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previous;
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		await removeDirWithRetry(tempDir);
 	}
 });
 
-test("buildConfiguredModelCandidates keeps agent/fallback models without Pi registry", () => {
+test("buildConfiguredModelCandidates keeps agent/fallback models without Pi registry", async () => {
 	const previous = process.env.PI_CODING_AGENT_DIR;
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-models-"));
 	process.env.PI_CODING_AGENT_DIR = tempDir;
@@ -165,11 +166,11 @@ test("buildConfiguredModelCandidates keeps agent/fallback models without Pi regi
 	} finally {
 		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previous;
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		await removeDirWithRetry(tempDir);
 	}
 });
 
-test("configuredModelInfosFromPiConfig reads provider and model from Pi settings/models config", () => {
+test("configuredModelInfosFromPiConfig reads provider and model from Pi settings/models config", async () => {
 	const previous = process.env.PI_CODING_AGENT_DIR;
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-models-"));
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-project-"));
@@ -221,8 +222,8 @@ test("configuredModelInfosFromPiConfig reads provider and model from Pi settings
 	} finally {
 		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previous;
-		fs.rmSync(tempDir, { recursive: true, force: true });
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(tempDir);
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -230,7 +231,7 @@ test("configuredModelInfosFromPiConfig reads provider and model from Pi settings
 // existsSync+read. A corrupt-but-present JSON file must still resolve to
 // undefined without throwing (missing → undefined is covered by the
 // "keeps agent/fallback models without Pi registry" tests above).
-test("configuredModelInfosFromPiConfig: corrupt settings.json resolves to no models without throwing (NEW-P4)", () => {
+test("configuredModelInfosFromPiConfig: corrupt settings.json resolves to no models without throwing (NEW-P4)", async () => {
 	const previous = process.env.PI_CODING_AGENT_DIR;
 	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-models-corrupt-"));
 	process.env.PI_CODING_AGENT_DIR = tempDir;
@@ -242,7 +243,7 @@ test("configuredModelInfosFromPiConfig: corrupt settings.json resolves to no mod
 	} finally {
 		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previous;
-		fs.rmSync(tempDir, { recursive: true, force: true });
+		await removeDirWithRetry(tempDir);
 	}
 });
 
@@ -641,7 +642,7 @@ function scopeCwd(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-scope-"));
 }
 
-test("scope gate a: overrideModel out-of-scope -> throws CrewError (hard error)", () => {
+test("scope gate a: overrideModel out-of-scope -> throws CrewError (hard error)", async () => {
 	const cwd = scopeCwd();
 	try {
 		assert.throws(
@@ -659,11 +660,11 @@ test("scope gate a: overrideModel out-of-scope -> throws CrewError (hard error)"
 			},
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("scope gate a2: stepModel out-of-scope -> throws CrewError (hard error, F7 contract)", () => {
+test("scope gate a2: stepModel out-of-scope -> throws CrewError (hard error, F7 contract)", async () => {
 	const cwd = scopeCwd();
 	try {
 		assert.throws(
@@ -681,11 +682,11 @@ test("scope gate a2: stepModel out-of-scope -> throws CrewError (hard error, F7 
 			},
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("scope gate a3: teamRoleModel out-of-scope -> throws CrewError (hard error, F7 contract)", () => {
+test("scope gate a3: teamRoleModel out-of-scope -> throws CrewError (hard error, F7 contract)", async () => {
 	const cwd = scopeCwd();
 	try {
 		assert.throws(
@@ -703,11 +704,11 @@ test("scope gate a3: teamRoleModel out-of-scope -> throws CrewError (hard error,
 			},
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("scope gate b: defaultSubagentModel out-of-scope -> verdict inScope=false, NO throw", () => {
+test("scope gate b: defaultSubagentModel out-of-scope -> verdict inScope=false, NO throw", async () => {
 	const cwd = scopeCwd();
 	try {
 		const routing = buildConfiguredModelRouting({
@@ -719,11 +720,11 @@ test("scope gate b: defaultSubagentModel out-of-scope -> verdict inScope=false, 
 		assert.equal(routing.scopeVerdict?.inScope, false);
 		assert.equal(routing.scopeVerdict?.source, "resolved");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("scope gate c: parentModel only (no agent/caller) out-of-scope -> verdict inScope=false, NO throw", () => {
+test("scope gate c: parentModel only (no agent/caller) out-of-scope -> verdict inScope=false, NO throw", async () => {
 	const cwd = scopeCwd();
 	try {
 		const routing = buildConfiguredModelRouting({
@@ -735,11 +736,11 @@ test("scope gate c: parentModel only (no agent/caller) out-of-scope -> verdict i
 		assert.equal(routing.scopeVerdict?.inScope, false);
 		assert.equal(routing.scopeVerdict?.source, "resolved");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("scope gate d: agentModel (frontmatter) out-of-scope -> verdict inScope=false, NO throw", () => {
+test("scope gate d: agentModel (frontmatter) out-of-scope -> verdict inScope=false, NO throw", async () => {
 	const cwd = scopeCwd();
 	try {
 		const routing = buildConfiguredModelRouting({
@@ -751,11 +752,11 @@ test("scope gate d: agentModel (frontmatter) out-of-scope -> verdict inScope=fal
 		assert.equal(routing.scopeVerdict?.inScope, false);
 		assert.equal(routing.scopeVerdict?.source, "frontmatter");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("scope gate e: model in-scope -> verdict inScope=true", () => {
+test("scope gate e: model in-scope -> verdict inScope=true", async () => {
 	const cwd = scopeCwd();
 	try {
 		const routing = buildConfiguredModelRouting({
@@ -766,7 +767,7 @@ test("scope gate e: model in-scope -> verdict inScope=true", () => {
 		});
 		assert.equal(routing.scopeVerdict?.inScope, true);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

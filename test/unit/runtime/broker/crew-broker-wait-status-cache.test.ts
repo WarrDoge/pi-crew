@@ -26,6 +26,7 @@ import { CrewBroker } from "../../../../src/runtime/broker/crew-broker.ts";
 import { WaitStatusCache } from "../../../../src/runtime/broker/wait-status-cache.ts";
 import { createRunManifest, createRunPaths, loadRunManifestById, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import { encodeBrokerFrame, NdjsonDecoder } from "../../../../src/utils/ndjson.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ----------------------------------------------------------------------------
 // Fixture literals (same `as never` pattern as heartbeat-watcher.test.ts)
@@ -178,7 +179,7 @@ async function makeWaitFixture(): Promise<WaitFixture> {
 			/* ignore */
 		}
 		try {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		} catch {
 			/* ignore */
 		}
@@ -359,6 +360,6 @@ test("H5: writer landing between the pre-stat and the parse → next tick sees t
 		assert.equal(cache.reloads, 2);
 		assert.equal(third.mark, "fresh-parse");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

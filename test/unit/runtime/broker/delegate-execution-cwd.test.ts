@@ -43,6 +43,7 @@ import type { TeamEvent } from "../../../../src/state/event-log/event-log.ts";
 import { loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import { encodeBrokerFrame, NdjsonDecoder } from "../../../../src/utils/ndjson.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tempSocketPath(suffix: string): string {
 	const tok = randomBytes(3).toString("hex");
@@ -275,7 +276,7 @@ test("F03/AC-1: spawner receives the PARENT TASK cwd (admitted worktree), never 
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -317,7 +318,7 @@ test("F03/AC-2: grandchild artifacts root derives from the task cwd (grandchildA
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = prevMock;
 		if (prevAllow === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = prevAllow;
-		fs.rmSync(brokerCwd, { recursive: true, force: true });
+		await cleanupStateRoot(brokerCwd);
 	}
 });
 
@@ -346,7 +347,7 @@ test("F03/AC-3a: overlap check compares the cwd the grandchild will actually run
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -376,7 +377,7 @@ test("F03/AC-3b: executor running at the BROKER cwd (≠ execution cwd) ⇒ admi
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -402,6 +403,6 @@ test("F03/AC-4: single-workspace (broker cwd == task cwd) — spawner still rece
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });

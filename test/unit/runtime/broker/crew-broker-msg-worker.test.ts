@@ -30,6 +30,7 @@ import { CrewBroker } from "../../../../src/runtime/broker/crew-broker.ts";
 import { readMailbox } from "../../../../src/state/coordination/mailbox.ts";
 import { loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import { encodeBrokerFrame, NdjsonDecoder } from "../../../../src/utils/ndjson.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tempSocketPath(suffix: string): string {
 	const tok = randomBytes(3).toString("hex");
@@ -179,7 +180,7 @@ test("worker msg.send to parent → ok (durable run-level inbox write)", async (
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -199,7 +200,7 @@ test("worker msg.send to invalid target → forbidden", async () => {
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -225,7 +226,7 @@ test("worker msg.send honors from-override — from in params is ignored, from=t
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -249,7 +250,7 @@ test("worker msg.send to sibling taskId → ok (DM delivers to that task's inbox
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -289,7 +290,7 @@ test("worker msg.send to parent → appends worker.message run event (kind/subje
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -323,7 +324,7 @@ test("worker msg.send to parent → live orchestrator connection receives mailbo
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -349,7 +350,7 @@ test("worker DM to sibling does NOT append a worker.message event", async () => 
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -369,7 +370,7 @@ test("worker msg.send with non-notify/message kind → bad-params", async () => 
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -412,7 +413,7 @@ test("U5: msg.send carries a requestId and a retry with the SAME requestId dedup
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -443,7 +444,7 @@ test("U5: msg.send without a client requestId gets a broker-generated unique one
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -486,6 +487,6 @@ test("R6-6: message-tool-derived requestId threads through msg.send and dedupes 
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });

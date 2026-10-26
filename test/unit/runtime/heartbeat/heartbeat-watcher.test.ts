@@ -7,6 +7,7 @@ import { createMetricRegistry } from "../../../../src/observability/metric-regis
 import { HeartbeatWatcher } from "../../../../src/runtime/heartbeat/heartbeat-watcher.ts";
 import { createManifestCache } from "../../../../src/runtime/manifest-cache.ts";
 import { createRunManifest, saveRunTasks, updateRunStatus } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team = {
 	name: "t",
@@ -23,7 +24,7 @@ const workflow = {
 	steps: [{ id: "s", role: "r", task: "x" }],
 } as never;
 
-test("HeartbeatWatcher emits dead notification once and triggers deadletter threshold", () => {
+test("HeartbeatWatcher emits dead notification once and triggers deadletter threshold", async () => {
 	let cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-heartbeat-watcher-"));
 	try {
 		// Canonicalize to long-name form matching production code
@@ -74,11 +75,11 @@ test("HeartbeatWatcher emits dead notification once and triggers deadletter thre
 		watcher.dispose();
 		cache.dispose();
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("W8 fix: completion-artifact suppresses false-positive dead when result file exists", () => {
+test("W8 fix: completion-artifact suppresses false-positive dead when result file exists", async () => {
 	let cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-heartbeat-w8-"));
 	try {
 		try {
@@ -145,6 +146,6 @@ test("W8 fix: completion-artifact suppresses false-positive dead when result fil
 		watcher.dispose();
 		cache.dispose();
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

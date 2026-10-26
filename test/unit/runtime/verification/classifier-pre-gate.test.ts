@@ -26,7 +26,7 @@
  * the worker harness are scrubbed per-case so helper args are the only input.
  */
 import assert from "node:assert/strict";
-import * as fs from "node:fs";
+
 import * as path from "node:path";
 import test from "node:test";
 import { createMetricRegistry } from "../../../../src/observability/metric-registry.ts";
@@ -42,6 +42,7 @@ import {
 } from "../../../../src/runtime/verification/classifier-pre-gate.ts";
 import { readEvents } from "../../../../src/state/event-log/event-log.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 /** Fake classifier-surface registry (classifier-service.test.ts pattern). */
 function fakeRegistry(
@@ -202,7 +203,7 @@ test("[pg-2] pass verdict + score ≥ threshold + confidence ≥ threshold → B
 	} finally {
 		restoreEnv(prev);
 		metricRegistry.dispose();
-		fs.rmSync(path.dirname(eventsPath), { recursive: true, force: true });
+		await cleanupStateRoot(path.dirname(eventsPath), eventsPath);
 	}
 });
 
@@ -244,7 +245,7 @@ test("[pg-4] FAILED verdict escalates EVEN with a perfect score/confidence", asy
 		assert.equal(preGateEvents(eventsPath).length, 5, "each consulted escalation emits a diagnostic event");
 	} finally {
 		restoreEnv(prev);
-		fs.rmSync(path.dirname(eventsPath), { recursive: true, force: true });
+		await cleanupStateRoot(path.dirname(eventsPath), eventsPath);
 	}
 });
 
@@ -314,7 +315,7 @@ test("[pg-7] provider unconfigured (no credentialed classifier) → SOFT escalat
 	} finally {
 		restoreEnv(prev);
 		metricRegistry.dispose();
-		fs.rmSync(path.dirname(eventsPath), { recursive: true, force: true });
+		await cleanupStateRoot(path.dirname(eventsPath), eventsPath);
 	}
 });
 
@@ -396,6 +397,6 @@ test("[pg-10] taskId optional (goal-loop judge is not a task) — event omits it
 		assert.equal(event.taskId, undefined, "no taskId on the diagnostic event when omitted");
 	} finally {
 		restoreEnv(prev);
-		fs.rmSync(path.dirname(eventsPath), { recursive: true, force: true });
+		await cleanupStateRoot(path.dirname(eventsPath), eventsPath);
 	}
 });

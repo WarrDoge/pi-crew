@@ -26,6 +26,7 @@ import { pushWaitingToForegroundWaiter } from "../../../../src/runtime/broker/wa
 import { registerRunPromise, rejectRunPromise } from "../../../../src/runtime/run-tracker.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import { teardownCwd } from "../../../fixtures/teardown-cwd.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 async function scaffoldRun(prefix: string): Promise<{ cwd: string; runId: string; taskId: string }> {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -111,7 +112,7 @@ test("wait-push: unloadable run → no-op, waiter stays parked, never throws", a
 		assert.equal(await waiterState(entry), "pending", "no manifest → no resolution (async/detached runs poll)");
 	} finally {
 		rejectRunPromise("ghost-run-for-wait-push", new Error("test cleanup"));
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

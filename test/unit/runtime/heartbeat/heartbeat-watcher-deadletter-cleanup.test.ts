@@ -18,6 +18,7 @@ import { HeartbeatWatcher } from "../../../../src/runtime/heartbeat/heartbeat-wa
 import type { ManifestCache } from "../../../../src/runtime/manifest-cache.ts";
 import { createRunManifest, saveRunTasks, updateRunStatus } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team = {
 	name: "t",
@@ -34,7 +35,7 @@ const workflow = {
 	steps: [{ id: "s", role: "r", task: "x" }],
 } as never;
 
-test("M-8: deadletter cooldown marker is dropped when the key leaves the active set", () => {
+test("M-8: deadletter cooldown marker is dropped when the key leaves the active set", async () => {
 	let cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-hb-m8-"));
 	try {
 		// Canonicalize to long-name form matching production code
@@ -101,11 +102,11 @@ test("M-8: deadletter cooldown marker is dropped when the key leaves the active 
 
 		watcher.dispose();
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("M-8: dispose() clears the deadletter cooldown map (re-created watcher can re-trigger)", () => {
+test("M-8: dispose() clears the deadletter cooldown map (re-created watcher can re-trigger)", async () => {
 	let cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-hb-m8b-"));
 	try {
 		try {
@@ -158,6 +159,6 @@ test("M-8: dispose() clears the deadletter cooldown map (re-created watcher can 
 		assert.equal(deadletters, 2, "dispose() clears the cooldown map (M-8)");
 		watcher.dispose();
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

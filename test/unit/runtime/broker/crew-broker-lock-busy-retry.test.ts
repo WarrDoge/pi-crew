@@ -32,6 +32,7 @@ import {
 	withRunLockBusyRetry,
 } from "../../../../src/runtime/broker/protocol/lock-busy.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /** withRunLockSync only consumes manifest.stateRoot (lockPath derivation). */
 function stateRootManifest(dir: string): TeamRunManifest {
@@ -107,7 +108,7 @@ test("withRunLockBusyRetry: uncontended body succeeds on the first attempt", asy
 		assert.equal(runs, 1);
 		assert.equal(fs.existsSync(path.join(stateRoot, "run.lock")), false, "lock must be released after the body");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await removeDirWithRetry(stateRoot);
 	}
 });
 
@@ -124,7 +125,7 @@ test("withRunLockBusyRetry: NON-busy errors propagate immediately (single attemp
 		);
 		assert.equal(attempts, 1, "no retry budget spent on a non-busy error");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await removeDirWithRetry(stateRoot);
 	}
 });
 
@@ -148,7 +149,7 @@ test("withRunLockBusyRetry: persistently busy lock exhausts the schedule → typ
 		assert.ok(Date.now() - startedAt >= 10, "the delay schedule was actually awaited");
 		assert.equal(fs.existsSync(path.join(stateRoot, "run.lock")), true, "the live holder's lock is left untouched (never stolen)");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await removeDirWithRetry(stateRoot);
 	}
 });
 
@@ -167,7 +168,7 @@ test("withRunLockBusyRetry: holder releasing mid-schedule is absorbed (fn runs e
 		assert.deepEqual(outcome, { ok: true, value: 42 });
 		assert.equal(runs, 1, "retry re-attempted the acquire, not a partially-run body");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await removeDirWithRetry(stateRoot);
 	}
 });
 
@@ -179,6 +180,6 @@ test("withRunLockBusyRetry: empty delay schedule degrades after the first busy a
 		assert.equal(outcome.ok, false);
 		if (!outcome.ok) assert.match(outcome.message, /bounded retry budget exhausted/);
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await removeDirWithRetry(stateRoot);
 	}
 });

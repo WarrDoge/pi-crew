@@ -4,8 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { validateResources } from "../../../../src/extension/validate-resources.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
-test("validateResources warns about suspicious model references", () => {
+test("validateResources warns about suspicious model references", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-model-validation-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew", "agents"), { recursive: true });
@@ -17,6 +18,6 @@ test("validateResources warns about suspicious model references", () => {
 		const report = validateResources(cwd);
 		assert.ok(report.issues.some((issue) => issue.level === "warning" && issue.message.includes("whitespace")));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

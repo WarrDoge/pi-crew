@@ -16,6 +16,7 @@ import { computeSpawnBudgetMax } from "../../../../src/runtime/task-runner/child
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import { renderTranscriptPane } from "../../../../src/ui/dashboard-panes/transcript-pane.ts";
 import type { RunUiSnapshot } from "../../../../src/ui/snapshot-types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function tempCwd(): string {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-mb-"));
@@ -34,9 +35,9 @@ test("budget formula: attemptModels × (maxAttempts + 1)", () => {
 	assert.equal(computeSpawnBudgetMax(7, 3), 28);
 });
 
-test("summarizeModelBudget: never throws on a bare workspace; line carries chain + worst-case math", () => {
+test("summarizeModelBudget: never throws on a bare workspace; line carries chain + worst-case math", async () => {
 	const cwd = tempCwd();
-	fs.rmSync(cwd, { recursive: true, force: true }); // hostile: no state at all
+	await removeDirWithRetry(cwd); // hostile: no state at all
 	const summary = summarizeModelBudget(cwd);
 	assert.ok(Number.isFinite(summary.worstCaseSpawnsPerTask));
 	assert.ok(summary.maxAttempts >= 1);
@@ -46,7 +47,7 @@ test("summarizeModelBudget: never throws on a bare workspace; line carries chain
 	assert.equal(summary.worstCaseSpawnsPerTask, computeSpawnBudgetMax(Math.max(1, summary.chain.length), summary.maxAttempts));
 });
 
-test("summarizeModelBudget: honors configured maxAttempts (config可靠性)", () => {
+test("summarizeModelBudget: honors configured maxAttempts (config可靠性)", async () => {
 	const cwd = tempCwd();
 	fs.writeFileSync(path.join(cwd, ".crew", "config.json"), JSON.stringify({ reliability: { retryPolicy: { maxAttempts: 7 } } }));
 	try {
@@ -54,7 +55,7 @@ test("summarizeModelBudget: honors configured maxAttempts (config可靠性)", ()
 		assert.equal(summary.maxAttempts, 7);
 		assert.ok(summary.line.includes("maxAttempts+1=8"));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

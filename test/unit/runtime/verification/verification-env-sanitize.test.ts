@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import * as path from "node:path";
 import test from "node:test";
 import { executeVerificationCommands, isVerificationEnvSanitizeEnabled } from "../../../../src/runtime/verification/verification-gates.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /** Verification commands always run through `sh`, so use its portable `printenv` utility. */
 function pickPrintenv(name: string): string {
@@ -91,10 +92,7 @@ test("INTEGRATION: with sanitize ON, secret env var does NOT reach the verificat
 			const fs = await import("node:fs");
 			const content = out?.path ? fs.readFileSync(out.path, "utf-8") : "";
 			assert.equal(content.includes("sk-leak-me-12345"), false, "secret must NOT reach verification subprocess when sanitize is ON");
-			fs.rmSync(path.join(process.cwd(), ".test-artifacts-tmp"), {
-				recursive: true,
-				force: true,
-			});
+			await removeDirWithRetry(path.join(process.cwd(), ".test-artifacts-tmp"));
 		},
 	);
 });
@@ -123,10 +121,7 @@ test("INTEGRATION: with sanitize OFF (explicit opt-out), secret env var DOES rea
 				true,
 				"explicit opt-out (sanitize=0) preserves existing behavior — secret visible",
 			);
-			fs.rmSync(path.join(process.cwd(), ".test-artifacts-tmp"), {
-				recursive: true,
-				force: true,
-			});
+			await removeDirWithRetry(path.join(process.cwd(), ".test-artifacts-tmp"));
 		},
 	);
 });
@@ -151,10 +146,7 @@ test("INTEGRATION: with sanitize ON + PRESERVE_ENV, explicitly-preserved secret 
 			const fs = await import("node:fs");
 			const content = results[0]?.outputArtifact?.path ? fs.readFileSync(results[0].outputArtifact.path, "utf-8") : "";
 			assert.equal(content.includes("sk-preserved-explicit"), true, "PRESERVE_ENV must allow explicitly-listed secret through");
-			fs.rmSync(path.join(process.cwd(), ".test-artifacts-tmp2"), {
-				recursive: true,
-				force: true,
-			});
+			await removeDirWithRetry(path.join(process.cwd(), ".test-artifacts-tmp2"));
 		},
 	);
 });
@@ -192,10 +184,7 @@ test("INTEGRATION: sanitize ON keeps essential non-secret vars (PATH, HOME)", as
 			const homeContent = results[1]?.outputArtifact?.path ? fs.readFileSync(results[1].outputArtifact.path, "utf-8") : "";
 			assert.equal(pathContent.includes("/usr/bin:/bin"), true, "PATH must be preserved");
 			assert.equal(homeContent.includes("/tmp/fake-home"), true, "HOME must be preserved");
-			fs.rmSync(path.join(process.cwd(), ".test-artifacts-tmp3"), {
-				recursive: true,
-				force: true,
-			});
+			await removeDirWithRetry(path.join(process.cwd(), ".test-artifacts-tmp3"));
 		},
 	);
 });

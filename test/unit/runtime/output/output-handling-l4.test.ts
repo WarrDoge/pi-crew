@@ -18,6 +18,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { DEFAULT_CHILD_PI } from "../../../../src/config/defaults.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // compactString is private in child-pi.ts; we assert via DEFAULT_CHILD_PI that
 // the configured thresholds are the L4 values, and exercise the head/tail
@@ -89,7 +90,7 @@ describe("L4 — head+tail compaction preserves closing structure", () => {
 // threshold and confirm the head+tail read shape via a local fd-based read that
 // mirrors readIfSmall's algorithm.
 describe("L4 — readIfSmall head+tail read shape", () => {
-	it("reads head + tail of a large file (not head-only)", () => {
+	it("reads head + tail of a large file (not head-only)", async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "l4-readifsmall-"));
 		try {
 			const f = path.join(dir, "big.txt");
@@ -122,7 +123,7 @@ describe("L4 — readIfSmall head+tail read shape", () => {
 			assert.match(out, /\[truncated \d+ bytes, head\+tail preserved\]/);
 			assert.ok(out.length < maxBytes + 200, `output must be bounded near ${maxBytes}, got ${out.length}`);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	});
 });

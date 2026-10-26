@@ -35,6 +35,7 @@ import test from "node:test";
 import { CrewBroker } from "../../../../src/runtime/broker/crew-broker.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import { encodeBrokerFrame, NdjsonDecoder } from "../../../../src/utils/ndjson.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ----------------------------------------------------------------------------
 // Fixture literals (same `as never` pattern as the sibling broker tests)
@@ -190,7 +191,7 @@ async function makeOverflowFixture(outboundQueueCap: number, prefix: string): Pr
 			/* ignore */
 		}
 		try {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		} catch {
 			/* ignore */
 		}

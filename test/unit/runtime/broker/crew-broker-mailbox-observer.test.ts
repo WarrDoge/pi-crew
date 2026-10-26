@@ -15,6 +15,7 @@ import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { appendMailboxMessageAsync, registerMailboxAppendObserver } from "../../../../src/state/coordination/mailbox.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ----------------------------------------------------------------------------
 // 1.3: mailbox append observer
@@ -57,7 +58,7 @@ test("observer: fires after durable append with a snapshot of the message", asyn
 			unsub();
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -99,7 +100,7 @@ test("observer: unsubscribe stops further notifications", async () => {
 		await new Promise<void>((r) => setImmediate(r));
 		assert.equal(count, 1, "observer must not fire after unsubscribe");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -134,6 +135,6 @@ test("observer: a throwing observer does not break the durable append", async ()
 			unsub();
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

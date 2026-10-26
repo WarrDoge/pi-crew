@@ -41,6 +41,7 @@ import type { GrandchildSpawnInput, GrandchildSpawnResult } from "../../../../sr
 import type { TeamEvent } from "../../../../src/state/event-log/event-log.ts";
 import { loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import { encodeBrokerFrame, NdjsonDecoder } from "../../../../src/utils/ndjson.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tempSocketPath(suffix: string): string {
 	const tok = randomBytes(3).toString("hex");
@@ -226,7 +227,7 @@ test("F3/AC-1: model-less delegate.request inherits the PARENT TASK's model (nev
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -254,7 +255,7 @@ test("F3/AC-2: explicit `model` wins over the parent task's model", async () => 
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -282,6 +283,6 @@ test("F3/AC-3: no model anywhere (record + request) ⇒ spawner input.model stay
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });

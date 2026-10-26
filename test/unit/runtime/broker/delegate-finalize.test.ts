@@ -28,13 +28,14 @@ import {
 import type { TeamEvent } from "../../../../src/state/event-log/event-log.ts";
 import { loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 interface Fixture {
 	cwd: string;
 	runId: string;
 	parentTaskId: string;
 	eventsPath: string;
-	cleanup(): void;
+	cleanup(): Promise<void>;
 }
 
 async function scaffold(prefix: string, parentStatus: TeamTaskState["status"]): Promise<Fixture> {
@@ -66,7 +67,7 @@ async function scaffold(prefix: string, parentStatus: TeamTaskState["status"]): 
 		runId,
 		parentTaskId: parent.id,
 		eventsPath: loaded.manifest.eventsPath,
-		cleanup: () => fs.rmSync(cwd, { recursive: true, force: true }),
+		cleanup: () => cleanupStateRoot(cwd, loaded.manifest.eventsPath),
 	};
 }
 
@@ -161,7 +162,7 @@ test("R43-N4: live parent receives the fenced result in ITS OWN mailbox", async 
 		assert.equal(rolled?.data?.chargedTokens, 500);
 		assert.equal(rolled?.data?.selfReportedTokens, 42, "child number kept for audit only");
 	} finally {
-		s.cleanup();
+		await s.cleanup();
 	}
 });
 
@@ -193,7 +194,7 @@ test("R43-N4: TERMINAL parent → result rerouted to the RUN mailbox with an eve
 		assert.ok(rerouted, "delegate.rerouted must be recorded");
 		assert.equal(rerouted!.data?.parentStatus, "completed");
 	} finally {
-		s.cleanup();
+		await s.cleanup();
 	}
 });
 
@@ -231,7 +232,7 @@ test("R43-N4: the shadow record is terminal-flipped even when the result is rero
 		// inline code did (TeamTaskState's typed terminal timestamp is
 		// `finishedAt`; the extra field is verbatim behavior preservation).
 	} finally {
-		s.cleanup();
+		await s.cleanup();
 	}
 });
 

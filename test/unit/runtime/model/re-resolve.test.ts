@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { buildConfiguredModelRouting } from "../../../../src/runtime/model/model-fallback.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * [L-NEW-2] Tests for the one-shot re-resolve logic in child-executor.ts.
@@ -43,12 +44,12 @@ function tempCwd(): string {
 }
 
 /** Create a temp cwd and auto-clean it after the callback finishes. */
-function withTempCwd<T>(fn: (cwd: string) => T): T {
+async function withTempCwd<T>(fn: (cwd: string) => T | Promise<T>): Promise<T> {
 	const cwd = tempCwd();
 	try {
-		return fn(cwd);
+		return await fn(cwd);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 }
 

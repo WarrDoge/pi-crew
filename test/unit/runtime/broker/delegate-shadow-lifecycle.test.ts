@@ -37,6 +37,7 @@ import type { GrandchildSpawnInput, GrandchildSpawnResult } from "../../../../sr
 import type { TeamEvent } from "../../../../src/state/event-log/event-log.ts";
 import { loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import { encodeBrokerFrame, NdjsonDecoder } from "../../../../src/utils/ndjson.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tempSocketPath(suffix: string): string {
 	const tok = randomBytes(3).toString("hex");
@@ -266,7 +267,7 @@ test("F16/AC-5: shadow record is `running` while the grandchild runs (promoted o
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -318,7 +319,7 @@ test("F16/AC-6: depth-2 grandchild (subId identity) may delegate to depth 3 — 
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -346,7 +347,7 @@ test("F16/AC-7a: spawner resolves ok:true ⇒ shadow terminal `completed`", asyn
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -374,7 +375,7 @@ test("F16/AC-7b: spawner resolves ok:false ⇒ shadow terminal `failed`", async 
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -402,7 +403,7 @@ test("F16/AC-7c: spawner THROWS ⇒ shadow terminal `failed` (never stuck queued
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -430,7 +431,7 @@ test("F16/3f: depth policy denial is `policy-denied`/depth-exceeded — never pa
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -458,6 +459,6 @@ test("F16/3g+3h: a REAL task that is not running is still rejected parent-not-ru
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });

@@ -24,6 +24,7 @@ import { appendMailboxMessageAsync, type MailboxMessage } from "../../../../src/
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
 import { teardownCwd } from "../../../fixtures/teardown-cwd.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 interface Recorded {
 	errors: Array<{ id: string; code: string; message: string }>;
@@ -145,7 +146,7 @@ test("msg.inbox: unknown run → no-manifest naming the run", async () => {
 		);
 		assert.match(seen.errors[0].message, /ghost-run/);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 

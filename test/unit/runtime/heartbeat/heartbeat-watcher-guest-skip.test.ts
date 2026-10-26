@@ -7,6 +7,7 @@ import { createMetricRegistry } from "../../../../src/observability/metric-regis
 import { HeartbeatWatcher } from "../../../../src/runtime/heartbeat/heartbeat-watcher.ts";
 import { createManifestCache } from "../../../../src/runtime/manifest-cache.ts";
 import { createRunManifest, saveRunTasks, updateRunStatus } from "../../../../src/state/stores/state-store.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const team = {
 	name: "t",
@@ -46,7 +47,7 @@ function makeWatcher(cwd: string, notifications: string[]) {
 	return { watcher, cache };
 }
 
-test("guest-child task (agent=delegate, no heartbeat channel) never classified dead", () => {
+test("guest-child task (agent=delegate, no heartbeat channel) never classified dead", async () => {
 	let cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-hb-guest-skip-"));
 	try {
 		try {
@@ -83,11 +84,11 @@ test("guest-child task (agent=delegate, no heartbeat channel) never classified d
 		watcher.dispose();
 		cache.dispose();
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("guest skip does NOT suppress dead detection for a real sibling task", () => {
+test("guest skip does NOT suppress dead detection for a real sibling task", async () => {
 	let cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-hb-guest-skip2-"));
 	try {
 		try {
@@ -126,6 +127,6 @@ test("guest skip does NOT suppress dead detection for a real sibling task", () =
 		watcher.dispose();
 		cache.dispose();
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

@@ -21,6 +21,7 @@ import type { ServerConnection } from "../../../../src/runtime/broker/protocol/c
 import { recordWaitPolicyRejection, waitAuthError } from "../../../../src/runtime/broker/protocol/wait-auth.ts";
 import type { TeamEvent } from "../../../../src/state/event-log/event-log.ts";
 import { appendEventAsync } from "../../../../src/state/event-log/event-log.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 /** Minimal conn metadata stub — waitAuthError only reads role/authMatchKind. */
 function conn(meta: { role?: "orchestrator" | "worker"; authMatchKind?: "compound" | "runId-fallback" }): ServerConnection {
@@ -106,7 +107,7 @@ test("recordWaitPolicyRejection appends a policy.action trace to events.jsonl", 
 		assert.equal(data?.reason, "wait-methods-disabled");
 		assert.equal(data?.policy, "broker.waitMethodsEnabled=false");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });
 
@@ -119,6 +120,6 @@ test("recordWaitPolicyRejection never throws when the events path is unwritable"
 		// Give the rejected fire-and-forget promise its catch turn.
 		await new Promise<void>((resolve) => setImmediate(resolve));
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });

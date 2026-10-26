@@ -32,6 +32,7 @@ import type { GrandchildSpawnInput, GrandchildSpawnResult } from "../../../../sr
 import type { TeamEvent } from "../../../../src/state/event-log/event-log.ts";
 import { loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import { encodeBrokerFrame, NdjsonDecoder } from "../../../../src/utils/ndjson.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tempSocketPath(suffix: string): string {
 	const tok = randomBytes(3).toString("hex");
@@ -205,7 +206,7 @@ test("auth: legacy bare-runId token is rejected with a migrate hint (pin iii)", 
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });
 
@@ -230,7 +231,7 @@ test("flag off (default): policy-disabled error + delegate.rejected event — ne
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -262,7 +263,7 @@ test("admission D8: read-only parent role (explorer) may now delegate", async ()
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -339,7 +340,7 @@ test("happy path: immediate ref, fenced mailbox delivery, budget reserve→roll-
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -375,7 +376,7 @@ test("M3-3/R43-N1: run budgetTotal SEEDS the parent grant — a budgeted delegat
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -399,7 +400,7 @@ test("M3-3/R43-N1: no run budget + no task allocation → explicit budget-not-gr
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -423,7 +424,7 @@ test("M3-3/R43-N1: unmetered delegate is admitted by the broker AND audited as u
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -455,7 +456,7 @@ test("R43-S1: read-only parent (explorer) requesting an executor grandchild is d
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -482,7 +483,7 @@ test("R43-S1: executor parent's delegate threads parentRole to the spawner (tran
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd, s.eventsPath);
 	}
 });
 
@@ -509,6 +510,6 @@ test("fail-fast: exhausted nested budget rejects immediately (never queues)", as
 		}
 	} finally {
 		await broker.stop();
-		fs.rmSync(s.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(s.cwd);
 	}
 });

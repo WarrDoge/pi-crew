@@ -19,6 +19,7 @@ import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { loadRunForHello } from "../../../../src/runtime/broker/protocol/manifest-loader.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import { teardownCwd } from "../../../fixtures/teardown-cwd.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 async function scaffoldRun(prefix: string): Promise<{ cwd: string; runId: string; stateRoot: string }> {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -37,12 +38,12 @@ test("loadRunForHello: absent cwd is undefined for any runId (no cwd → no run)
 	assert.equal(loadRunForHello(undefined, ""), undefined);
 });
 
-test("loadRunForHello: unknown runId yields undefined, never a throw", () => {
+test("loadRunForHello: unknown runId yields undefined, never a throw", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ml-unknown-"));
 	try {
 		assert.equal(loadRunForHello(dir, "no-such-run"), undefined);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 

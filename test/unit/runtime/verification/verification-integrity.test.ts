@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { compareSnapshot, MANIFEST_FILES, snapshotManifests } from "../../../../src/runtime/verification/verification-integrity.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 let tmpDir = "";
 
@@ -18,8 +19,8 @@ beforeEach(() => {
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-vint-"));
 });
 
-afterEach(() => {
-	fs.rmSync(tmpDir, { recursive: true, force: true });
+afterEach(async () => {
+	await removeDirWithRetry(tmpDir);
 });
 
 describe("snapshotManifests", () => {

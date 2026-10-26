@@ -35,6 +35,7 @@ import { describe, test } from "node:test";
 
 import { runVerifierGatePreGate } from "../../../../src/runtime/verification/verify-gate.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const SRC_ROOT = path.join(import.meta.dirname, "..", "..", "..", "..", "src");
 const VERIFY_GATE = path.join(SRC_ROOT, "runtime", "verification", "verify-gate.ts");
@@ -104,7 +105,7 @@ describe("M3-28 — classifier pre-gate census", () => {
 			assert.equal(result.decision.reason, "inconclusive_no_classifier");
 			assert.ok(!result.decision.reason.startsWith("classifier_"), "no classifier_* label may be produced");
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir);
 		}
 	});
 
@@ -137,7 +138,7 @@ describe("M3-28 — classifier pre-gate census", () => {
 			assert.equal(result.decision.reason, "deterministic_failed");
 			assert.equal(result.decision.skipVerifier, false);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir);
 		}
 	});
 });
