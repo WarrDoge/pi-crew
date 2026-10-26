@@ -284,21 +284,57 @@ test("T-6 (b): sustained lock-free writer pressure — no convergence error, mer
 		// pending coalesced write NOW so the template write can never land after
 		// the settled persist (which is the last, synchronous write).
 		flushPendingAtomicWrites();
-		const fresh = loadRunManifestById(cwd, created.manifest.runId)?.tasks ?? [];
-		const settled = persistSingleTaskUpdate(created.manifest, fresh, updated, undefined, true);
-		assert.equal(settled.find((t) => t.id === taskA.id)?.status, "completed");
+		// Win32 rename-visibility gap (T-6b wave-16 hardening): the storm child's
+		// last rename can still be invisible to this process right after
+		// childExited resolves on win32/Node24, so poll the disk for the tick
+		// marker (bounded 2s, 10ms steps — same pattern as the stormLive probe
+		// above) BEFORE the settled persist reads-and-merges over the storm's
+		// final state.
+		const tickVisible = Date.now() + 2_000;
+		while (Date.now() < tickVisible) {
+			try {
+				const probe = JSON.parse(fs.readFileSync(created.manifest.tasksPath, "utf-8")) as Array<{
+					id: string;
+					tick?: number;
+				}>;
+				if (probe.some((t) => t.id === taskB.id && typeof t.tick === "number" && t.tick >= 1)) break;
+			} catch {
+				/* mid-swap read — retry */
+			}
+			sleepSync(10);
+		}
 
-		const onDisk = JSON.parse(fs.readFileSync(created.manifest.tasksPath, "utf-8")) as TeamTaskState[];
-		assert.ok(
-			onDisk.some((t) => t.id === taskA.id && t.status === "completed"),
-			"post-storm persist must land our completed A on disk",
-		);
-		assert.ok(
-			onDisk.some((t) => t.id === taskB.id),
-			"post-storm persist must preserve the concurrent writer's B",
-		);
-		const diskB = onDisk.find((t) => t.id === taskB.id) as (TeamTaskState & { tick?: number }) | undefined;
-		assert.ok(typeof diskB?.tick === "number" && diskB.tick >= 1, "storm writer's tick marker must be present on B");
+		// One settled persist pass: fresh fallback → persist → disk asserts, and
+		// returns the tick the storm stamped on B (undefined when a straggler
+		// tickless template write covered it — see the bounded retry below).
+		const settledPass = (): number | undefined => {
+			const fresh = loadRunManifestById(cwd, created.manifest.runId)?.tasks ?? [];
+			const settled = persistSingleTaskUpdate(created.manifest, fresh, updated, undefined, true);
+			assert.equal(settled.find((t) => t.id === taskA.id)?.status, "completed");
+
+			const onDisk = JSON.parse(fs.readFileSync(created.manifest.tasksPath, "utf-8")) as TeamTaskState[];
+			assert.ok(
+				onDisk.some((t) => t.id === taskA.id && t.status === "completed"),
+				"post-storm persist must land our completed A on disk",
+			);
+			assert.ok(
+				onDisk.some((t) => t.id === taskB.id),
+				"post-storm persist must preserve the concurrent writer's B",
+			);
+			const diskB = onDisk.find((t) => t.id === taskB.id) as (TeamTaskState & { tick?: number }) | undefined;
+			return typeof diskB?.tick === "number" ? diskB.tick : undefined;
+		};
+
+		let tick = settledPass();
+		if (typeof tick !== "number" || tick < 1) {
+			// Bounded single retry (ordering fix, not a duration fix): if one last
+			// coalesced tickless template write landed after the settled persist,
+			// flush everything, reload fresh and run the settled persist exactly
+			// once more — the tick marker must still come from the LIVE storm.
+			flushPendingAtomicWrites();
+			tick = settledPass();
+		}
+		assert.ok(typeof tick === "number" && tick >= 1, "storm writer's tick marker must be present on B");
 	} finally {
 		child?.kill();
 		flushPendingAtomicWrites();
