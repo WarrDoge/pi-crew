@@ -8,6 +8,7 @@ import { readEvents } from "../../src/state/event-log/event-log.ts";
 import { createRunManifest, loadRunManifestById, saveRunManifest } from "../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -60,6 +61,6 @@ test("async restart recovery status marks dead background pid failed", async () 
 			true,
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

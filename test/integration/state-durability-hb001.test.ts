@@ -22,6 +22,7 @@ import { createRunManifest, loadRunManifestById, saveRunTasks } from "../../src/
 import type { TeamTaskState } from "../../src/state/types.ts";
 import type { TeamConfig } from "../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "hb001",
@@ -45,7 +46,7 @@ test("HB-001 integration: interleaved manifest + event writes reload consistentl
 		process.platform === "win32"
 			? "Windows tmpdir path-canonicalization mismatch with createRunManifest; covered on ubuntu + macos CI"
 			: false,
-}, () => {
+}, async () => {
 	// realpathSync so macOS /var → /private/var symlink is canonicalised before
 	// the run dir is created; otherwise loadRunManifestById (which uses
 	// resolveRealContainedPath) would look under a different lexical path.
@@ -108,6 +109,6 @@ test("HB-001 integration: interleaved manifest + event writes reload consistentl
 			assert.ok(parsed.type, "each event must have a type");
 		}
 	} finally {
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await cleanupStateRoot(tmpRoot);
 	}
 });

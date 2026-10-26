@@ -7,6 +7,7 @@ import test from "node:test";
 import type { TeamRunManifest, TeamTaskState } from "../../src/state/types.ts";
 import { CURRENT_SCHEMA_VERSION } from "../../src/state/types.ts";
 import { snapshotDirtyWorktree } from "../../src/worktree/worktree-manager.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 test("ST-1b: snapshotDirtyWorktree captures non-ASCII filenames when caller passes core.quotePath=false (STATE-8)", async (t) => {
 	if (!hasGit()) {
@@ -89,9 +90,9 @@ test("ST-1b: snapshotDirtyWorktree captures non-ASCII filenames when caller pass
 		} catch {
 			/* best-effort */
 		}
-		fs.rmSync(repoRoot, { recursive: true, force: true });
-		fs.rmSync(artifactsRoot, { recursive: true, force: true });
-		fs.rmSync(worktreePath, { recursive: true, force: true });
+		await removeDirWithRetry(repoRoot);
+		await removeDirWithRetry(artifactsRoot);
+		await removeDirWithRetry(worktreePath);
 	}
 });
 
@@ -247,8 +248,8 @@ test("ST-1: snapshotDirtyWorktree captures untracked dirs, binary files, and tra
 		} catch {
 			/* best-effort */
 		}
-		fs.rmSync(repoRoot, { recursive: true, force: true });
-		fs.rmSync(artifactsRoot, { recursive: true, force: true });
-		fs.rmSync(worktreePath, { recursive: true, force: true });
+		await removeDirWithRetry(repoRoot);
+		await removeDirWithRetry(artifactsRoot);
+		await removeDirWithRetry(worktreePath);
 	}
 });

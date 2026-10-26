@@ -7,6 +7,7 @@ import test from "node:test";
 import { handleTeamTool } from "../../src/extension/team-tool.ts";
 import { loadRunManifestById } from "../../src/state/stores/state-store.ts";
 import { firstText } from "../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 function hasGit(): boolean {
 	try {
@@ -84,8 +85,8 @@ test("worktree mode supports setup hook metadata and diff stat artifacts", async
 		else process.env.PI_TEAMS_HOME = previousHome;
 		if (previousSkipHome === undefined) delete process.env.PI_CREW_SKIP_HOME_CHECK;
 		else process.env.PI_CREW_SKIP_HOME_CHECK = previousSkipHome;
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(home);
 	}
 });
 
@@ -139,6 +140,6 @@ test("worktree mode creates task worktrees and exposes them", async (t) => {
 		if (fs.existsSync(crewPath)) {
 			fs.rmSync(crewPath, { recursive: true, force: true });
 		}
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

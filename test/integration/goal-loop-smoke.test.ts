@@ -20,6 +20,7 @@ import { deriveTranscriptPath, runGoalLoop, stubGoalEvaluator } from "../../src/
 import { GoalStore } from "../../src/runtime/goal-workflow/goal-state-store.ts";
 import { createRunManifest } from "../../src/state/stores/state-store.ts";
 import type { GoalLoopState } from "../../src/state/types.ts";
+import { cleanupStateRoot } from "../helpers/rm-retry.ts";
 
 test("runGoalLoop (P1 real evaluator) exits blocked when judge is unreachable or worker unavailable", async () => {
 	// P1: loop uses realGoalEvaluator (runChildPi judge). Without PI_CREW_ALLOW_MOCK=1,
@@ -112,7 +113,7 @@ test("runGoalLoop (P1 real evaluator) exits blocked when judge is unreachable or
 		}
 	} finally {
 		delete process.env.PI_TEAMS_MOCK_CHILD_PI;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -139,7 +140,7 @@ test("stubGoalEvaluator always returns {achieved:false} with a descriptive reaso
 	assert.equal(verdict.turn, 1);
 });
 
-test("deriveTranscriptPath uses the REAL task id (Fix P0-2 regression — was hardcoded 'work')", () => {
+test("deriveTranscriptPath uses the REAL task id (Fix P0-2 regression — was hardcoded 'work')", async () => {
 	// Regression for the review finding P0-2: createTaskId prefixes the index,
 	// so step "work" → task id "01_work" → transcript "01_work.attempt-0.jsonl".
 	// The old code hardcoded "work.attempt-0.jsonl" and always missed the file.
@@ -156,7 +157,7 @@ test("deriveTranscriptPath uses the REAL task id (Fix P0-2 regression — was ha
 		assert.ok(derived!.includes("01_work"), "must use the real task id, not 'work'");
 		assert.ok(fs.existsSync(derived!), "derived path must exist on disk");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -263,7 +264,7 @@ test("GL-1b: a failing turn persists its reason at goal level (survives turn-dir
 	} finally {
 		delete process.env.PI_TEAMS_MOCK_CHILD_PI;
 		delete process.env.PI_CREW_ALLOW_MOCK;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -341,6 +342,6 @@ test("SR-01 (GL-1b part C): a pre-executeTeamRun throw marks the turn manifest f
 		assert.match(String(turnManifest.summary ?? ""), /pre-execute failure/);
 	} finally {
 		delete process.env.PI_TEAMS_MOCK_CHILD_PI;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

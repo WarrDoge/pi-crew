@@ -22,6 +22,7 @@ import { __test__clearManifestCache, createRunManifest, loadRunManifestById, sav
 import type { TeamTaskState } from "../../src/state/types.ts";
 import type { TeamConfig } from "../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "st4test",
@@ -115,7 +116,7 @@ test("ST-4: malformed tasks.json (SyntaxError) → reconstruct from events, NOT 
 		process.platform === "win32"
 			? "Windows file-quarantine rename + reload timing flakes ('manifest must reload'). Follow up: make the reload assertion wait-free / Windows-tolerant."
 			: undefined,
-}, () => {
+}, async () => {
 	const { tmpRoot, manifest, tasksPath } = setupRun();
 	try {
 		// Corrupt tasks.json with a syntax error.
@@ -156,7 +157,7 @@ test("ST-4: malformed tasks.json (SyntaxError) → reconstruct from events, NOT 
 		assert.ok(Array.isArray(rewritten), "rewritten tasks.json is an array");
 		assert.equal(rewritten.length, 2, "rewritten tasks.json has 2 tasks");
 	} finally {
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await cleanupStateRoot(tmpRoot, manifest.eventsPath);
 	}
 });
 
@@ -165,7 +166,7 @@ test("ST-4: non-array JSON ({}) in tasks.json → treated as corrupt, quarantine
 		process.platform === "win32"
 			? "Windows file-quarantine rename + reload timing flakes ('manifest must reload'). Follow up: make the reload assertion wait-free / Windows-tolerant."
 			: undefined,
-}, () => {
+}, async () => {
 	const { tmpRoot, manifest, tasksPath } = setupRun();
 	try {
 		// Write non-array JSON.
@@ -186,7 +187,7 @@ test("ST-4: non-array JSON ({}) in tasks.json → treated as corrupt, quarantine
 			"non-array file quarantined",
 		);
 	} finally {
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await cleanupStateRoot(tmpRoot, manifest.eventsPath);
 	}
 });
 
@@ -195,7 +196,7 @@ test("ST-4: ENOENT (no tasks.json) → [] is legitimate, NOT quarantined", {
 		process.platform === "win32"
 			? "Windows file-quarantine rename + reload timing flakes ('manifest must reload'). Follow up: make the reload assertion wait-free / Windows-tolerant."
 			: undefined,
-}, () => {
+}, async () => {
 	const { tmpRoot, manifest, tasksPath } = setupRun();
 	try {
 		// Delete tasks.json entirely.
@@ -210,11 +211,11 @@ test("ST-4: ENOENT (no tasks.json) → [] is legitimate, NOT quarantined", {
 		const corrupt = findCorruptFiles(path.dirname(tasksPath));
 		assert.equal(corrupt.length, 0, "ENOENT must NOT quarantine");
 	} finally {
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await cleanupStateRoot(tmpRoot, manifest.eventsPath);
 	}
 });
 
-test("ST-4: saveRunTasks refuses to persist [] over a previously-non-empty tasks file", () => {
+test("ST-4: saveRunTasks refuses to persist [] over a previously-non-empty tasks file", async () => {
 	const { tmpRoot, manifest, tasksPath } = setupRun();
 	try {
 		// tasks.json currently has 2 tasks.
@@ -228,11 +229,11 @@ test("ST-4: saveRunTasks refuses to persist [] over a previously-non-empty tasks
 		const after = JSON.parse(fs.readFileSync(tasksPath, "utf-8")) as TeamTaskState[];
 		assert.equal(after.length, 2, "saveRunTasks([]) must NOT overwrite non-empty tasks");
 	} finally {
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await cleanupStateRoot(tmpRoot, manifest.eventsPath);
 	}
 });
 
-test("ST-4: saveRunTasks([]) proceeds when tasks.json is empty or missing (legitimate)", () => {
+test("ST-4: saveRunTasks([]) proceeds when tasks.json is empty or missing (legitimate)", async () => {
 	const { tmpRoot, manifest, tasksPath } = setupRun();
 	try {
 		// Delete tasks.json → ENOENT → readJsonFile returns undefined → guard allows [].
@@ -247,6 +248,6 @@ test("ST-4: saveRunTasks([]) proceeds when tasks.json is empty or missing (legit
 		const after = JSON.parse(fs.readFileSync(tasksPath, "utf-8")) as TeamTaskState[];
 		assert.equal(after.length, 0, "empty tasks written when file was missing");
 	} finally {
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await cleanupStateRoot(tmpRoot, manifest.eventsPath);
 	}
 });

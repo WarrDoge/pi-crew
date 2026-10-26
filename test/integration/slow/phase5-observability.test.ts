@@ -7,13 +7,14 @@ import { handleTeamTool } from "../../../src/extension/team-tool.ts";
 import { readCrewAgentEventsCursor } from "../../../src/runtime/crew-agent-records.ts";
 import { appendEvent, readEventsCursor } from "../../../src/state/event-log/event-log.ts";
 import { firstText } from "../../fixtures/tool-result-helpers.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 function restoreEnv(name: string, previous: string | undefined): void {
 	if (previous === undefined) delete process.env[name];
 	else process.env[name] = previous;
 }
 
-test("run event cursor returns only events after sinceSeq", () => {
+test("run event cursor returns only events after sinceSeq", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-event-cursor-"));
 	try {
 		const eventsPath = path.join(dir, "events.jsonl");
@@ -26,7 +27,7 @@ test("run event cursor returns only events after sinceSeq", () => {
 		assert.equal(cursor.nextSeq, 2);
 		assert.equal(cursor.total, 2);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });
 
@@ -147,6 +148,6 @@ test("observability API supports event cursors, agent output tail, and dashboard
 	} finally {
 		restoreEnv("PI_TEAMS_MOCK_CHILD_PI", previousMock);
 		restoreEnv("PI_TEAMS_EXECUTE_WORKERS", previousExecute);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

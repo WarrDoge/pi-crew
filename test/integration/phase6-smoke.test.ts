@@ -6,6 +6,7 @@ import test from "node:test";
 import { getPiSpawnCommand } from "../../src/runtime/pi-spawn.ts";
 import { expandParallelResearchWorkflow } from "../../src/runtime/scheduling/parallel-research.ts";
 import type { WorkflowConfig } from "../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 const parallelResearchWorkflow: WorkflowConfig = {
 	name: "parallel-research",
@@ -30,7 +31,7 @@ const parallelResearchWorkflow: WorkflowConfig = {
 	],
 };
 
-test("multi-shard fanout expands Source/pi-* projects and wires synthesize dependencies", () => {
+test("multi-shard fanout expands Source/pi-* projects and wires synthesize dependencies", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-fanout-smoke-"));
 	try {
 		for (const name of ["pi-a", "pi-b", "pi-c", "pi-d", "pi-e"]) {
@@ -47,7 +48,7 @@ test("multi-shard fanout expands Source/pi-* projects and wires synthesize depen
 			shards.map((step) => step.id),
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

@@ -27,6 +27,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { SqliteRunStateStore, sqliteDbPath } from "../../src/state/stores/sqlite-run-state.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../src/state/types.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const STORE_MODULE = fileURLToPath(new URL("../../src/state/stores/sqlite-run-state.ts", import.meta.url));
@@ -169,7 +170,7 @@ async function runCrashIteration(iteration: number, killDelayMs: number): Promis
 		assert.equal(integrity?.integrity_check, "ok", `iteration ${iteration}: integrity_check must be ok after kill -9 reopen`);
 		return { batchesCommitted: batch, killedBeforeFirstCommit: false };
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await removeDirWithRetry(stateRoot);
 	}
 }
 

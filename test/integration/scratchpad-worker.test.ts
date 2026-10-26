@@ -68,6 +68,7 @@ import { runChildPi } from "../../src/runtime/child-pi/child-pi.ts";
 import { prepareSpawnContext } from "../../src/runtime/child-pi/child-pi-spawn.ts";
 import { cleanupAllTrackedTempDirs, cleanupTempDir } from "../../src/runtime/model/pi-args.ts";
 import { EngineManager } from "../../src/runtime/scratchpad/engine.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 // ── env hygiene ─────────────────────────────────────────────────────────────
 // Every key this file can touch — restored to their original values in finally.
@@ -412,7 +413,7 @@ test("T8-b5: real-model happy-path — 2 cells persist state (x=41 → x+1=42) +
 		const clean = await waitFor(() => countGuestProcesses() <= baseline, 10_000);
 		assert.ok(clean, `no guest process may remain after a completed task (baseline=${baseline})`);
 	} finally {
-		if (cwd) fs.rmSync(cwd, { recursive: true, force: true });
+		if (cwd) await removeDirWithRetry(cwd);
 		restoreEnv(snap);
 	}
 });
@@ -429,7 +430,7 @@ test("T8-b6: no-leak — after the real task completes normally, 0 guest process
 		const clean = await waitFor(() => countGuestProcesses() <= baseline, 10_000);
 		assert.ok(clean, `no guest process may remain after normal completion (baseline=${baseline})`);
 	} finally {
-		if (cwd) fs.rmSync(cwd, { recursive: true, force: true });
+		if (cwd) await removeDirWithRetry(cwd);
 		restoreEnv(snap);
 	}
 });

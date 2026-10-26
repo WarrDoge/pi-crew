@@ -45,6 +45,7 @@ import { reconcileAllStaleRuns } from "../../src/runtime/recovery/crash-recovery
 import { createRunManifest, loadRunManifestById } from "../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 const LINUX = process.platform === "linux";
 /** Unique cmdline token so A5's leftover scan targets ONLY this suite's procs. */
@@ -274,7 +275,7 @@ after(async () => {
 		assert.equal(isAlive(pid), false, `pid ${pid} survived cleanup (A5)`);
 	}
 	if (workspace !== undefined) {
-		fs.rmSync(workspace, { recursive: true, force: true });
+		await removeDirWithRetry(workspace);
 		assert.equal(fs.existsSync(workspace), false, `${workspace} must be removed (A5)`);
 	}
 });
@@ -395,7 +396,7 @@ describe("wave 11b LIVE — the run-descendant sweep against real processes", {
 			}
 			for (const pgid of trackedGroups) killGroup(pgid);
 			await new Promise((resolve) => setTimeout(resolve, 100));
-			fs.rmSync(tmpRoot, { recursive: true, force: true });
+			await removeDirWithRetry(tmpRoot);
 		}
 	});
 });

@@ -33,6 +33,7 @@ import { __test__resetDashboardState, RunDashboard } from "../../src/ui/run-dash
 import { colorizeStatusGlyphs, iconForStatus } from "../../src/ui/status-colors.ts";
 import type { CrewTheme } from "../../src/ui/theme-adapter.ts";
 import { pad, truncate, visibleWidth } from "../../src/utils/visual.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 // ── Test helpers ──────────────────────────────────────────────────────
 
@@ -516,9 +517,9 @@ describe("E2E: F-6 — LiveRunSidebar renders the auto-close countdown INSIDE it
 		fs.writeFileSync(path.join(runDir, "agents.json"), JSON.stringify([]));
 	});
 
-	after(() => {
+	after(async () => {
 		try {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			await removeDirWithRetry(tmpDir);
 		} catch {
 			/* best effort */
 		}

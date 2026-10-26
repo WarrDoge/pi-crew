@@ -34,16 +34,17 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { cleanupStateRoot } from "../helpers/rm-retry.ts";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const require = createRequire(import.meta.url);
 const thisFile = fileURLToPath(import.meta.url);
 
 const createdTmpDirs: string[] = [];
-after(() => {
+after(async () => {
 	for (const d of createdTmpDirs) {
 		try {
-			fs.rmSync(d, { recursive: true, force: true });
+			await cleanupStateRoot(d);
 		} catch {
 			/* best-effort cleanup */
 		}

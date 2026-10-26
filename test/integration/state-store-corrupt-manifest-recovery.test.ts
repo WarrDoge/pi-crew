@@ -32,6 +32,7 @@ import {
 import type { TeamTaskState } from "../../src/state/types.ts";
 import type { TeamConfig } from "../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "state3test",
@@ -96,7 +97,7 @@ function findCorruptFiles(dir: string): string[] {
 
 test("STATE-3: loadManifestWithRecovery quarantines corrupt manifest + returns undefined", {
 	skip: process.platform === "win32" ? "Windows file-quarantine rename timing flakes. Follow up: make Windows-tolerant." : undefined,
-}, () => {
+}, async () => {
 	const { tmpRoot, manifest, manifestPath } = setupRun();
 	try {
 		// Corrupt the manifest with a syntax error.
@@ -115,11 +116,11 @@ test("STATE-3: loadManifestWithRecovery quarantines corrupt manifest + returns u
 		// Original manifest.json is gone (renamed away).
 		assert.ok(!fs.existsSync(manifestPath), "corrupt manifest.json renamed away");
 	} finally {
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await cleanupStateRoot(tmpRoot, manifest.eventsPath);
 	}
 });
 
-test("STATE-3: loadManifestWithRecovery returns undefined for MISSING manifest (ENOENT) without quarantine", () => {
+test("STATE-3: loadManifestWithRecovery returns undefined for MISSING manifest (ENOENT) without quarantine", async () => {
 	const { tmpRoot, manifest, manifestPath } = setupRun();
 	try {
 		// Delete the manifest entirely.
@@ -132,11 +133,11 @@ test("STATE-3: loadManifestWithRecovery returns undefined for MISSING manifest (
 		const corrupt = findCorruptFiles(path.dirname(manifestPath));
 		assert.equal(corrupt.length, 0, "ENOENT must NOT quarantine");
 	} finally {
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await cleanupStateRoot(tmpRoot, manifest.eventsPath);
 	}
 });
 
-test("STATE-3: loadManifestWithRecovery returns parsed manifest for valid file", () => {
+test("STATE-3: loadManifestWithRecovery returns parsed manifest for valid file", async () => {
 	const { tmpRoot, manifest, manifestPath } = setupRun();
 	try {
 		const result = loadManifestWithRecovery(manifestPath, manifest.runId);
@@ -147,7 +148,7 @@ test("STATE-3: loadManifestWithRecovery returns parsed manifest for valid file",
 		const corrupt = findCorruptFiles(path.dirname(manifestPath));
 		assert.equal(corrupt.length, 0, "valid manifest must NOT be quarantined");
 	} finally {
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await cleanupStateRoot(tmpRoot, manifest.eventsPath);
 	}
 });
 
@@ -174,7 +175,7 @@ test("STATE-3 async twin: loadRunManifestByIdAsync quarantines corrupt manifest 
 			"quarantine file has correct prefix",
 		);
 	} finally {
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await cleanupStateRoot(tmpRoot, manifest.eventsPath);
 	}
 });
 
@@ -193,7 +194,7 @@ const r48n10aSkip =
 
 test("STATE-3 R48-N10a: loadRunManifestById does NOT quarantine a VALID manifest on EACCES (transient unreadable)", {
 	skip: r48n10aSkip,
-}, () => {
+}, async () => {
 	const { tmpRoot, manifest, manifestPath } = setupRun();
 	try {
 		fs.chmodSync(manifestPath, 0o000);
@@ -216,7 +217,7 @@ test("STATE-3 R48-N10a: loadRunManifestById does NOT quarantine a VALID manifest
 		assert.equal(restored!.manifest.runId, manifest.runId, "restored run has correct runId");
 	} finally {
 		fs.chmodSync(manifestPath, 0o644); // restore so rmSync can clean up
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await cleanupStateRoot(tmpRoot, manifest.eventsPath);
 	}
 });
 
@@ -242,13 +243,13 @@ test("STATE-3 R48-N10a async twin: loadRunManifestByIdAsync does NOT quarantine 
 		assert.equal(restored!.manifest.runId, manifest.runId, "restored run has correct runId");
 	} finally {
 		fs.chmodSync(manifestPath, 0o644); // restore so rmSync can clean up
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await cleanupStateRoot(tmpRoot, manifest.eventsPath);
 	}
 });
 
 test("STATE-3 delegation: loadRunManifestById still quarantines a TRULY corrupt manifest (sync path)", {
 	skip: process.platform === "win32" ? "Windows file-quarantine rename timing flakes. Follow up: make Windows-tolerant." : undefined,
-}, () => {
+}, async () => {
 	const { tmpRoot, manifest, manifestPath } = setupRun();
 	try {
 		fs.writeFileSync(manifestPath, "{not valid json", "utf-8");
@@ -265,6 +266,6 @@ test("STATE-3 delegation: loadRunManifestById still quarantines a TRULY corrupt 
 		);
 		assert.ok(!fs.existsSync(manifestPath), "corrupt manifest.json renamed away");
 	} finally {
-		fs.rmSync(tmpRoot, { recursive: true, force: true });
+		await cleanupStateRoot(tmpRoot, manifest.eventsPath);
 	}
 });

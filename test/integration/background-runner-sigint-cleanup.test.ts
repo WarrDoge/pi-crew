@@ -51,6 +51,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { type ProcIdentity, readProcIdentity, reapGroup } from "../../src/runtime/process/reap-group.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 /** Everything the teardown needs about the harness's detached grandchild. */
 interface GrandchildHandle {
@@ -334,7 +335,7 @@ test("RT-2: REAL SIGINT handler sets exitCode (not process.exit) — finally run
 		}
 		// Clean up temp dir.
 		try {
-			fs.rmSync(markerDir, { recursive: true, force: true });
+			await removeDirWithRetry(markerDir);
 		} catch {
 			/* best-effort */
 		}

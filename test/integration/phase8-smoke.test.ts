@@ -22,6 +22,7 @@ import {
 	dispatchMailboxNudge,
 } from "../../src/ui/run-action-dispatcher.ts";
 import type { RunUiSnapshot } from "../../src/ui/snapshot-types.ts";
+import { cleanupStateRoot, removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 function makeRun(): {
 	cwd: string;
@@ -116,7 +117,7 @@ test("phase8 smoke: dashboard nudge writes mailbox message and event", async () 
 		assert.equal(readMailbox(run.manifest, "inbox", "one").length, 1);
 		assert.ok(readEvents(run.manifest.eventsPath).some((event) => event.type === "agent.nudged"));
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(run.cwd, run.manifest.eventsPath);
 	}
 });
 
@@ -196,7 +197,7 @@ test.skip("phase8 smoke: ackAll can be cancelled before destructive dispatch and
 		assert.equal(delivery[first.id], "acknowledged");
 		assert.equal(delivery[second.id], "acknowledged");
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(run.cwd, run.manifest.eventsPath);
 	}
 });
 
@@ -215,11 +216,11 @@ test("phase8 smoke: health pane exposes recovery and diagnostic actions", async 
 		assert.equal(diagnostic.ok, true);
 		assert.equal(fs.existsSync(String(diagnostic.data)), true);
 	} finally {
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(run.cwd, run.manifest.eventsPath);
 	}
 });
 
-test("phase8 smoke: telemetry disabled config keeps notification sink opt-out explicit", () => {
+test("phase8 smoke: telemetry disabled config keeps notification sink opt-out explicit", async () => {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const previousSkip = process.env.PI_CREW_SKIP_HOME_CHECK;
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-phase8-home-"));
@@ -242,13 +243,13 @@ test("phase8 smoke: telemetry disabled config keeps notification sink opt-out ex
 		const loaded = loadConfig(run.cwd);
 		assert.equal(loaded.config.telemetry?.enabled, false);
 		assert.equal(fs.existsSync(path.join(run.cwd, ".crew", "state", "notifications")), false);
-		fs.rmSync(run.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(run.cwd, run.manifest.eventsPath);
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 		if (previousSkip === undefined) delete process.env.PI_CREW_SKIP_HOME_CHECK;
 		else process.env.PI_CREW_SKIP_HOME_CHECK = previousSkip;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 });
 

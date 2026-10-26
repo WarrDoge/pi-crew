@@ -9,6 +9,7 @@ import { RunDashboard } from "../../../src/ui/run-dashboard.ts";
 import { createRunSnapshotCache } from "../../../src/ui/run-snapshot-cache.ts";
 import { clearTranscriptCache, getTranscriptCacheEntry, readTranscriptLinesCached } from "../../../src/ui/transcript-cache.ts";
 import { type CrewWidgetState, updateCrewWidget } from "../../../src/ui/widget/index.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 function makeTeam(name: string): never {
 	return {
@@ -32,7 +33,7 @@ function makeWorkflow(name: string): never {
 
 test("dashboard snapshot render scales to 50 runs with bounded cache entries", {
 	timeout: 60000,
-}, () => {
+}, async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ui-perf-dashboard-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -90,11 +91,11 @@ test("dashboard snapshot render scales to 50 runs with bounded cache entries", {
 		// Verify the cache correctly bounds entries
 		assert.ok(cache.snapshotsByKey().size <= runCount, "cache should not exceed run count");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("large transcript tail mode reads less than one megabyte by default", () => {
+test("large transcript tail mode reads less than one megabyte by default", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ui-perf-transcript-"));
 	try {
 		const transcriptPath = path.join(cwd, "large.jsonl");
@@ -121,11 +122,11 @@ test("large transcript tail mode reads less than one megabyte by default", () =>
 			false,
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("repeated widget updates keep a single persistent widget install", () => {
+test("repeated widget updates keep a single persistent widget install", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ui-perf-widget-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -168,6 +169,6 @@ test("repeated widget updates keep a single persistent widget install", () => {
 		for (let index = 0; index < 100; index += 1) updateCrewWidget(ctx, state);
 		assert.equal(setWidgetCalls.filter((call) => call.key === "pi-crew-active" && call.content).length, 1);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

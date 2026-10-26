@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../src/extension/team-tool.ts";
 import { loadRunManifestById } from "../../src/state/stores/state-store.ts";
+import { cleanupStateRoot } from "../helpers/rm-retry.ts";
 
 test("executeWorkers can use mocked child Pi and record model attempts", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-mock-child-test-"));
@@ -33,6 +34,6 @@ test("executeWorkers can use mocked child Pi and record model attempts", async (
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = previousMock;
 		if (previousAllowMock === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = previousAllowMock;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

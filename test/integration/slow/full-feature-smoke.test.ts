@@ -17,6 +17,7 @@ import test from "node:test";
 import { listRuns } from "../../../src/extension/run-index.ts";
 import { handleTeamTool } from "../../../src/extension/team-tool.ts";
 import { loadRunManifestById } from "../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -48,7 +49,7 @@ function setup() {
 	process.env.PI_TEAMS_MOCK_CHILD_PI = "json-success";
 }
 
-function teardown() {
+async function teardown() {
 	if (_savedHome === undefined) delete process.env.PI_TEAMS_HOME;
 	else process.env.PI_TEAMS_HOME = _savedHome;
 	if (_savedSkip === undefined) delete process.env.PI_CREW_SKIP_HOME_CHECK;
@@ -60,12 +61,12 @@ function teardown() {
 	if (_savedAllow === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 	else process.env.PI_CREW_ALLOW_MOCK = _savedAllow;
 	try {
-		fs.rmSync(_cwd, { recursive: true, force: true });
+		await removeDirWithRetry(_cwd, { settleMs: 0 });
 	} catch {
 		/* ok */
 	}
 	try {
-		fs.rmSync(_home, { recursive: true, force: true });
+		await removeDirWithRetry(_home, { settleMs: 0 });
 	} catch {
 		/* ok */
 	}
@@ -94,7 +95,7 @@ test("G1: help shows usage", async () => {
 		ok(res, "help");
 		assert.match(getText(res), /team/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -105,7 +106,7 @@ test("G1: list returns teams/agents/workflows", async () => {
 		ok(res, "list");
 		assert.match(getText(res), /team|agent|workflow/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -116,7 +117,7 @@ test("G1: get returns team details", async () => {
 		ok(res, "get team");
 		assert.match(getText(res), /default/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -127,7 +128,7 @@ test("G1: get returns agent details", async () => {
 		ok(res, "get agent");
 		assert.match(getText(res), /executor/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -138,7 +139,7 @@ test("G1: get returns workflow details", async () => {
 		ok(res, "get workflow");
 		assert.match(getText(res), /default/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -149,7 +150,7 @@ test("G1: config shows current config", async () => {
 		ok(res, "config");
 		assert.match(getText(res), /config/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -160,7 +161,7 @@ test("G1: autonomy shows status", async () => {
 		ok(res, "autonomy");
 		assert.match(getText(res), /autonom/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -170,7 +171,7 @@ test("G1: validate checks resources", async () => {
 		const res = await tool({ action: "validate" });
 		ok(res, "validate");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -184,7 +185,7 @@ test("G1: recommend suggests team/workflow", async () => {
 		ok(res, "recommend");
 		assert.match(getText(res), /team|workflow|fast-fix/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -197,7 +198,7 @@ test("G1: search finds agents/teams", async () => {
 		});
 		ok(res, "search");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -211,7 +212,7 @@ test("G1: init reinitializes project", async () => {
 		ok(res, "init");
 		assert.match(getText(res), /init/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -223,7 +224,7 @@ test("G1: doctor diagnoses environment", async () => {
 		// It might error if Pi binary not found, that's OK for smoke
 		assert.ok(res, "doctor returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -246,7 +247,7 @@ test("G2: run creates and executes a team run (mock)", async () => {
 		assert.ok(loaded, "manifest should be persisted");
 		assert.equal(loaded!.manifest.status, "completed", "mock run should complete");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -262,7 +263,7 @@ test("G2: run with agent runs direct agent", async () => {
 		const runId = res.details?.runId as string;
 		assert.ok(runId, "agent run should return runId");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -277,7 +278,7 @@ test("G2: plan creates dry-run plan", async () => {
 		ok(res, "plan");
 		// Plan mode returns a preview without creating a run
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -296,7 +297,7 @@ test("G3: status shows run status", async () => {
 		ok(res, "status");
 		assert.match(getText(res), /status|run|completed/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -312,7 +313,7 @@ test("G3: events shows event log", async () => {
 		const res = await tool({ action: "events", runId });
 		ok(res, "events");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -328,7 +329,7 @@ test("G3: artifacts lists artifacts", async () => {
 		const res = await tool({ action: "artifacts", runId });
 		ok(res, "artifacts");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -344,7 +345,7 @@ test("G3: summary shows/creates summary", async () => {
 		const res = await tool({ action: "summary", runId });
 		ok(res, "summary");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -361,7 +362,7 @@ test("G3: graph loads run graph", async () => {
 		// Graph might not exist for all workflows, just verify no crash
 		assert.ok(res, "graph returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -371,7 +372,7 @@ test("G3: graph lists all graphs", async () => {
 		const res = await tool({ action: "graph" });
 		ok(res, "graph list");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -393,7 +394,7 @@ test("G4: cancel stops a running run", async () => {
 		const res = await tool({ action: "cancel", runId });
 		assert.ok(res, "cancel returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -418,7 +419,7 @@ test("G4: resume restarts failed tasks", async () => {
 		const res = await tool({ action: "resume", runId });
 		ok(res, "resume");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -444,7 +445,7 @@ test("G4: retry re-runs a task", async () => {
 			assert.ok(res, "retry returned something");
 		}
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -465,7 +466,7 @@ test("G5: create agent", async () => {
 		ok(res, "create agent");
 		assert.match(getText(res), /smoke-tester/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -484,7 +485,7 @@ test("G5: create team", async () => {
 		ok(res, "create team");
 		assert.match(getText(res), /smoke-team/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -503,7 +504,7 @@ test("G5: create workflow", async () => {
 		ok(res, "create workflow");
 		assert.match(getText(res), /smoke-workflow/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -525,7 +526,7 @@ test("G5: update agent", async () => {
 		ok(res, "update agent");
 		assert.match(getText(res), /v2 updated|updated/i);
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -545,7 +546,7 @@ test("G5: delete agent", async () => {
 		});
 		ok(res, "delete agent");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -563,7 +564,7 @@ test("G6: export run bundle", async () => {
 		const exported = await tool({ action: "export", runId });
 		ok(exported, "export");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -573,7 +574,7 @@ test("G6: imports lists imported bundles", async () => {
 		const res = await tool({ action: "imports" });
 		ok(res, "imports");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -589,7 +590,7 @@ test("G6: cleanup removes run worktrees", async () => {
 		const res = await tool({ action: "cleanup", runId, confirm: true });
 		ok(res, "cleanup");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -608,7 +609,7 @@ test("G6: forget removes run data", async () => {
 		const loaded = loadRunManifestById(_cwd, runId);
 		assert.equal(loaded, undefined, "manifest should be gone after forget");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -624,7 +625,7 @@ test("G6: prune removes old runs", async () => {
 		// prune with 0 days should remove everything
 		assert.ok(res, "prune returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -646,7 +647,7 @@ test("G7: api reads manifest", async () => {
 		});
 		ok(res, "api read-manifest");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -663,7 +664,7 @@ test("G7: invalidate refreshes cache", async () => {
 		// May report "no snapshot cache" — that's fine, just verify no crash
 		assert.ok(res, "invalidate returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -679,7 +680,7 @@ test("G7: worktrees lists worktree info", async () => {
 		const res = await tool({ action: "worktrees", runId });
 		ok(res, "worktrees");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -699,7 +700,7 @@ test("G7: steer sends steering note", async () => {
 		});
 		assert.ok(res, "steer returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -709,7 +710,7 @@ test("G7: health monitor", async () => {
 		const res = await tool({ action: "health" });
 		assert.ok(res, "health returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -719,7 +720,7 @@ test("G7: settings shows/updates settings", async () => {
 		const res = await tool({ action: "settings" });
 		assert.ok(res, "settings returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -729,7 +730,7 @@ test("G7: anchor status", async () => {
 		const res = await tool({ action: "anchor" });
 		assert.ok(res, "anchor returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -739,7 +740,7 @@ test("G7: onboard builds onboarding info", async () => {
 		const res = await tool({ action: "onboard", team: "default" });
 		ok(res, "onboard");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -749,7 +750,7 @@ test("G7: explain returns explanation", async () => {
 		const res = await tool({ action: "explain" });
 		assert.ok(res, "explain returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -759,7 +760,7 @@ test("G7: auto-summarize status", async () => {
 		const res = await tool({ action: "auto-summarize" });
 		assert.ok(res, "auto-summarize returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -769,7 +770,7 @@ test("G7: cache checks run cache", async () => {
 		const res = await tool({ action: "cache", goal: "Cache test" });
 		assert.ok(res, "cache returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -786,7 +787,7 @@ test("G8: schedule creates a scheduled run", async () => {
 		});
 		assert.ok(res, "schedule returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -797,7 +798,7 @@ test("G8: scheduled lists scheduled jobs", async () => {
 		// Scheduler may not be running; just verify it doesn't crash
 		assert.ok(res, "scheduled returned something");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -823,7 +824,7 @@ test("G9: run with default team", async () => {
 		const loaded = loadRunManifestById(_cwd, runId);
 		assert.equal(loaded!.manifest.status, "completed");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -840,7 +841,7 @@ test("G9: run with research team", async () => {
 		const loaded = loadRunManifestById(_cwd, runId);
 		assert.equal(loaded!.manifest.status, "completed");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -858,7 +859,7 @@ test("G9: run with implementation team", async () => {
 		assert.ok(loaded, "manifest should be persisted");
 		// Implementation team uses adaptive planning; mock may not satisfy all phases
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -875,7 +876,7 @@ test("G9: run with review team", async () => {
 		const loaded = loadRunManifestById(_cwd, runId);
 		assert.equal(loaded!.manifest.status, "completed");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -890,7 +891,7 @@ test("G10: status with invalid runId returns error", async () => {
 		});
 		assert.ok(res.isError, "status with invalid runId should error");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -904,7 +905,7 @@ test("G10: get with invalid resource returns error", async () => {
 		});
 		assert.ok(res.isError, "get nonexistent team should error");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -923,7 +924,7 @@ test("G10: delete without confirm returns error", async () => {
 		});
 		assert.ok(res.isError, "delete without confirm should error");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -939,7 +940,7 @@ test("G10: forget without confirm returns error", async () => {
 		const res = await tool({ action: "forget", runId });
 		assert.ok(res.isError, "forget without confirm should error");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -949,7 +950,7 @@ test("G10: recommend without goal returns error", async () => {
 		const res = await tool({ action: "recommend" });
 		assert.ok(res.isError, "recommend without goal should error");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -975,7 +976,7 @@ test("G11: multiple sequential runs get unique IDs", async () => {
 		assert.ok(loadRunManifestById(_cwd, id1));
 		assert.ok(loadRunManifestById(_cwd, id2));
 	} finally {
-		teardown();
+		await teardown();
 	}
 });
 
@@ -987,6 +988,6 @@ test("G11: list runs after multiple runs", async () => {
 		const manifests = listRuns(_cwd);
 		assert.ok(manifests.length >= 2, "should have at least 2 runs");
 	} finally {
-		teardown();
+		await teardown();
 	}
 });

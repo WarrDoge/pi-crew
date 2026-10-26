@@ -6,6 +6,7 @@ import * as path from "node:path";
 import test from "node:test";
 import type { TeamRunManifest } from "../../src/state/types.ts";
 import { cleanupAgentWorktree, prepareAgentWorktree } from "../../src/worktree/worktree-manager.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 function hasGit(): boolean {
 	try {
@@ -46,7 +47,7 @@ function makeManifest(cwd: string, runId: string): TeamRunManifest {
  * 2nd call → caught → returned undefined → silent leader fallback.
  * Fix: non-deterministic suffix so every call yields a distinct worktree.
  */
-test("ST-15: prepareAgentWorktree twice for same agent creates DISTINCT worktrees", (t) => {
+test("ST-15: prepareAgentWorktree twice for same agent creates DISTINCT worktrees", async (t) => {
 	if (!hasGit()) {
 		t.skip("git is not available");
 		return;
@@ -92,7 +93,7 @@ test("ST-15: prepareAgentWorktree twice for same agent creates DISTINCT worktree
 		cleanupAgentWorktree(manifest, first.worktreePath!, first.branch);
 		cleanupAgentWorktree(manifest, second.worktreePath!, second.branch);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -101,7 +102,7 @@ test("ST-15: prepareAgentWorktree twice for same agent creates DISTINCT worktree
  * the function must THROW — not return undefined — so callers never silently
  * fall back to the leader repo (isolation lost without any error).
  */
-test("ST-15: worktree creation failure THROWS instead of silently returning undefined", (t) => {
+test("ST-15: worktree creation failure THROWS instead of silently returning undefined", async (t) => {
 	if (!hasGit()) {
 		t.skip("git is not available");
 		return;
@@ -132,7 +133,7 @@ test("ST-15: worktree creation failure THROWS instead of silently returning unde
 			"creation failure must THROW, not silently return undefined (ST-15 fix)",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -140,7 +141,7 @@ test("ST-15: worktree creation failure THROWS instead of silently returning unde
  * ST-15 (companion): genuine "worktree unavailable" cases (no git repo) still
  * return undefined for graceful fallback — that contract is preserved.
  */
-test("ST-15: no git repo still returns undefined (graceful fallback preserved)", (t) => {
+test("ST-15: no git repo still returns undefined (graceful fallback preserved)", async (t) => {
 	if (!hasGit()) {
 		t.skip("git is not available");
 		return;
@@ -152,6 +153,6 @@ test("ST-15: no git repo still returns undefined (graceful fallback preserved)",
 		const result = prepareAgentWorktree(manifest, "dwf-agent-nogit");
 		assert.equal(result, undefined, "no-git-repo should return undefined (graceful fallback preserved)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -12,6 +12,7 @@ import {
 	prepareTaskWorkspaceAsync,
 	snapshotDirtyWorktree,
 } from "../../src/worktree/worktree-manager.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 /**
  * RR-010 / F01 regression tests — "incomplete backup ⇒ original bytes survive".
@@ -131,7 +132,7 @@ test("F01 Case A (async): untracked file > 256 KiB survives worktree reuse (AC1/
 		const snapshots = readRecoverySnapshots(manifest.artifactsRoot);
 		assert.ok(snapshots.length > 0, "a recovery snapshot artifact must still be written");
 	} finally {
-		fs.rmSync(repo, { recursive: true, force: true });
+		await removeDirWithRetry(repo);
 		clearCleanLeaderCache();
 		clearGitRootCache();
 	}
@@ -177,13 +178,13 @@ test("F01 Case B (async): chmod 000 file survives reuse AND is named in the arti
 		const snapshots = readRecoverySnapshots(manifest.artifactsRoot);
 		assert.ok(snapshots.includes("secret.txt"), `artifact must NAME the skipped entry with a reason (AC3); got:\n${snapshots}`);
 	} finally {
-		fs.rmSync(repo, { recursive: true, force: true });
+		await removeDirWithRetry(repo);
 		clearCleanLeaderCache();
 		clearGitRootCache();
 	}
 });
 
-test("F01 Case C (sync): untracked file > 256 KiB survives worktree reuse (AC8)", (t) => {
+test("F01 Case C (sync): untracked file > 256 KiB survives worktree reuse (AC8)", async (t) => {
 	if (!hasGit()) {
 		t.skip("git is not available");
 		return;
@@ -212,7 +213,7 @@ test("F01 Case C (sync): untracked file > 256 KiB survives worktree reuse (AC8)"
 		assert.ok(big.equals(fs.readFileSync(bigPath)), "original bytes must be byte-identical after sync reuse");
 		assert.ok(readRecoverySnapshots(manifest.artifactsRoot).length > 0, "recovery artifact must still be written (sync path)");
 	} finally {
-		fs.rmSync(repo, { recursive: true, force: true });
+		await removeDirWithRetry(repo);
 		clearCleanLeaderCache();
 		clearGitRootCache();
 	}
@@ -238,7 +239,7 @@ test("F01 Case D (async): explicit force=true discards dirty worktree despite in
 		assert.equal(second.reused, true);
 		assert.ok(!fs.existsSync(bigPath), "force=true must still discard the dirty worktree (file removed by clean)");
 	} finally {
-		fs.rmSync(repo, { recursive: true, force: true });
+		await removeDirWithRetry(repo);
 		clearCleanLeaderCache();
 		clearGitRootCache();
 	}
@@ -288,9 +289,9 @@ test("F01 AC2: snapshotDirtyWorktree returns a structured result — truncated e
 		} catch {
 			/* best-effort */
 		}
-		fs.rmSync(repoRoot, { recursive: true, force: true });
-		fs.rmSync(artifactsRoot, { recursive: true, force: true });
-		fs.rmSync(worktreePath, { recursive: true, force: true });
+		await removeDirWithRetry(repoRoot);
+		await removeDirWithRetry(artifactsRoot);
+		await removeDirWithRetry(worktreePath);
 	}
 });
 
@@ -355,8 +356,8 @@ test("F01 AC2/AC3: snapshotDirtyWorktree marks a chmod 000 entry as skipped and 
 		} catch {
 			/* best-effort */
 		}
-		fs.rmSync(repoRoot, { recursive: true, force: true });
-		fs.rmSync(artifactsRoot, { recursive: true, force: true });
-		fs.rmSync(worktreePath, { recursive: true, force: true });
+		await removeDirWithRetry(repoRoot);
+		await removeDirWithRetry(artifactsRoot);
+		await removeDirWithRetry(worktreePath);
 	}
 });

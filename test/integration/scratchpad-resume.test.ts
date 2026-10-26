@@ -17,6 +17,7 @@ import {
 } from "../../src/prompt/scratchpad-lifecycle.ts";
 import { prepareSpawnContext } from "../../src/runtime/child-pi/child-pi-spawn.ts";
 import type { EngineManager } from "../../src/runtime/scratchpad/engine.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 // Phase 2 — P2-T7: integration of the crash-resume pipeline.
 // group (a) deterministic: full prepareSpawnContext → restore env set; lifecycle
@@ -26,8 +27,8 @@ import type { EngineManager } from "../../src/runtime/scratchpad/engine.ts";
 
 const REAL_MODEL = process.env.PI_CREW_TEST_REAL_MODEL === "1";
 const roots: string[] = [];
-afterEach(() => {
-	for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+afterEach(async () => {
+	for (const root of roots.splice(0)) await removeDirWithRetry(root);
 });
 
 function makeAgent(): AgentConfig {

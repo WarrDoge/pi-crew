@@ -10,6 +10,7 @@ import { writeArtifact } from "../../src/state/stores/artifact-store.ts";
 import { createRunManifest } from "../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot, removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "phase3",
@@ -77,7 +78,7 @@ test("child Pi runtime writes JSONL transcript callbacks", async () => {
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = previous;
 		if (previousAllowMock === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = previousAllowMock;
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -123,7 +124,7 @@ setTimeout(() => process.exit(0), 1550);
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = previousMock;
 		if (previousBin === undefined) delete process.env.PI_TEAMS_PI_BIN;
 		else process.env.PI_TEAMS_PI_BIN = previousBin;
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -166,7 +167,7 @@ setInterval(() => {}, 1000);
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = previousMock;
 		if (previousBin === undefined) delete process.env.PI_TEAMS_PI_BIN;
 		else process.env.PI_TEAMS_PI_BIN = previousBin;
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -201,11 +202,11 @@ test("child Pi runtime ignores observer callback failures", async () => {
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = previous;
 		if (previousAllowMock === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = previousAllowMock;
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("dependency output context injects prior task output and shared reads", () => {
+test("dependency output context injects prior task output and shared reads", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-output-context-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -234,11 +235,11 @@ test("dependency output context injects prior task output and shared reads", () 
 		assert.match(rendered, /Exploration output/);
 		assert.match(rendered, /Shared context/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("crew agent records mirror task agents", () => {
+test("crew agent records mirror task agents", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-agent-records-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -250,6 +251,6 @@ test("crew agent records mirror task agents", () => {
 		});
 		assert.deepEqual(readCrewAgents(manifest), []);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

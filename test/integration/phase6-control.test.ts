@@ -8,6 +8,7 @@ import { saveCrewAgents } from "../../src/runtime/crew-agent-records.ts";
 import { readForegroundControlStatus, writeForegroundInterruptRequest } from "../../src/runtime/foreground-control.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../src/state/types.ts";
 import { firstText } from "../fixtures/tool-result-helpers.ts";
+import { cleanupStateRoot } from "../helpers/rm-retry.ts";
 
 function manifest(root: string): TeamRunManifest {
 	return {
@@ -41,7 +42,7 @@ const task: TeamTaskState = {
 	cwd: "/tmp/project",
 };
 
-test("foreground control status and interrupt request are durable", () => {
+test("foreground control status and interrupt request are durable", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-fg-control-"));
 	try {
 		const run = manifest(cwd);
@@ -69,7 +70,7 @@ test("foreground control status and interrupt request are durable", () => {
 		assert.equal(nextStatus.lastRequest?.id, request.id);
 		assert.match(fs.readFileSync(run.eventsPath, "utf-8"), /foreground\.interrupt_requested/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -114,6 +115,6 @@ test("team api exposes foreground status and interrupt request", async () => {
 		assert.equal(request.type, "interrupt");
 		assert.equal(request.reason, "phase6 test");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

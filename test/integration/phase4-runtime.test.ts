@@ -11,6 +11,7 @@ import { readMailbox } from "../../src/state/coordination/mailbox.ts";
 import { createRunManifest } from "../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot, removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "phase4",
@@ -65,7 +66,7 @@ test("child Pi line observer preserves JSON events split across chunks", async (
 		assert.deepEqual(lines, ["hello", "raw"]);
 		assert.match(fs.readFileSync(transcriptPath, "utf-8"), /hello/);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -102,7 +103,7 @@ test("child Pi line observer does not mirror user prompts into output log", asyn
 		assert.equal(events.length, 1);
 		assert.doesNotMatch(fs.readFileSync(transcriptPath, "utf-8"), /task prompt/);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -141,7 +142,7 @@ test("child Pi line observer drops noisy message updates from durable logs", asy
 		assert.doesNotMatch(transcript, /thinkingSignature/);
 		assert.match(transcript, /done/);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -175,7 +176,7 @@ test("session usage parser sums JSONL token usage and ignores corrupt lines", ()
 	});
 });
 
-test("group join writes metadata artifact, event, and mailbox delivery", () => {
+test("group join writes metadata artifact, event, and mailbox delivery", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-group-join-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -217,7 +218,7 @@ test("group join writes metadata artifact, event, and mailbox delivery", () => {
 		assert.match(fs.readFileSync(manifest.eventsPath, "utf-8"), /agent\.group_join\.completed/);
 		assert.match(fs.readFileSync(manifest.eventsPath, "utf-8"), /agent\.group_join\.delivery_reused/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -271,6 +272,6 @@ test("group join mailbox ack emits acknowledged event", async () => {
 		assert.match(acknowledgedText, /ack=acknowledged/);
 		assert.match(fs.readFileSync(manifest.eventsPath, "utf-8"), /agent\.group_join\.acknowledged/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

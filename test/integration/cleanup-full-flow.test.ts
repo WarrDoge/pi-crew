@@ -30,6 +30,7 @@ import {
 	createSafeTempDir,
 } from "../../src/runtime/model/pi-args.ts";
 import { __test_setRegistryPath, cleanupOrphanWorkers, registerWorker } from "../../src/runtime/orphan-worker-registry.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 function mkdtemp(prefix: string): string {
 	let dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -41,9 +42,9 @@ function mkdtemp(prefix: string): string {
 	return dir;
 }
 
-function rmrf(p: string): void {
+async function rmrf(p: string): Promise<void> {
 	try {
-		fs.rmSync(p, { recursive: true, force: true });
+		await removeDirWithRetry(p, { settleMs: 0 });
 	} catch {
 		// ignore
 	}
@@ -76,8 +77,8 @@ test.beforeEach(() => {
 	__test_resetTrackedTempDirs();
 });
 
-test.afterEach(() => {
-	rmrf(path.dirname(REGISTRY_FILE));
+test.afterEach(async () => {
+	await rmrf(path.dirname(REGISTRY_FILE));
 });
 
 /**
@@ -104,7 +105,7 @@ function runFullCleanup(
 	return { tempResult, legacyResult, workerResult };
 }
 
-test("full cleanup flow: orphan temp dirs + legacy /tmp + orphan workers", () => {
+test("full cleanup flow: orphan temp dirs + legacy /tmp + orphan workers", async () => {
 	const userTmp = mkdtemp("pi-crew-test-user-");
 	const legacyTmp = mkdtemp("pi-crew-test-legacy-");
 
@@ -174,12 +175,12 @@ test("full cleanup flow: orphan temp dirs + legacy /tmp + orphan workers", () =>
 	} catch {
 		/* ignore */
 	}
-	rmrf(userTmp);
-	rmrf(legacyTmp);
-	rmrf(fakeWorkerDir);
+	await rmrf(userTmp);
+	await rmrf(legacyTmp);
+	await rmrf(fakeWorkerDir);
 });
 
-test("full cleanup flow: concurrent session protection", () => {
+test("full cleanup flow: concurrent session protection", async () => {
 	const fakeWorkerDir = mkdtemp("pi-crew-worker-conc-");
 	const fakeWorkerScript = path.join(fakeWorkerDir, "background-runner.ts");
 	fs.writeFileSync(fakeWorkerScript, "setInterval(() => {}, 1000);");
@@ -208,10 +209,10 @@ test("full cleanup flow: concurrent session protection", () => {
 	} catch {
 		/* ignore */
 	}
-	rmrf(fakeWorkerDir);
+	await rmrf(fakeWorkerDir);
 });
 
-test("full cleanup flow: tracked temp dirs protected from Layer 4", () => {
+test("full cleanup flow: tracked temp dirs protected from Layer 4", async () => {
 	const tmp = mkdtemp("pi-crew-test-tracked-");
 
 	// Create two dirs: one tracked (old), one not tracked (old)
@@ -234,7 +235,7 @@ test("full cleanup flow: tracked temp dirs protected from Layer 4", () => {
 	assert.ok(fs.existsSync(tracked), "tracked dir preserved");
 	assert.ok(!fs.existsSync(untracked), "untracked dir removed");
 
-	rmrf(tmp);
+	await rmrf(tmp);
 });
 
 test("full cleanup flow: dead worker pruned, not killed", async () => {
@@ -270,5 +271,5 @@ test("full cleanup flow: dead worker pruned, not killed", async () => {
 	assert.equal(result.pruned, 1, "dead worker pruned");
 	assert.equal(result.killed, 0, "no workers killed");
 
-	rmrf(fakeWorkerDir);
+	await rmrf(fakeWorkerDir);
 });

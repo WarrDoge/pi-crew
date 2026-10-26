@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../src/extension/team-tool.ts";
 import { loadRunManifestById } from "../../src/state/stores/state-store.ts";
+import { cleanupStateRoot } from "../helpers/rm-retry.ts";
 
 /**
  * FIX 4 E2E — exercise the full model-fallback chain end to end.
@@ -119,6 +120,6 @@ test("model-fallback chain routes retryable failure to next candidate and succee
 		else process.env.PI_CREW_ROLE = previousCrewRole;
 		if (previousTeamsRole === undefined) delete process.env.PI_TEAMS_ROLE;
 		else process.env.PI_TEAMS_ROLE = previousTeamsRole;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

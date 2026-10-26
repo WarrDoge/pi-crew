@@ -7,6 +7,7 @@ import type { AgentConfig } from "../../src/agents/agent-config.ts";
 import { rewriteTeamWorkerPrompt } from "../../src/prompt/prompt-runtime.ts";
 import { runChildPi } from "../../src/runtime/child-pi/child-pi.ts";
 import { buildPiWorkerArgs, checkCrewDepth } from "../../src/runtime/model/pi-args.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 const agent: AgentConfig = {
 	name: "phase6",
@@ -24,7 +25,7 @@ function restoreEnv(name: string, previous: string | undefined): void {
 	else process.env[name] = previous;
 }
 
-test("buildPiWorkerArgs writes long tasks to private @file and emits canonical depth env", () => {
+test("buildPiWorkerArgs writes long tasks to private @file and emits canonical depth env", async () => {
 	const result = buildPiWorkerArgs({
 		task: "x".repeat(9000),
 		agent,
@@ -45,7 +46,7 @@ test("buildPiWorkerArgs writes long tasks to private @file and emits canonical d
 		assert.equal(result.env.PI_TEAMS_ROLE, "phase6");
 		assert.equal(result.env.PI_CREW_INHERIT_PROJECT_CONTEXT, "0");
 	} finally {
-		if (result.tempDir) fs.rmSync(result.tempDir, { recursive: true, force: true });
+		if (result.tempDir) await removeDirWithRetry(result.tempDir);
 	}
 });
 
@@ -58,7 +59,7 @@ for (const [label, task] of [
 	["empty task", ""],
 	["just-under-limit task", "y".repeat(7999)],
 ] as const) {
-	test(`buildPiWorkerArgs spills ${label} to a 0600 @file — argv carries no task text`, () => {
+	test(`buildPiWorkerArgs spills ${label} to a 0600 @file — argv carries no task text`, async () => {
 		const result = buildPiWorkerArgs({ task, agent });
 		try {
 			assert.ok(!result.args.some((arg) => arg.includes("Task:")), "no `Task:` positional may be emitted");
@@ -86,7 +87,7 @@ for (const [label, task] of [
 			}
 			assert.ok(result.tempDir, "tempDir must be reported for cleanup");
 		} finally {
-			if (result.tempDir) fs.rmSync(result.tempDir, { recursive: true, force: true });
+			if (result.tempDir) await removeDirWithRetry(result.tempDir);
 		}
 	});
 }
@@ -114,7 +115,7 @@ test("crew depth guard blocks child workers at max depth before mock execution",
 			assert.equal(result.exitCode, 1);
 			assert.match(result.stderr, /depth guard/);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		}
 	} finally {
 		restoreEnv("PI_CREW_DEPTH", previousDepth);

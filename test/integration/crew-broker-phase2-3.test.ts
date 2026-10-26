@@ -19,6 +19,7 @@ import { handleTeamTool } from "../../src/extension/team-tool.ts";
 import { CrewBroker } from "../../src/runtime/broker/crew-broker.ts";
 import { CrewBrokerClient } from "../../src/runtime/broker/crew-broker-client.ts";
 import { loadRunManifestById } from "../../src/state/stores/state-store.ts";
+import { cleanupStateRoot } from "../helpers/rm-retry.ts";
 
 // ----------------------------------------------------------------------------
 // Fixture (same canonical pattern as crew-broker-msg.test.ts)
@@ -69,7 +70,7 @@ async function makePhase23Fixture(): Promise<Phase23Fixture> {
 			/* ignore */
 		}
 		try {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		} catch {
 			/* ignore */
 		}

@@ -27,6 +27,7 @@ import { createDelegateTool, type DelegateToolDefinition } from "../../src/promp
 import { CrewBroker } from "../../src/runtime/broker/crew-broker.ts";
 import type { GrandchildSpawnInput, GrandchildSpawnResult } from "../../src/runtime/delegate-spawn.ts";
 import { loadRunManifestById, saveRunManifest, saveRunTasks } from "../../src/state/stores/state-store.ts";
+import { cleanupStateRoot } from "../helpers/rm-retry.ts";
 
 function tempSocketPath(suffix: string): string {
 	const tok = randomBytes(3).toString("hex");
@@ -122,7 +123,7 @@ test("E2E roundtrip: delegate tool poll completes over the real broker + mailbox
 		assert.equal(shadow!.status, "completed");
 	} finally {
 		await broker.stop();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -192,6 +193,6 @@ test("E2E roundtrip negated: poll with NO grandchild delivery times out (binding
 		assert.ok(waited >= 900, `poll had to actually wait: ${waited}ms`);
 	} finally {
 		await broker.stop();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

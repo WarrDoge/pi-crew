@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { packageRoot } from "../../src/utils/paths.ts";
+import { removeDirWithRetry } from "../helpers/rm-retry.ts";
 
 /**
  * Integration test for the "in-place extension loading" pattern introduced
@@ -41,7 +42,7 @@ test("pi-crew skill directory resolves from import.meta.url (in-place loader com
 	assert.ok(foundSkillMd, "at least one shipped skill must have SKILL.md");
 });
 
-test("session-scope skill dir is independent of extension-scope skill dir (no collision)", () => {
+test("session-scope skill dir is independent of extension-scope skill dir (no collision)", async () => {
 	const tmpCwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-scope-isolated-"));
 	try {
 		const extSkillDir = path.join(packageRoot(), "skills");
@@ -55,6 +56,6 @@ test("session-scope skill dir is independent of extension-scope skill dir (no co
 		assert.ok(fs.existsSync(extSkillDir), "ext skill dir should be populated");
 		assert.ok(!fs.existsSync(sessionSkillDir), "session skill dir should not exist by default");
 	} finally {
-		fs.rmSync(tmpCwd, { recursive: true, force: true });
+		await removeDirWithRetry(tmpCwd);
 	}
 });
