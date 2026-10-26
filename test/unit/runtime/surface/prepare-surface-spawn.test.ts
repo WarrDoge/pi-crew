@@ -38,6 +38,7 @@ import {
 	stripHeadlessModeArgs,
 	waitForSurfaceExit,
 } from "../../../../src/runtime/surface/surface-spawn.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -145,9 +146,9 @@ test.before(() => {
 	baseDir = mkdtempSync(join(tmpdir(), "surface-spawn-test-"));
 });
 
-test.after(() => {
-	for (const dir of binDirsToClean) rmSync(dir, { recursive: true, force: true });
-	rmSync(baseDir, { recursive: true, force: true });
+test.after(async () => {
+	for (const dir of binDirsToClean) await removeDirWithRetry(dir);
+	await removeDirWithRetry(baseDir);
 });
 
 const HOST_ENV = { PATH: process.env.PATH, HOME: tmpdir(), PI_CREW_DEPTH: "0", TMUX: "/tmp/tmux-1000/default,12345,0" };

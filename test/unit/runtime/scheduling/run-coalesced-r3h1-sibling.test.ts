@@ -24,6 +24,7 @@ import { __test__repairGroupTerminalWrite } from "../../../../src/runtime/schedu
 import { createRunManifest, loadRunManifestById, saveRunTasksAsync } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const SRC_PATH = "src/runtime/scheduling/run-coalesced-task-group.ts";
 
@@ -93,7 +94,7 @@ test("R3-H1: group terminal write does NOT revert concurrent sibling completed/c
 		assert.equal(byId.get("sibling_b")?.status, "cancelled", "sibling cancelled on disk must NOT be reverted to running");
 		assert.ok(byId.get("sibling_b")?.finishedAt, "sibling_b finishedAt preserved");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

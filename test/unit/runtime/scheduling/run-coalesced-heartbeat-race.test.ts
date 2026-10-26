@@ -35,6 +35,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "coalesced-smoke",
@@ -131,7 +132,7 @@ test("runCoalescedTaskGroup scaffold path produces correct terminal state + resu
 		// ── rawOutput should contain scaffold markers ──
 		assert.ok(result.rawOutput.includes("<<<TASK_RESULT:"), "scaffold output should contain TASK_RESULT delimiters");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

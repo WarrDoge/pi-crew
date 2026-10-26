@@ -21,6 +21,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const SRC_PATH = "src/runtime/scheduling/run-coalesced-task-group.ts";
 
@@ -110,6 +111,6 @@ test("RT-5 #3 behavioral: maxTurns from config does not crash dispatch (mock mod
 	} finally {
 		restoreEnv("PI_TEAMS_MOCK_CHILD_PI", prevMock);
 		restoreEnv("PI_CREW_ALLOW_MOCK", prevAllow);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -7,6 +7,7 @@ import { setupCrewScheduler } from "../../../../src/extension/registration/lifec
 import { persistScheduledJobUpdate } from "../../../../src/extension/team-tool/handle-schedule.ts";
 import { CrewScheduler, type ScheduledJob } from "../../../../src/runtime/scheduling/scheduler.ts";
 import { loadCrewSettingsTiers, saveCrewSettings } from "../../../../src/runtime/settings-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * R6-2 (round-6 audit, HIGH): scheduled jobs died after restart.
@@ -74,7 +75,7 @@ function fakeLifecycleDeps(dir: string): {
 	};
 }
 
-test("R6-2(a) wiring: scheduler `updated` events persist the job to crew-settings", () => {
+test("R6-2(a) wiring: scheduler `updated` events persist the job to crew-settings", async () => {
 	const { dir, globalFile } = makeScratchProject();
 	try {
 		const job = makeJob({ id: "job-wiring", scheduleType: "interval", schedule: "3600000ms", intervalMs: 3_600_000 });
@@ -99,7 +100,7 @@ test("R6-2(a) wiring: scheduler `updated` events persist the job to crew-setting
 		assert.equal(reloaded[0].runCount, 4, "`updated` events must persist runCount");
 		assert.equal(reloaded[0].lastRun, "2026-10-16T09:00:00.000Z", "`updated` events must persist lastRun");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -154,11 +155,11 @@ test("R6-2 restart round-trip: crash snapshot (lastStatus 'running') reloads nor
 		restarted.stop();
 		assert.ok(dispatches >= 1, `reloaded job must fire after restart, got ${dispatches} dispatches`);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("R6-2(c) normalization is surgical: terminal statuses (success/error) survive load", () => {
+test("R6-2(c) normalization is surgical: terminal statuses (success/error) survive load", async () => {
 	const { dir, globalFile } = makeScratchProject();
 	try {
 		// User-tier jobs always load (no opt-in needed) — put the three statuses
@@ -184,6 +185,6 @@ test("R6-2(c) normalization is surgical: terminal statuses (success/error) survi
 		assert.equal(byId.get("job-stale")?.runCount, 5, "sibling fields must survive the strip");
 		assert.equal(loaded.length, 3, "no job may be dropped by normalization");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });

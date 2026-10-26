@@ -12,12 +12,13 @@
  * (esbuild inline sourcemap + VLQ) → code (import pre-rewrite).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { EngineManager } from "../../../../src/runtime/scratchpad/engine.ts";
 import { transformCell } from "../../../../src/runtime/scratchpad/transform.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function tempDir(): string {
 	return mkdtempSync(join(tmpdir(), "pi-crew-p6-"));
@@ -166,7 +167,7 @@ test("P6 (f): a cell error after a multi-line type annotation remaps to a sane l
 
 test("P6 (g): snapshot/restore still work after sourcemap change (no regression)", { timeout: 60_000 }, async (t) => {
 	const dir = tempDir();
-	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	t.after(() => removeDirWithRetry(dir));
 	const engine = new EngineManager();
 	t.after(async () => {
 		await engine.kill();

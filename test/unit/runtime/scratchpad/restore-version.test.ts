@@ -15,6 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { EngineManager } from "../../../../src/runtime/scratchpad/engine.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function tempDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-restore-version-"));
@@ -27,7 +28,7 @@ function engineState(engine: EngineManager): string | undefined {
 
 test("P-5: restoreState rejects a version-2 snapshot (fail loudly, no fail-open)", { timeout: 30_000 }, async (t) => {
 	const dir = tempDir();
-	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+	t.after(() => removeDirWithRetry(dir));
 	const snapPath = path.join(dir, "t1.attempt-1.snapshot.json");
 	fs.writeFileSync(snapPath, JSON.stringify({ version: 2, vars: { answer: "42" }, failed: [] }), "utf-8");
 	const engine = new EngineManager();
@@ -45,7 +46,7 @@ test("P-5: restoreState rejects a version-2 snapshot (fail loudly, no fail-open)
 
 test("P-5: restoreState rejects a snapshot with NO version field (unknown format)", { timeout: 30_000 }, async (t) => {
 	const dir = tempDir();
-	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+	t.after(() => removeDirWithRetry(dir));
 	const snapPath = path.join(dir, "t1.attempt-1.snapshot.json");
 	// Pre-gate shape: no `version` — every writer since Phase 3 stamps version 1,
 	// so a versionless file is not a format we can safely interpret.
@@ -63,7 +64,7 @@ test("P-5: restoreState rejects a snapshot with NO version field (unknown format
 
 test("P-5: a version-1 snapshot still passes the gate (path/failed shape intact)", { timeout: 60_000 }, async (t) => {
 	const dir = tempDir();
-	t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+	t.after(() => removeDirWithRetry(dir));
 	const snapPath = path.join(dir, "t1.attempt-1.snapshot.json");
 	// Empty-vars v1 snapshot: passes the version gate, restores zero names —
 	// result WITHOUT a rejection reason (distinction P-5 introduces).

@@ -50,6 +50,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "coalesced-deadletter",
@@ -252,8 +253,8 @@ test("G20: partial delimiter hit → deadletter, zero cross-task content, no bro
 	} finally {
 		__test_resetCap(prevCap);
 		restoreEnv(envSnap);
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(scriptDir, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(scriptDir);
 	}
 });
 
@@ -301,8 +302,8 @@ test("G20 regression: full delimiter hit → per-task partition, no cross-task l
 	} finally {
 		__test_resetCap(prevCap);
 		restoreEnv(envSnap);
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(scriptDir, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(scriptDir);
 	}
 });
 
@@ -344,6 +345,6 @@ test("G20 regression: zero-hit output still broadcasts (shared context, no delim
 		assert.equal(readDeadletterJsonl(path.join(manifest.stateRoot, "deadletter.jsonl")).length, 0);
 	} finally {
 		restoreEnv(envSnap);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

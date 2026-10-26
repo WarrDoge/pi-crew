@@ -27,6 +27,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { pingSocketSync } from "../../../../src/runtime/surface/resolve-surface.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const RESOLVE_SURFACE_SRC = path.join(MODULE_DIR, "..", "..", "..", "..", "src", "runtime", "surface", "resolve-surface.ts");
@@ -46,9 +47,9 @@ function ipcListenPath(tag: string): string {
 
 function withLiveSocket<T>(fn: (socketPath: string) => T): T {
 	const socketPath = ipcListenPath("live");
-	const cleanup = () => {
+	const cleanup = async () => {
 		if (process.platform !== "win32") {
-			fs.rmSync(path.dirname(socketPath), { recursive: true, force: true });
+			await removeDirWithRetry(path.dirname(socketPath));
 		}
 	};
 	const server = net.createServer(() => {
@@ -84,13 +85,13 @@ test("pingSocketSync: live socket → true from a forced-ESM child (--input-type
 	});
 });
 
-test("pingSocketSync: dead path (no listener) → false, fail-closed", () => {
+test("pingSocketSync: dead path (no listener) → false, fail-closed", async () => {
 	const deadPath = ipcListenPath("dead");
 	if (process.platform !== "win32") {
 		// keep the parent dir for cleanup; on win32 the pipe name simply does
 		// not exist server-side.
 		assert.equal(pingSocketSync(deadPath, 2000), false, "dead socket path must fail closed");
-		fs.rmSync(path.dirname(deadPath), { recursive: true, force: true });
+		await removeDirWithRetry(path.dirname(deadPath));
 	} else {
 		assert.equal(pingSocketSync(deadPath, 2000), false, "dead pipe path must fail closed");
 	}

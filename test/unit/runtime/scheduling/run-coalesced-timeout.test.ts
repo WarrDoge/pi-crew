@@ -42,6 +42,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const SRC_PATH = "src/runtime/scheduling/run-coalesced-task-group.ts";
 
@@ -232,7 +233,7 @@ test("RT-5 #4 behavioral: hung worker → taskTimeoutMs FIRES → task 'cancelle
 	} finally {
 		__test_resetCap(prevCap);
 		restoreEnv(envSnap);
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(scriptDir, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(scriptDir);
 	}
 });

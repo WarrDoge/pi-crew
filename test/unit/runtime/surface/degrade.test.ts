@@ -38,6 +38,7 @@ import {
 } from "../../../../src/runtime/surface/degrade.ts";
 import type { SurfaceHandle, SurfaceProvider } from "../../../../src/runtime/surface/surface-provider.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function fakeHandle(id = "%1"): SurfaceHandle {
 	return {
@@ -111,7 +112,7 @@ test("makeTerminalEventProbe: worker.completed ghi sẵn trước pane exit → 
 	});
 	assert.equal(await probe(2000), true);
 	assert.deepEqual(probe.foundPayload(), { result: "DONE", stopReason: "stop" });
-	fs.rmSync(dir, { recursive: true, force: true });
+	await removeDirWithRetry(dir);
 });
 
 test("makeTerminalEventProbe: completion đến SAU exit nhưng trong 2s → true", async () => {
@@ -131,7 +132,7 @@ test("makeTerminalEventProbe: completion đến SAU exit nhưng trong 2s → tru
 	await Promise.resolve(); // cho vòng poll đầu chạy xong (file còn rỗng)
 	fs.appendFileSync(eventsPath, `${JSON.stringify({ type: "worker.completed", taskId: "02_b", data: {} })}\n`, "utf8");
 	assert.equal(await pending, true);
-	fs.rmSync(dir, { recursive: true, force: true });
+	await removeDirWithRetry(dir);
 });
 
 test("makeTerminalEventProbe: hết 2s không thấy completion → false (offset incremental)", async () => {
@@ -155,7 +156,7 @@ test("makeTerminalEventProbe: hết 2s không thấy completion → false (offse
 	assert.deepEqual(probe.foundPayload(), {});
 	assert.ok(clock.now() >= 2000, "probe phải tiêu hết ngân sách");
 	assert.ok(reads <= 42, `poll thưa đủ để không nóng CPU (reads=${reads})`);
-	fs.rmSync(dir, { recursive: true, force: true });
+	await removeDirWithRetry(dir);
 });
 
 test("makeTerminalEventProbe: bỏ qua completion của task khác và dòng JSON hỏng", async () => {
@@ -173,7 +174,7 @@ test("makeTerminalEventProbe: bỏ qua completion của task khác và dòng JSO
 		pollMs: 10,
 	});
 	assert.equal(await probe(100), false);
-	fs.rmSync(dir, { recursive: true, force: true });
+	await removeDirWithRetry(dir);
 });
 
 // ── Fix round 1 / F3: incremental fd read trong MISS window ───────────────
@@ -243,7 +244,7 @@ test("F3: MISS case chỉ đọc PHẦN MỚI của log — không full-read m�
 	// stat (size === offset → early-return), KHÔNG đọc lại gì cả.
 	assert.ok(counter.statCalls() >= 10, `phải poll nhiều lần (${counter.statCalls()} stat calls)`);
 	assert.ok(counter.openCalls() <= 1, `fd mở đúng một lần cho một cửa sổ probe (${counter.openCalls()})`);
-	fs.rmSync(dir, { recursive: true, force: true });
+	await removeDirWithRetry(dir);
 });
 
 test("F3/fix2: truncate/shrink ĐÃ tiêu thụ offset cũ — reset về 0 và thấy completion mới", async () => {
@@ -282,7 +283,7 @@ test("F3/fix2: truncate/shrink ĐÃ tiêu thụ offset cũ — reset về 0 và 
 
 	assert.equal(await probe(500), true, "shrink → offset reset về 0 và thấy completion mới");
 	assert.deepEqual(probe.foundPayload(), { result: "AFTER_ROTATE" });
-	fs.rmSync(dir, { recursive: true, force: true });
+	await removeDirWithRetry(dir);
 });
 
 // ── Fix round 2 / 1: offset math qua ranh giới multi-byte UTF-8 ───────────
@@ -377,7 +378,7 @@ test("fix2: poll cắt GIỮA multi-byte char không được ăn mất byte th�
 	const payload = probe.foundPayload() as { result?: string };
 	assert.match(payload.result ?? "", /^done /, "result vẫn parse ra JSON hợp lệ");
 	assert.ok(harness.openCalls() >= 2, "mỗi cửa sổ probe mở fd riêng");
-	fs.rmSync(dir, { recursive: true, force: true });
+	await removeDirWithRetry(dir);
 });
 
 // ── Lockout counters ──────────────────────────────────────────────────────

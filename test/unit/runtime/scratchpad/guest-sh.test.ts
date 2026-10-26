@@ -13,12 +13,13 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { EngineManager } from "../../../../src/runtime/scratchpad/engine.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function tempDir(): string {
 	return mkdtempSync(join(tmpdir(), "pi-crew-sh-guard-"));
@@ -26,7 +27,7 @@ function tempDir(): string {
 
 test("I6 (a): sh refuses null/undefined args before spawning (no 'rm -rf undefined')", { timeout: 60_000 }, async (t) => {
 	const dir = tempDir();
-	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	t.after(() => removeDirWithRetry(dir));
 	const engine = new EngineManager();
 	t.after(async () => {
 		await engine.kill();
@@ -49,7 +50,7 @@ test("I6 (a): sh refuses a missing command too", { timeout: 60_000 }, async (t) 
 
 test("I6 (b): sh returns { exitCode, stdout, stderr } value, non-zero does not throw", { timeout: 60_000 }, async (t) => {
 	const dir = tempDir();
-	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	t.after(() => removeDirWithRetry(dir));
 	const engine = new EngineManager();
 	t.after(async () => {
 		await engine.kill();
@@ -66,7 +67,7 @@ test("I6 (b): sh returns { exitCode, stdout, stderr } value, non-zero does not t
 
 test("I6 (c): sh is excluded from the snapshot vars (INTERNAL_BINDINGS skip)", { timeout: 60_000 }, async (t) => {
 	const dir = tempDir();
-	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	t.after(() => removeDirWithRetry(dir));
 	const engine = new EngineManager();
 	t.after(async () => {
 		await engine.kill();
@@ -82,7 +83,7 @@ test("I6 (c): sh is excluded from the snapshot vars (INTERNAL_BINDINGS skip)", {
 
 test("I6 (d): sh is still callable after a restore", { timeout: 60_000 }, async (t) => {
 	const dir = tempDir();
-	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	t.after(() => removeDirWithRetry(dir));
 	const engine = new EngineManager();
 	t.after(async () => {
 		await engine.kill();

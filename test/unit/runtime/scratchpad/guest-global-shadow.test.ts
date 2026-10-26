@@ -11,12 +11,13 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { EngineManager } from "../../../../src/runtime/scratchpad/engine.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function tempDir(): string {
 	return mkdtempSync(join(tmpdir(), "pi-crew-gshadow-"));
@@ -46,7 +47,7 @@ test("P1 (a): within-cell shadow works, but does NOT leak to the next cell", { t
 
 test("P1 (b): a serializable global shadow does NOT survive snapshot→restore", { timeout: 60_000 }, async (t) => {
 	const dir = tempDir();
-	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	t.after(() => removeDirWithRetry(dir));
 
 	const engine = new EngineManager();
 	t.after(async () => {
@@ -131,7 +132,7 @@ test("P1 (f): multiple protected globals shadowed in one cell all reset in the n
 
 test("P1 (g): the shadowed global IS in the snapshot but restore still yields the clean global", { timeout: 60_000 }, async (t) => {
 	const dir = tempDir();
-	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	t.after(() => removeDirWithRetry(dir));
 	const engine = new EngineManager();
 	t.after(async () => {
 		await engine.kill();
@@ -157,7 +158,7 @@ test("P1 (g): the shadowed global IS in the snapshot but restore still yields th
 
 test("P1 (h): a clean snapshot does not serialize protected globals (identity-skip)", { timeout: 60_000 }, async (t) => {
 	const dir = tempDir();
-	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	t.after(() => removeDirWithRetry(dir));
 	const engine = new EngineManager();
 	t.after(async () => {
 		await engine.kill();

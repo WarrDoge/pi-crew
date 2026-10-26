@@ -22,6 +22,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "coalesced-cancel",
@@ -94,6 +95,6 @@ test("RT-5 #1: already-aborted signal → tasks get 'cancelled' status (not 'fai
 			assert.equal(task.status, "cancelled", `task ${taskId} must be 'cancelled' (got '${task.status}')`);
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

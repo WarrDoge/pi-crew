@@ -28,6 +28,7 @@ import { withRunLock } from "../../../../src/state/coordination/locks.ts";
 import { createRunManifest, loadRunManifestById, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const LIFECYCLE_SRC = "src/extension/registration/lifecycle-handlers.ts";
 
@@ -96,7 +97,7 @@ test("M3-7: stampSchedulerRunProvenance persists schedulerJobId/schedulerName (a
 		// Unknown/pruned run → best-effort false, never a throw.
 		assert.equal(await stampSchedulerRunProvenance(cwd, "run-does-not-exist", { id: "j", name: "n" }), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -129,7 +130,7 @@ test("M3-7: stamp is written inside run.lock and never resurrects a terminal sta
 		assert.equal(after.status, "cancelled", "the stamp must NOT resurrect a terminal status to running");
 		assert.equal(after.schedulerJobId, "job-7", "provenance still stamped on the terminal manifest");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

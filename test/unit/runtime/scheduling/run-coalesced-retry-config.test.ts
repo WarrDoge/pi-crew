@@ -28,6 +28,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const SRC_PATH = "src/runtime/scheduling/run-coalesced-task-group.ts";
 
@@ -125,7 +126,7 @@ test("RT-5 #5 behavioral: autoRetry===false → dispatch completes (mock mode, s
 	} finally {
 		restoreEnv("PI_TEAMS_MOCK_CHILD_PI", prevMock);
 		restoreEnv("PI_CREW_ALLOW_MOCK", prevAllow);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -175,6 +176,6 @@ test("RT-5 #5 behavioral: autoRetry===false + aborted signal → cancelled (no r
 		// Should complete quickly — no retry backoff sleep (default 1000ms).
 		assert.ok(elapsed < 1000, `should complete without retry sleep (took ${elapsed}ms)`);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -13,7 +13,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import test from "node:test";
@@ -26,6 +26,7 @@ import {
 	SurfaceTaskIdError,
 	sweepLaunchScripts,
 } from "../../../../src/runtime/surface/launch-script.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 let baseDir: string;
 
@@ -40,8 +41,8 @@ test.before(() => {
 	baseDir = mkdtempSync(join(tmpdir(), "launch-script-test-"));
 });
 
-test.after(() => {
-	rmSync(baseDir, { recursive: true, force: true });
+test.after(async () => {
+	await removeDirWithRetry(baseDir);
 });
 
 /** Env chuẩn của một tier-1 surface worker (spec §5.2) — 5 biến surface + infra. */
@@ -142,7 +143,7 @@ test("shell-escapes hostile values (single quote, $, backtick) in env and cwd �
 	skip: POSIX_ONLY_SKIP,
 }, (t) => {
 	const workDir = mkdtempSync(join(tmpdir(), "launch-script-run-"));
-	t.after(() => rmSync(workDir, { recursive: true, force: true }));
+	t.after(() => removeDirWithRetry(workDir));
 	const evil = 'it\'s $(echo pwned) `echo pwned` "dq" $HOME';
 	const resultPath = join(workDir, "result.txt");
 	const scriptPath = buildLaunchScript({
@@ -189,7 +190,7 @@ test("F3: script deletes itself BEFORE running the command (bash keeps the fd op
 
 test("F3: script with early self-delete still runs correctly to completion", { skip: POSIX_ONLY_SKIP }, (t) => {
 	const workDir = mkdtempSync(join(tmpdir(), "launch-script-earlyrm-"));
-	t.after(() => rmSync(workDir, { recursive: true, force: true }));
+	t.after(() => removeDirWithRetry(workDir));
 	const resultPath = join(workDir, "result.txt");
 	const scriptPath = buildLaunchScript({
 		taskId: "earlyrm-run",
@@ -217,7 +218,7 @@ test("registers built script in the module-level TTL registry", () => {
 	assert.equal(typeof launchScriptRegistry.get(scriptPath), "number", "createdAt phải là epoch ms");
 });
 
-test("sweepLaunchScripts deletes entries older than TTL from disk and registry, keeps fresh ones", () => {
+test("sweepLaunchScripts deletes entries older than TTL from disk and registry, keeps fresh ones", async () => {
 	const sweepBase = mkdtempSync(join(tmpdir(), "launch-script-sweep-"));
 	try {
 		const oldPath = join(sweepBase, "pi-crew-launch-old-1.sh");
@@ -242,7 +243,7 @@ test("sweepLaunchScripts deletes entries older than TTL from disk and registry, 
 		assert.ok(registry.has(edgePath));
 		assert.ok(registry.has(freshPath));
 	} finally {
-		rmSync(sweepBase, { recursive: true, force: true });
+		await removeDirWithRetry(sweepBase);
 	}
 });
 
@@ -271,7 +272,7 @@ test("throws LaunchScriptTaskIdError for taskId containing /, \\0, .. or empty",
 	assert.ok(!existsSync(join(baseDir, `pi-crew-launch-..-${process.pid}.sh`)));
 });
 
-test("taskId guard runs BEFORE the env is serialized (no traversal file escapes baseDir)", () => {
+test("taskId guard runs BEFORE the env is serialized (no traversal file escapes baseDir)", async () => {
 	const escapeBase = mkdtempSync(join(tmpdir(), "launch-script-traversal-"));
 	try {
 		assert.throws(
@@ -288,7 +289,7 @@ test("taskId guard runs BEFORE the env is serialized (no traversal file escapes 
 		// Parent dir của baseDir không được sinh file mới nào.
 		assert.deepEqual(readdirSync(escapeBase), [], "baseDir phải vẫn rỗng");
 	} finally {
-		rmSync(escapeBase, { recursive: true, force: true });
+		await removeDirWithRetry(escapeBase);
 	}
 });
 

@@ -41,6 +41,7 @@ import { withRunLock } from "../../../../src/state/coordination/locks.ts";
 import { createRunManifest, loadRunManifestById, saveRunTasksAsync } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "coalesced-lock-guard",
@@ -152,7 +153,7 @@ test("R23-F1 ordering 1: heartbeat save is queued behind run.lock and never clob
 		assert.equal(peerTask.status, "completed", "peer terminal state must NOT be reverted by the heartbeat save");
 		assert.equal(peerTask.heartbeat, undefined, "heartbeat save stays group-scoped");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -201,6 +202,6 @@ test("R23-F1 ordering 2: terminal repair is queued behind run.lock, re-reads ins
 		assert.equal(peerTask.status, "cancelled", "peer terminal state that landed during the hold is preserved");
 		assert.ok(peerTask.finishedAt, "peer finishedAt preserved");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

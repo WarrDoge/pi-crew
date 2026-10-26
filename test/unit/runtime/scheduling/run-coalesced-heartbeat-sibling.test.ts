@@ -28,6 +28,7 @@ import {
 import { createRunManifest, loadRunManifestById, saveRunTasksAsync } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "coalesced-sibling",
@@ -96,7 +97,7 @@ test("R15-3: heartbeat save does NOT resurrect a sibling cancelled on disk; grou
 		assert.equal(groupTask.heartbeat!.alive, true, "group task heartbeat must be alive: true");
 		assert.ok(groupTask.heartbeat!.lastSeenAt, "group task heartbeat should have lastSeenAt");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -132,7 +133,7 @@ test("R15-3: FIND-06 repair write re-applies group terminal state without resurr
 		// …and the sibling cancelled on disk is NOT resurrected by the repair.
 		assert.equal(sibling.status, "cancelled", "repair write must not resurrect a sibling cancelled on disk");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -157,6 +158,6 @@ test("R15-3: repair write never flips a disk-terminal group task (belt-and-suspe
 		const groupTask = after.tasks.find((t) => t.id === GROUP_ID)!;
 		assert.equal(groupTask.status, "cancelled", "disk-terminal group task must not be flipped by the repair write");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

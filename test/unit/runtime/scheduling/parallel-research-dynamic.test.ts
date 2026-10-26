@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("parallel-research dynamically fans out Source/pi-* projects into shard tasks", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-dynamic-fanout-"));
@@ -41,7 +42,7 @@ test("parallel-research dynamically fans out Source/pi-* projects into shard tas
 		// causing transient ENOTEMPTY/EBUSY on busy CI runners.
 		for (let attempt = 0; attempt < 5; attempt++) {
 			try {
-				fs.rmSync(cwd, { recursive: true, force: true });
+				await removeDirWithRetry(cwd);
 				break;
 			} catch (err) {
 				if (attempt === 4 || !/ENOTEMPTY|EBUSY|EPERM/.test(String((err as NodeJS.ErrnoException).code ?? ""))) {
@@ -49,7 +50,7 @@ test("parallel-research dynamically fans out Source/pi-* projects into shard tas
 					break;
 				}
 				// brief backoff then retry
-				fs.rmSync(cwd, { recursive: true, force: true });
+				await removeDirWithRetry(cwd);
 			}
 		}
 	}

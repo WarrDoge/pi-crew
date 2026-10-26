@@ -53,6 +53,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState, WorkerExitStatus } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const DR02_MESSAGE = "Model settled without a final answer (coalesced: empty final assistant message; upstream rate-limit/429 exhaustion)";
 
@@ -191,7 +192,7 @@ test("DR-02 WI-1: 429-empty-settle worker fails the whole group — no task comp
 	} finally {
 		__test_resetCap(prevCap);
 		restoreEnv(envSnap);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -247,7 +248,7 @@ test("DR-02 WI-1: retry exhaustion → US-003 group deadletter + all tasks faile
 	} finally {
 		__test_resetCap(prevCap);
 		restoreEnv(envSnap);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -289,7 +290,7 @@ test("DR-02 WI-1 healthy control: json-success → group completes with partitio
 	} finally {
 		__test_resetCap(prevCap);
 		restoreEnv(envSnap);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

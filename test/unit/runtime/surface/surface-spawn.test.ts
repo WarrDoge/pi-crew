@@ -11,7 +11,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -22,6 +22,7 @@ import type { SurfaceExitReason, SurfaceHandle, SurfaceProvider } from "../../..
 import { MAX_PANES_PER_TAB, splitDirectionFor } from "../../../../src/runtime/surface/surface-provider.ts";
 import { prepareSurfaceSpawn } from "../../../../src/runtime/surface/surface-spawn.ts";
 import { createTmuxProvider } from "../../../../src/runtime/surface/tmux-provider.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const CWD = "/tmp/project";
 
@@ -198,7 +199,7 @@ test("P0-1: TUI spawn argv luôn pin --tui-mode regular; argv headless không đ
 		assert.deepEqual(headlessArgv, ["--mode", "json", "-p", "--model", "glm-4.7:medium", "Task: hi"]);
 		assert.ok(!headlessArgv.includes("--tui-mode"));
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 		launchScriptRegistry.clear();
 	}
 });
@@ -229,7 +230,7 @@ test("P0-1: caller đã set --tui-mode → giữ nguyên mode caller, không nh�
 		assert.equal(outcome.mode, "surface", JSON.stringify(outcome));
 		assert.deepEqual(seenArgs, [["--tui-mode", "fullscreen", "Task: hi"]]);
 	} finally {
-		rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 		launchScriptRegistry.clear();
 	}
 });

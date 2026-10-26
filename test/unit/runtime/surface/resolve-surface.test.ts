@@ -7,7 +7,7 @@
  */
 
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import * as net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +16,7 @@ import test from "node:test";
 import type { PiTeamsConfig } from "../../../../src/config/types.ts";
 import { MAX_SURFACE_WORKERS, resolveSurface, resolveSurfaceDetailed } from "../../../../src/runtime/surface/resolve-surface.ts";
 import type { SurfaceHandle, SurfaceProvider } from "../../../../src/runtime/surface/surface-provider.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * Mux-cell cases are POSIX-only: `hasBinary()` probes via
@@ -33,8 +34,8 @@ test.before(() => {
 	binDir = mkdtempSync(join(tmpdir(), "resolve-surface-test-"));
 });
 
-test.after(() => {
-	rmSync(binDir, { recursive: true, force: true });
+test.after(async () => {
+	await removeDirWithRetry(binDir);
 });
 
 /** Fake executable that `command -v` resolves (exit 0). */

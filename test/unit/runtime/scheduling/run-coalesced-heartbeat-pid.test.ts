@@ -41,6 +41,7 @@ import { createRunManifest, loadRunManifestById, saveRunTasksAsync } from "../..
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const SRC_PATH = "src/runtime/scheduling/run-coalesced-task-group.ts";
 
@@ -164,7 +165,7 @@ test("NEW-3 seam: heartbeat CREATE fallback stamps the worker pid (task had no h
 		assert.equal(task.heartbeat!.pid, WORKER_PID, "created heartbeat must carry the worker pid");
 		assert.equal(task.heartbeat!.alive, true, "heartbeat must be alive: true");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -186,7 +187,7 @@ test("NEW-3 seam: heartbeat TOUCH stamps the worker pid onto a pid-less existing
 		assert.equal(task.heartbeat!.pid, WORKER_PID, "existing pid-less heartbeat must receive the worker pid");
 		assert.equal(task.heartbeat!.alive, true, "heartbeat must stay alive: true");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -207,7 +208,7 @@ test("NEW-3 seam: pid-less tick NEVER clobbers an already-recorded pid (undefine
 		const task = after.tasks.find((t) => t.id === GROUP_ID)!;
 		assert.equal(task.heartbeat?.pid, 4242, "existing pid must survive a pid-less tick");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -228,7 +229,7 @@ test("NEW-3 seam: sibling task is never touched by the pid-stamping heartbeat sa
 		const group = after.tasks.find((t) => t.id === GROUP_ID)!;
 		assert.equal(group.heartbeat?.pid, 4242, "group task must carry the pid");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -346,7 +347,7 @@ test("NEW-3 behavioral: REAL worker pid lands in the persisted task heartbeat wh
 	} finally {
 		__test_resetCap(prevCap);
 		restoreEnv(envSnap);
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(scriptDir, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(scriptDir);
 	}
 });
