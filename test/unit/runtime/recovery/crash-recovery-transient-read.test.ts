@@ -33,6 +33,7 @@ import { registerActiveRun } from "../../../../src/state/stores/active-run-regis
 import { createRunManifest, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "transient",
@@ -58,7 +59,7 @@ async function withIsolatedHomeAsync<T>(fn: () => Promise<T>): Promise<T> {
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
@@ -128,7 +129,7 @@ test("ST-6: EBUSY on readFileSync → manifest NOT quarantined (skipped, retried
 				mock.restore();
 			}
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
@@ -168,7 +169,7 @@ test("ST-6: EACCES on readFileSync → manifest NOT quarantined (skipped, retrie
 				mock.restore();
 			}
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
@@ -207,13 +208,13 @@ test("ST-6: SyntaxError (corrupt JSON) → manifest IS quarantined", async () =>
 
 			assert.ok(result.purged.includes(created.manifest.runId), "ST-6: genuinely corrupt manifest should be purged (quarantined)");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
 
 // ─── Test 4: readManifestWithTransientRetry retries EBUSY then succeeds ───
-test("ST-6: readManifestWithTransientRetry retries EBUSY and succeeds when transient clears", () => {
+test("ST-6: readManifestWithTransientRetry retries EBUSY and succeeds when transient clears", async () => {
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-st6-retry-"));
 	const tmpFile = path.join(tmpDir, "manifest.json");
 	try {
@@ -228,12 +229,12 @@ test("ST-6: readManifestWithTransientRetry retries EBUSY and succeeds when trans
 			mock.restore();
 		}
 	} finally {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		await removeDirWithRetry(tmpDir);
 	}
 });
 
 // ─── Test 5: readManifestWithTransientRetry throws SyntaxError immediately ───
-test("ST-6: readManifestWithTransientRetry throws SyntaxError immediately (no retry)", () => {
+test("ST-6: readManifestWithTransientRetry throws SyntaxError immediately (no retry)", async () => {
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-st6-syntax-direct-"));
 	const tmpFile = path.join(tmpDir, "manifest.json");
 	try {
@@ -256,12 +257,12 @@ test("ST-6: readManifestWithTransientRetry throws SyntaxError immediately (no re
 			_setReadManifestFileSyncForTest(null);
 		}
 	} finally {
-		fs.rmSync(tmpDir, { recursive: true, force: true });
+		await removeDirWithRetry(tmpDir);
 	}
 });
 
 // ─── Test 6: sweepStaleCorruptFiles deletes old files, preserves recent ───
-test("ST-6: sweepStaleCorruptFiles deletes old .corrupt-* files, preserves recent", () => {
+test("ST-6: sweepStaleCorruptFiles deletes old .corrupt-* files, preserves recent", async () => {
 	const runsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-st6-sweep-"));
 	try {
 		const runDir = path.join(runsDir, "test-run-001");
@@ -291,12 +292,12 @@ test("ST-6: sweepStaleCorruptFiles deletes old .corrupt-* files, preserves recen
 		assert.ok(fs.existsSync(recentFile), "recent .corrupt-* file should be preserved");
 		assert.ok(fs.existsSync(regularFile), "regular manifest.json should NOT be touched");
 	} finally {
-		fs.rmSync(runsDir, { recursive: true, force: true });
+		await removeDirWithRetry(runsDir);
 	}
 });
 
 // ─── Test 7: sweepStaleCorruptFiles respects custom threshold ───
-test("ST-6: sweepStaleCorruptFiles respects custom maxAgeMs", () => {
+test("ST-6: sweepStaleCorruptFiles respects custom maxAgeMs", async () => {
 	const runsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-st6-sweep-custom-"));
 	try {
 		const runDir = path.join(runsDir, "test-run-002");
@@ -320,7 +321,7 @@ test("ST-6: sweepStaleCorruptFiles respects custom maxAgeMs", () => {
 		assert.equal(deleted2, 0, "file younger than 3h threshold should survive");
 		assert.ok(fs.existsSync(file), "moderately old file should survive with long threshold");
 	} finally {
-		fs.rmSync(runsDir, { recursive: true, force: true });
+		await removeDirWithRetry(runsDir);
 	}
 });
 

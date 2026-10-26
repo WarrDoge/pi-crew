@@ -24,6 +24,7 @@ import type { ManifestCache } from "../../../../src/runtime/manifest-cache.ts";
 import { cancelOrphanedRuns, detectInterruptedRuns } from "../../../../src/runtime/recovery/crash-recovery.ts";
 import { createRunManifest, loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * LEAK GUARD (2026-09-23, found by the live real-test battery): these tmp cwds
@@ -95,7 +96,7 @@ function fakeCache(manifests: TeamRunManifest[]): ManifestCache {
 	return { list: () => manifests } as unknown as ManifestCache;
 }
 
-test("orphan-cancel: run parked on a LIVE ask answer (within TTL) is SKIPPED even with a dead owner and no heartbeat", () => {
+test("orphan-cancel: run parked on a LIVE ask answer (within TTL) is SKIPPED even with a dead owner and no heartbeat", async () => {
 	const cwd = mkProjectDir("pi-crew-orphan-wait-");
 	try {
 		const manifest = scaffoldParkedRun(cwd, new Date()); // asked just now
@@ -105,11 +106,11 @@ test("orphan-cancel: run parked on a LIVE ask answer (within TTL) is SKIPPED eve
 		const after = loadRunManifestById(cwd, manifest.runId)!;
 		assert.equal(after.manifest.status, "running", "run survives the third session's scan");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("orphan-cancel: parked run BEYOND the waiting TTL is cancelled AND waitState is cleared (leak fix)", () => {
+test("orphan-cancel: parked run BEYOND the waiting TTL is cancelled AND waitState is cleared (leak fix)", async () => {
 	const cwd = mkProjectDir("pi-crew-orphan-ttl-");
 	try {
 		// 25h ago — beyond WAITING_TTL_MS (24h) and beyond the heartbeat threshold.
@@ -120,7 +121,7 @@ test("orphan-cancel: parked run BEYOND the waiting TTL is cancelled AND waitStat
 		assert.equal(after.manifest.status, "cancelled");
 		assert.equal(after.manifest.waitState, undefined, "cancel must clear the waitState pointer (24h-TTL leak)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -132,7 +133,7 @@ test("orphan-cancel: parked run BEYOND the waiting TTL is cancelled AND waitStat
  * first worker heartbeat has not been written yet, was orphan-cancelled the
  * instant the user looked at it.
  */
-test("orphan-cancel: a young foreground run (fresh manifest, no heartbeat yet) is SKIPPED", () => {
+test("orphan-cancel: a young foreground run (fresh manifest, no heartbeat yet) is SKIPPED", async () => {
 	const cwd = mkProjectDir("pi-crew-orphan-young-");
 	try {
 		const created = createRunManifest({
@@ -164,11 +165,11 @@ test("orphan-cancel: a young foreground run (fresh manifest, no heartbeat yet) i
 		const after = loadRunManifestById(cwd, manifest.runId)!;
 		assert.equal(after.manifest.status, "running", "run survives the view session's scan");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("orphan-cancel: a foreground run QUIET beyond the threshold is still cancelled", () => {
+test("orphan-cancel: a foreground run QUIET beyond the threshold is still cancelled", async () => {
 	const cwd = mkProjectDir("pi-crew-orphan-quiet-");
 	try {
 		const created = createRunManifest({
@@ -193,17 +194,17 @@ test("orphan-cancel: a foreground run QUIET beyond the threshold is still cancel
 		const res = cancelOrphanedRuns(cwd, fakeCache([manifest]), "session-VIEW", 300_000);
 		assert.deepEqual(res.cancelled, [manifest.runId], "quiet foreground run IS orphan-cancelled");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("detectInterruptedRuns: run parked on a live ask answer is NOT offered for auto-resume", () => {
+test("detectInterruptedRuns: run parked on a live ask answer is NOT offered for auto-resume", async () => {
 	const cwd = mkProjectDir("pi-crew-orphan-detect-");
 	try {
 		const manifest = scaffoldParkedRun(cwd, new Date());
 		const plans = detectInterruptedRuns(cwd, fakeCache([manifest]), 300_000, "session-THIRD");
 		assert.equal(plans.length, 0, "parked-on-ask run must not appear in recovery plans");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

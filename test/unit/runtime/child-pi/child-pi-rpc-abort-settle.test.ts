@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import type { AgentConfig } from "../../../../src/agents/agent-config.ts";
 import { runChildPi } from "../../../../src/runtime/child-pi/child-pi.ts";
 import { clearRpcPool } from "../../../../src/runtime/child-pi/child-pi-rpc.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const FIXTURES_DIR = fileURLToPath(new URL("../../../fixtures", import.meta.url));
 const RPC_FIXTURE_SRC = path.join(FIXTURES_DIR, "fake-pi-rpc.mjs");
@@ -49,7 +50,7 @@ interface Harness {
 	binDir: string;
 	/** Toggle the staged fixture: true = every normal settle carries aborted:true (1.1.0 host shape); false = original. */
 	setAbortedSettle: (on: boolean) => void;
-	cleanup: () => void;
+	cleanup: () => Promise<void>;
 }
 
 async function makeHarness(): Promise<Harness> {
@@ -83,7 +84,7 @@ async function makeHarness(): Promise<Harness> {
 			fs.writeFileSync(stagedPath, on ? abortedBody : originalBody, "utf-8");
 			process.env.PI_TEAMS_PI_BIN = stagedPath;
 		},
-		cleanup: () => {
+		cleanup: async () => {
 			for (const key of MUTATED_ENV_KEYS) {
 				if (saved[key] === undefined) delete process.env[key];
 				else process.env[key] = saved[key];
@@ -92,7 +93,7 @@ async function makeHarness(): Promise<Harness> {
 			// window (EBUSY, live-caught CI 2026-10-12) — the test body passed; a
 			// locked temp dir must not fail the run. %TEMP% is ephemeral on CI.
 			try {
-				fs.rmSync(workRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+				await removeDirWithRetry(workRoot);
 			} catch (err) {
 				const code = (err as NodeJS.ErrnoException).code;
 				if (code !== "EBUSY" && code !== "EPERM" && code !== "ENOTEMPTY" && code !== "EACCES") throw err;
@@ -144,7 +145,7 @@ test("pre-1.1.0 shape: agent_settled WITHOUT the aborted field settles healthy (
 		assert.equal(result.exitCode, 0, `result=${JSON.stringify({ exitCode: result.exitCode, error: result.error })}`);
 		assert.notEqual(result.aborted, true, "a settle without the field must NEVER be marked cancelled");
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -182,7 +183,7 @@ test("1.1.0 shape: aborted:true marks the run cancelled (pool OFF default) and d
 		assert.ok(pid, "onSpawn must have fired");
 		assert.ok(await waitForPidGone(pid!), `rpc child pid ${pid} must not survive the aborted settle`);
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -221,6 +222,6 @@ test("1.1.0 shape: a cancelled worker NEVER re-enters the rpc pool as healthy (n
 		assert.notEqual(pids[0], pids[1], `a cancelled worker must NOT be reused (pids ${pids.join(",")})`);
 	} finally {
 		clearRpcPool(); // stops any live process — nothing may leak past the test
-		h.cleanup();
+		await h.cleanup();
 	}
 });

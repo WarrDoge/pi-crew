@@ -7,6 +7,7 @@ import { clearHooksScoped, registerHook } from "../../../../src/hooks/registry.t
 import { applyRecoveryPlan, declineRecoveryPlan } from "../../../../src/runtime/recovery/crash-recovery.ts";
 import { readEvents } from "../../../../src/state/event-log/event-log.ts";
 import { createRunManifest, loadRunManifestById, saveRunTasks, updateRunStatus } from "../../../../src/state/stores/state-store.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function createRecoveryRun(ownerSessionId = "session-a"): {
 	cwd: string;
@@ -77,7 +78,7 @@ describe("run_recovery hook", () => {
 			const events = readEvents(run.manifest.eventsPath);
 			assert.ok(events.some((e) => e.type === "crew.run.resumed"));
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await cleanupStateRoot(run.cwd, run.manifest.eventsPath);
 		}
 	});
 
@@ -118,7 +119,7 @@ describe("run_recovery hook", () => {
 			const events = readEvents(run.manifest.eventsPath);
 			assert.ok(events.some((e) => e.type === "crew.run.recovery_blocked"));
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await cleanupStateRoot(run.cwd, run.manifest.eventsPath);
 		}
 	});
 
@@ -154,7 +155,7 @@ describe("run_recovery hook", () => {
 			const events = readEvents(run.manifest.eventsPath);
 			assert.ok(events.some((e) => e.type === "hook.executed" && e.data?.hookName === "run_recovery"));
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await cleanupStateRoot(run.cwd, run.manifest.eventsPath);
 		}
 	});
 
@@ -225,13 +226,13 @@ describe("run_recovery hook", () => {
 			assert.ok(events.some((e) => e.type === "crew.run.recovery_skipped"));
 			assert.ok(!events.some((e) => e.type === "crew.run.resumed"));
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await cleanupStateRoot(run.cwd, run.manifest.eventsPath);
 		}
 	});
 });
 
 describe("declineRecoveryPlan", () => {
-	it("marks run as cancelled when declined", () => {
+	it("marks run as cancelled when declined", async () => {
 		const run = createRecoveryRun();
 		try {
 			saveRunTasks(run.manifest, [
@@ -260,7 +261,7 @@ describe("declineRecoveryPlan", () => {
 			const events = readEvents(run.manifest.eventsPath);
 			assert.ok(events.some((e) => e.type === "crew.run.recovery_declined"));
 		} finally {
-			fs.rmSync(run.cwd, { recursive: true, force: true });
+			await cleanupStateRoot(run.cwd, run.manifest.eventsPath);
 		}
 	});
 });

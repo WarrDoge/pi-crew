@@ -35,6 +35,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import * as dwfCtx from "../../../../src/runtime/goal-workflow/dynamic-workflow-context.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 // Red-first-safe accessors: on the unfixed HEAD these bindings are undefined,
 // so tests assert their existence FIRST (clean failure) instead of crashing on
@@ -91,7 +92,7 @@ test("G13 WI-3 preconditions: DwfAgentCallCapError + DEFAULT_MAX_AGENT_CALLS + g
 	assert.ok(typeof getWorkflowLimits === "function", "getWorkflowLimits must be exported (missing on unfixed HEAD)");
 });
 
-test("G13 cap: default applies when maxAgentCalls unset — a no-budget run is still bounded", () => {
+test("G13 cap: default applies when maxAgentCalls unset — a no-budget run is still bounded", async () => {
 	const cwd = tmpCwd("pi-crew-dwf-cap-default-");
 	try {
 		const manifest = fakeManifest(cwd);
@@ -108,7 +109,7 @@ test("G13 cap: default applies when maxAgentCalls unset — a no-budget run is s
 		});
 		assert.equal(getWorkflowLimits?.(ctxOverride)?.maxAgentCalls, 5, "explicit override wins over the default");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -143,7 +144,7 @@ test("G13 cap: ctx.agent() beyond maxAgentCalls throws DwfAgentCallCapError and 
 			assert.match(events, /agent-call cap reached/, "cap trip must be observable in events.jsonl");
 		});
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -171,7 +172,7 @@ test("G13 cap: cached replays count toward the cap (a resume/spin loop cannot by
 			});
 		});
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -287,6 +288,6 @@ test("G13 runner: runaway no-budget script terminates with the structured cap re
 		assert.match(events, /agent-call cap reached/, "dwf.failed must carry the structured cap reason");
 		assert.equal(fs.existsSync(artifactPath), false, "script must NOT reach ctx.setResult after the cap trip");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd, eventsPath);
 	}
 });

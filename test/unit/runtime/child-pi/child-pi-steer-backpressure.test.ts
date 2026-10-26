@@ -25,6 +25,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import type { AgentConfig } from "../../../../src/agents/agent-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 const childPiSource = fs.readFileSync(path.join(repoRoot, "src/runtime/child-pi/child-pi.ts"), "utf-8");
@@ -143,7 +144,7 @@ test("HB-003a real-binary smoke: maxTurns:1 + disableTools returns exit 0 (5x)",
 			if (ok) pass++;
 			else fail.push(`run ${i}: exit=${r.exitCode} hasAnswer=${(r.stdout ?? "").includes(`SMOKE-${i}`)}`);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	}
 	assert.equal(pass, 5, `Expected 5/5 pass; failures: ${fail.join("; ") || "(none)"}`);

@@ -35,6 +35,7 @@ import { registerActiveRun } from "../../../../src/state/stores/active-run-regis
 import { createRunManifest, loadRunManifestById, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "ari",
@@ -60,7 +61,7 @@ async function withIsolatedHomeAsync<T>(fn: () => Promise<T>): Promise<T> {
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
@@ -148,7 +149,7 @@ test("purgeStaleActiveRunIndex keeps a run whose on-disk manifest is fresh (regr
 			assert.ok(fs.existsSync(run.stateRoot), "REGRESSION: stateRoot must NOT be deleted for a fresh run");
 			assert.ok(fs.existsSync(run.manifestPath), "manifest.json must survive");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
@@ -173,7 +174,7 @@ test("purgeStaleActiveRunIndex cancels a genuinely-orphaned run but preserves it
 			const reloaded = loadRunManifestById(cwd, run.runId);
 			assert.equal(reloaded?.manifest.status, "cancelled", "orphaned run is marked cancelled (queryable), not destroyed");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
@@ -205,7 +206,7 @@ test("purgeStaleActiveRunIndex keeps a run with a fresh team heartbeat even if t
 			assert.ok(!result.purged.includes(run.runId), "a run with a fresh heartbeat must NOT be purged");
 			assert.ok(fs.existsSync(run.stateRoot), "stateRoot must be preserved");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

@@ -31,6 +31,7 @@ import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir, removeTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ─── Shared fixtures (mirrored from characterization test) ─────────────────
 
@@ -61,7 +62,7 @@ async function withIsolatedHomeAsync<T>(fn: () => Promise<T>): Promise<T> {
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
@@ -369,7 +370,7 @@ test("purgeStaleActiveRunIndex: self-own dead+stale run is SKIPPED when currentS
 			assert.ok(!result.purged.includes(running.runId), "self-own dead+stale run must NOT be purged");
 			assert.ok(result.kept.includes(running.runId), "self-own dead+stale run must be kept");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
@@ -401,7 +402,7 @@ test("purgeStaleActiveRunIndex: cross-session dead+stale run IS purged when curr
 			const reloaded = loadRunManifestById(cwd, running.runId);
 			assert.equal(reloaded?.manifest.status, "cancelled", "dead session's run must be cancelled");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
@@ -431,7 +432,7 @@ test("purgeStaleActiveRunIndex: back-compat (no currentSessionId) → dead+stale
 			assert.ok(result.purged.includes(running.runId), "back-compat: dead+stale run must be purged");
 			assert.ok(fs.existsSync(running.stateRoot), "stateRoot must be preserved");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
@@ -464,7 +465,7 @@ test("purgeStaleActiveRunIndex: cross-session alive run (fresh manifest) is NOT 
 			assert.ok(!result.purged.includes(running.runId), "alive run with fresh manifest must NOT be purged");
 			assert.ok(result.kept.includes(running.runId), "fresh run must be kept");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

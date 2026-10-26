@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { FileCheckpointStore } from "../../../../src/runtime/recovery/checkpoint.ts";
 import { DEFAULT_RETRY_POLICY, executeWithRetry } from "../../../../src/runtime/recovery/retry-executor.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Quick Win 19 (Pattern 19 — test-as-spec contract suite): pin the retry-resume
 // path behavior as a spec. These are the gaps NOT covered by the existing
@@ -98,8 +99,8 @@ describe("QW19 FileCheckpointStore contract", () => {
 	let root: string;
 	let store: FileCheckpointStore;
 	const roots: string[] = [];
-	afterEach(() => {
-		for (const r of roots.splice(0)) fs.rmSync(r, { recursive: true, force: true });
+	afterEach(async () => {
+		for (const r of roots.splice(0)) await removeDirWithRetry(r);
 	});
 	function setup() {
 		root = fs.mkdtempSync(path.join(os.tmpdir(), "qw19-cp-"));

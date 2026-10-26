@@ -7,7 +7,7 @@
 // same pattern as pi-args-trust-pin.test.ts D1). Hermetic (default) spawns
 // must NOT run the probe at all — default-path unit tests stay spawn-free.
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -25,6 +25,7 @@ import type {
 	SurfaceProvider,
 	SurfaceSpawnOpts,
 } from "../../../../src/runtime/surface/surface-provider.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function agent(fields: Partial<AgentConfig> = {}): AgentConfig {
 	return {
@@ -149,8 +150,8 @@ test("U9 wiring: parity spawn probes pi --version once and threads --no-mcp onto
 		assert.ok(__test_peekPiVersionMemo(), "parity spawn consumed the memoized probe");
 	} finally {
 		__test_resetPiVersionMemo();
-		rmSync(workRoot, { recursive: true, force: true });
-		rmSync(launchDir, { recursive: true, force: true });
+		await cleanupStateRoot(workRoot, eventsPath);
+		await cleanupStateRoot(launchDir, eventsPath);
 	}
 });
 
@@ -183,7 +184,7 @@ test("U9 wiring: hermetic (default) spawn never probes — argv stays MCP-clean 
 		assert.equal(__test_peekPiVersionMemo(), null, "hermetic spawn must never TOUCH the probe (memo still empty)");
 	} finally {
 		__test_resetPiVersionMemo();
-		rmSync(workRoot, { recursive: true, force: true });
-		rmSync(launchDir, { recursive: true, force: true });
+		await cleanupStateRoot(workRoot, eventsPath);
+		await cleanupStateRoot(launchDir, eventsPath);
 	}
 });

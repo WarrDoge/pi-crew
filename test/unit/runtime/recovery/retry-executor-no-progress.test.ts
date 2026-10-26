@@ -37,6 +37,7 @@ import { createRunManifest, saveRunTasks } from "../../../../src/state/stores/st
 import type { TaskAttemptState, TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const fastPolicy = { maxAttempts: 3, backoffMs: 1, jitterRatio: 0, exponentialFactor: 1 };
 
@@ -292,14 +293,14 @@ const workflow: WorkflowConfig = {
 	steps: [{ id: "work", role: "worker", task: "Work" }],
 };
 
-function makeTempProject(): { cwd: string; cleanup(): void } {
+function makeTempProject(): { cwd: string; cleanup(): Promise<void> } {
 	const cwd = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "pi-crew-u9adj-"));
 	fs.mkdirSync(path.join(cwd, ".git")); // project marker → state stays under <tmp>/.crew/
 	fs.mkdirSync(path.join(cwd, ".crew"));
-	return { cwd, cleanup: () => fs.rmSync(cwd, { recursive: true, force: true }) };
+	return { cwd, cleanup: () => cleanupStateRoot(cwd) };
 }
 
-test("TaskAttemptState owner/intent: legacy state without fields loads; state with fields round-trips through the real store", () => {
+test("TaskAttemptState owner/intent: legacy state without fields loads; state with fields round-trips through the real store", async () => {
 	const { cwd, cleanup } = makeTempProject();
 	try {
 		const { manifest, tasks } = createRunManifest({ cwd, team, workflow, goal: "U9-ADJ round-trip" });
@@ -331,11 +332,11 @@ test("TaskAttemptState owner/intent: legacy state without fields loads; state wi
 		assert.equal(loadedAttempts[1]?.owner, "session-u9adj");
 		assert.equal(loadedAttempts[1]?.intent, "auto-retry");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("TaskAttemptState back-compat: a pre-U9-ADJ tasks.json payload (no owner/intent anywhere) parses without rejection", () => {
+test("TaskAttemptState back-compat: a pre-U9-ADJ tasks.json payload (no owner/intent anywhere) parses without rejection", async () => {
 	const { cwd, cleanup } = makeTempProject();
 	try {
 		const { manifest, tasks } = createRunManifest({ cwd, team, workflow, goal: "U9-ADJ legacy load" });
@@ -353,6 +354,6 @@ test("TaskAttemptState back-compat: a pre-U9-ADJ tasks.json payload (no owner/in
 		const loaded = loadTasksWithRecovery(manifest.tasksPath, manifest.eventsPath, manifest.runId);
 		assert.deepEqual(loaded[0]?.attempts, [{ attemptId: "retry_attempt_1", startedAt: "2026-10-12T00:00:00.000Z", error: "boom" }]);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });

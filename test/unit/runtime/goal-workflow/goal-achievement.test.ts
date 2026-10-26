@@ -13,6 +13,7 @@ import {
 } from "../../../../src/runtime/goal-workflow/goal-achievement.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 /** Make a tmpdir that is a REAL git repo (git init) so `git status` works. */
 function gitRepoTmp(prefix: string): string {
@@ -93,7 +94,7 @@ test("workflowIsMutating: executor/test-engineer → true; reviewer/writer-only 
 	assert.equal(workflowIsMutating(readOnlyWorkflow), false);
 });
 
-test("#2 read-only workflow is NEVER accused — returns unknown (conservative)", () => {
+test("#2 read-only workflow is NEVER accused — returns unknown (conservative)", async () => {
 	const cwd = gitRepoTmp("ga-readonly-");
 	try {
 		// clean git tree, read-only workflow → must NOT be flagged false-green
@@ -101,11 +102,11 @@ test("#2 read-only workflow is NEVER accused — returns unknown (conservative)"
 		assert.equal(a.achieved, "unknown");
 		assert.match(a.reason, /read-only/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("#2 mutating workflow + CLEAN tree + NO failed task → false-green FLAGGED but NOT downgraded", () => {
+test("#2 mutating workflow + CLEAN tree + NO failed task → false-green FLAGGED but NOT downgraded", async () => {
 	const cwd = gitRepoTmp("ga-cleanflag-");
 	try {
 		// executor completed but left zero diff → false-green signature
@@ -119,11 +120,11 @@ test("#2 mutating workflow + CLEAN tree + NO failed task → false-green FLAGGED
 		assert.equal(applied.manifest.status, "completed"); // NOT broken
 		assert.match(applied.manifest.goalAchievementNote ?? "", /FALSE-GREEN/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("#2 mutating + CLEAN tree + FAILED task → false-green AND status downgraded completed→failed", () => {
+test("#2 mutating + CLEAN tree + FAILED task → false-green AND status downgraded completed→failed", async () => {
 	const cwd = gitRepoTmp("ga-downgrade-");
 	try {
 		const a = assessGoalAchievement(manifest(cwd), [task("exec", "executor", "failed")], mutatingWorkflow);
@@ -137,11 +138,11 @@ test("#2 mutating + CLEAN tree + FAILED task → false-green AND status downgrad
 		assert.equal(applied.manifest.status, "failed"); // the lie is corrected
 		assert.equal(applied.manifest.goalAchieved, false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("#2 mutating + DIRTY tree (edits made) → achieved true (genuine success)", () => {
+test("#2 mutating + DIRTY tree (edits made) → achieved true (genuine success)", async () => {
 	const cwd = gitRepoTmp("ga-dirty-");
 	try {
 		// create a source file → working tree dirty
@@ -153,22 +154,22 @@ test("#2 mutating + DIRTY tree (edits made) → achieved true (genuine success)"
 		assert.equal(applied.downgraded, false);
 		assert.equal(applied.manifest.status, "completed");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("#2 non-git cwd → unknown (no git repo to inspect)", () => {
+test("#2 non-git cwd → unknown (no git repo to inspect)", async () => {
 	const cwd = plainTmp("ga-nogit-");
 	try {
 		const a = assessGoalAchievement(manifest(cwd), [task("exec", "executor", "completed")], mutatingWorkflow);
 		assert.equal(a.achieved, "unknown");
 		assert.match(a.reason, /not a git repo|git unavailable/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("#2 goal-declared-read-only: mutating workflow + clean tree + 'read-only task' goal → unknown, NOT false", () => {
+test("#2 goal-declared-read-only: mutating workflow + clean tree + 'read-only task' goal → unknown, NOT false", async () => {
 	const cwd = gitRepoTmp("ga-goalro-");
 	try {
 		// battery-style goal (run team_20261014010550): read README + explicit
@@ -183,11 +184,11 @@ test("#2 goal-declared-read-only: mutating workflow + clean tree + 'read-only ta
 		assert.match(a.reason, /declared read-only|no edits expected/);
 		assert.deepEqual(a.signals, []);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("#2 goal-declared-read-only: 'Do NOT modify, create, or delete any files' marker → unknown", () => {
+test("#2 goal-declared-read-only: 'Do NOT modify, create, or delete any files' marker → unknown", async () => {
 	const cwd = gitRepoTmp("ga-goalro2-");
 	try {
 		const m: TeamRunManifest = {
@@ -197,11 +198,11 @@ test("#2 goal-declared-read-only: 'Do NOT modify, create, or delete any files' m
 		const a = assessGoalAchievement(m, [task("exec", "executor", "completed")], mutatingWorkflow);
 		assert.equal(a.achieved, "unknown");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("#2 goal-declared-read-only: Vietnamese marker 'không sửa file nào' → unknown", () => {
+test("#2 goal-declared-read-only: Vietnamese marker 'không sửa file nào' → unknown", async () => {
 	const cwd = gitRepoTmp("ga-goalro3-");
 	try {
 		const m: TeamRunManifest = {
@@ -211,11 +212,11 @@ test("#2 goal-declared-read-only: Vietnamese marker 'không sửa file nào' →
 		const a = assessGoalAchievement(m, [task("exec", "executor", "completed")], mutatingWorkflow);
 		assert.equal(a.achieved, "unknown");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("#2 mutating + clean tree + goal WITHOUT read-only marker → false (false-green pinned, regression)", () => {
+test("#2 mutating + clean tree + goal WITHOUT read-only marker → false (false-green pinned, regression)", async () => {
 	const cwd = gitRepoTmp("ga-nomarker-");
 	try {
 		const m: TeamRunManifest = {
@@ -226,7 +227,7 @@ test("#2 mutating + clean tree + goal WITHOUT read-only marker → false (false-
 		assert.equal(a.achieved, false); // real mutating goal → false-green as before
 		assert.match(a.reason, /false-green|no project edits/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 

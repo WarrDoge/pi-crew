@@ -8,6 +8,7 @@ import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import { LiveRunSidebar } from "../../../../src/ui/live-run-sidebar.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "research",
@@ -35,7 +36,7 @@ const workflow: WorkflowConfig = {
 	],
 };
 
-test("LiveRunSidebar renders active, waiting, model, and usage sections", () => {
+test("LiveRunSidebar renders active, waiting, model, and usage sections", async () => {
 	const cwd = createTrackedTempDir("pi-crew-live-sidebar-");
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -86,6 +87,6 @@ test("LiveRunSidebar renders active, waiting, model, and usage sections", () => 
 		assert.ok(text.trimEnd().split("\n").at(-1)?.startsWith("┗ "), "closes with the `┗ <hint>` cap");
 		assert.ok(!text.includes("->"), "the legacy `role->agent` separator is retired");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

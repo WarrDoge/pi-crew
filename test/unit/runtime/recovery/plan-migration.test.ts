@@ -19,6 +19,7 @@ import { createRunManifest, saveRunTasks } from "../../../../src/state/stores/st
 import type { PlanRecord, TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import { allTeams, discoverTeams } from "../../../../src/teams/discover-teams.ts";
 import { allWorkflows, discoverWorkflows } from "../../../../src/workflows/discover-workflows.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const NOW = Date.parse("2026-08-19T12:00:00.000Z");
 
@@ -77,7 +78,7 @@ const idleTask = (runId: string): TeamTaskState =>
 		cwd: "/tmp",
 	}) as TeamTaskState;
 
-test("NEGATIVE AC: pre-v2 run (manifest-only, no plans.json) keeps every protection after upgrade", () => {
+test("NEGATIVE AC: pre-v2 run (manifest-only, no plans.json) keeps every protection after upgrade", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-mig-pre-"));
 	try {
 		const m = makeManifest(dir, { planApproval: pendingManifestApproval() });
@@ -90,11 +91,11 @@ test("NEGATIVE AC: pre-v2 run (manifest-only, no plans.json) keeps every protect
 		assert.equal(result.verdict, "blocked_awaiting_approval");
 		assert.equal(result.repaired, false);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });
 
-test("record-first: plans.json approval pending (manifest field absent) is authoritative", () => {
+test("record-first: plans.json approval pending (manifest field absent) is authoritative", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-mig-rec-"));
 	try {
 		const m = makeManifest(dir);
@@ -104,11 +105,11 @@ test("record-first: plans.json approval pending (manifest field absent) is autho
 		assert.equal(isIntentionalWait(m, NOW), true);
 		assert.equal(reconcileStaleRun(m, [idleTask(m.runId)], NOW).verdict, "blocked_awaiting_approval");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });
 
-test("vocabulary mapping: record 'rejected' denies even while manifest still says pending (dual-write gap)", () => {
+test("vocabulary mapping: record 'rejected' denies even while manifest still says pending (dual-write gap)", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-mig-vocab-"));
 	try {
 		const m = makeManifest(dir, { planApproval: pendingManifestApproval() });
@@ -121,9 +122,9 @@ test("vocabulary mapping: record 'rejected' denies even while manifest still say
 			planApproval: { ...pendingManifestApproval(), status: "cancelled" },
 		});
 		assert.equal(isPlanApprovalDenied(m2), true);
-		fs.rmSync(m2.cwd, { recursive: true, force: true });
+		await cleanupStateRoot(m2.cwd);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });
 
@@ -213,11 +214,11 @@ test("E2E: adaptive approval gate dual-writes the record; api approve flips BOTH
 		else process.env.PI_CREW_ROLE = previousRole;
 		if (previousTeamRole === undefined) delete process.env.PI_TEAMS_ROLE;
 		else process.env.PI_TEAMS_ROLE = previousTeamRole;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("setPlanApproval stale-version guard protects against approving a superseded revision", () => {
+test("setPlanApproval stale-version guard protects against approving a superseded revision", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-mig-stale-"));
 	try {
 		const m = makeManifest(dir, { status: "running" });
@@ -227,6 +228,6 @@ test("setPlanApproval stale-version guard protects against approving a supersede
 		appendPlanRevision(m, v2);
 		assert.throws(() => setPlanApproval(m, { status: "approved", planVersion: 1 }), /current is v2/);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });

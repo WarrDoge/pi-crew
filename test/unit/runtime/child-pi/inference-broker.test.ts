@@ -48,6 +48,7 @@ import {
 import { getPiSpawnCommand } from "../../../../src/runtime/pi-spawn.ts";
 import { readProcIdentity } from "../../../../src/runtime/process/reap-group.ts";
 import { type FixtureHandle, reapFixture, registerFixtureTrap } from "../../../helpers/fixture-process.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const REAL_KEY = "sk-ant-realkey-do-not-leak-0123456789";
 
@@ -472,7 +473,7 @@ test("(h1) auth.json api_key resolves when env credentials are absent; key goes 
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;
 		}
-		fs.rmSync(agentDir, { recursive: true, force: true });
+		await removeDirWithRetry(agentDir);
 		await upstream.close();
 	}
 	// env beats auth.json
@@ -500,7 +501,7 @@ test("(h1) auth.json api_key resolves when env credentials are absent; key goes 
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;
 		}
-		fs.rmSync(agentDir2, { recursive: true, force: true });
+		await removeDirWithRetry(agentDir2);
 		await upstream2.close();
 	}
 });
@@ -886,7 +887,7 @@ test("(j2) google credential precedence: GOOGLE_API_KEY > GEMINI_API_KEY > auth.
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;
 		}
-		fs.rmSync(agentDir, { recursive: true, force: true });
+		await removeDirWithRetry(agentDir);
 		await upstream.close();
 	}
 });

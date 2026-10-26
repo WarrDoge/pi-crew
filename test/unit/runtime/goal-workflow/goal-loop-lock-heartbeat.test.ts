@@ -32,6 +32,7 @@ import {
 	workspaceLockPath,
 } from "../../../../src/runtime/workspace-lock.ts";
 import { clearProjectRootCache } from "../../../../src/utils/paths.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeTmpCwd(): string {
 	clearProjectRootCache(); // findRepoRoot has a global cache — clear so each tmpdir resolves correctly.
@@ -59,8 +60,8 @@ describe("startWorkspaceLockHeartbeatRefresh (goal-loop wiring seam, WI-2)", () 
 	beforeEach(() => {
 		cwd = makeTmpCwd();
 	});
-	afterEach(() => {
-		fs.rmSync(cwd, { recursive: true, force: true });
+	afterEach(async () => {
+		await removeDirWithRetry(cwd);
 	});
 
 	it("default cadence is 15s (4x margin under the 60s staleness threshold)", () => {
@@ -147,8 +148,8 @@ describe("startWorkspaceLockHeartbeatRefresh ownership-lost handling (R3-M-B1)",
 	beforeEach(() => {
 		cwd = makeTmpCwd();
 	});
-	afterEach(() => {
-		fs.rmSync(cwd, { recursive: true, force: true });
+	afterEach(async () => {
+		await removeDirWithRetry(cwd);
 	});
 
 	it("refresh()===false → stops the loop and fires onOwnershipLost exactly once", async () => {

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import type { AgentConfig } from "../../../../src/agents/agent-config.ts";
 import { runChildPi } from "../../../../src/runtime/child-pi/child-pi.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const agent: AgentConfig = {
 	name: "executor",
@@ -36,6 +37,6 @@ test("runChildPi returns cancelled result without spawning when signal already a
 		assert.match(result.error ?? "", /Aborted before spawn/i);
 		assert.equal(result.exitCode, null);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

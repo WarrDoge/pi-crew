@@ -41,6 +41,7 @@ import {
 	openRpcEnvSpliceWindow,
 	verifyRpcSpawnEnvSplice,
 } from "../../../../src/runtime/child-pi/child-pi-rpc.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const CANARY = "PI_CREW_RPC_ENV_SPLICE_CANARY";
 
@@ -236,7 +237,7 @@ test("LIVE exactness (linux): SDK-merge spawn during the window → child env is
 		closeAllWindows();
 		if (prev === undefined) delete process.env[PROBE];
 		else process.env[PROBE] = prev;
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });
 
@@ -370,6 +371,6 @@ test("WIRING S*: drifted (post-await) spawn via runRpcSession → env EXACT, NOT
 		closeAllWindows();
 		if (prevProbe === undefined) delete process.env[PROBE];
 		else process.env[PROBE] = prevProbe;
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	}
 });

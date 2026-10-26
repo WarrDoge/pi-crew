@@ -21,6 +21,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { dwfSettledWithoutAnswerFailure, makeWorkflowCtx } from "../../../../src/runtime/goal-workflow/dynamic-workflow-context.ts";
 import type { TeamRunManifest, WorkerExitStatus } from "../../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tmpCwd(prefix: string): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -70,7 +71,7 @@ test("DR-01 DWF: 429-empty-settle worker (exit 0, no error) fails the step inste
 		assert.match(result.error ?? "", /settled without a final answer/i);
 		assert.match(result.error ?? "", /rate-limit\/429/i);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -85,7 +86,7 @@ test("DR-01 DWF: healthy worker (json-success) still passes the gate", async () 
 		assert.equal(result.ok, true, "healthy mock worker must keep passing the DWF gate");
 		assert.ok((result.text ?? "").length > 0);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 

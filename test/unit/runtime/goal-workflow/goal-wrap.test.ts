@@ -20,6 +20,7 @@ import {
 	persistAsyncOnGoalLoopManifest,
 	validateGoalWrapConfig,
 } from "../../../../src/extension/team-tool/goal-wrap.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tmpCwd(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-goalwrap-"));
@@ -40,12 +41,12 @@ function writeUserConfig(config: unknown): () => void {
 	const filePath = path.join(home, ".pi", "agent", "pi-crew.json");
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	fs.writeFileSync(filePath, JSON.stringify(config), "utf-8");
-	return () => {
+	return async () => {
 		if (previousHome !== undefined) process.env.PI_TEAMS_HOME = previousHome;
 		else delete process.env.PI_TEAMS_HOME;
 		if (previousSkip !== undefined) process.env.PI_CREW_SKIP_HOME_CHECK = previousSkip;
 		else delete process.env.PI_CREW_SKIP_HOME_CHECK;
-		fs.rmSync(home, { recursive: true, force: true });
+		await cleanupStateRoot(home);
 	};
 }
 
@@ -59,14 +60,14 @@ test("GOAL_WRAP_ELIGIBLE_BUILTINS includes implementation, fast-fix, default", (
 	assert.ok(!GOAL_WRAP_ELIGIBLE_BUILTINS.has("parallel-research"));
 });
 
-test("isGoalWrapEnabled: returns false when no config (default OFF)", () => {
+test("isGoalWrapEnabled: returns false when no config (default OFF)", async () => {
 	const cwd = tmpCwd();
 	try {
 		// No .crew/config.json in a fresh tmp dir → goal-wrap must be OFF by default.
 		assert.equal(isGoalWrapEnabled(cwd, "implementation"), false);
 		assert.equal(isGoalWrapEnabled(cwd, "fast-fix"), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -143,7 +144,7 @@ test("validateGoalWrapConfig: rejects budgetTotal below 1000 floor", () => {
 // We test the helper directly: persistAsyncOnGoalLoopManifest is the small
 // helper that performs the missing atomic-write. startGoalWrappedRun calls
 // it after spawnBackgroundTeamRun returns.
-test("FIX: persistAsyncOnGoalLoopManifest writes async.pid on the goal-loop manifest", () => {
+test("FIX: persistAsyncOnGoalLoopManifest writes async.pid on the goal-loop manifest", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifestPath = path.join(cwd, "manifest.json");
@@ -180,7 +181,7 @@ test("FIX: persistAsyncOnGoalLoopManifest writes async.pid on the goal-loop mani
 		assert.equal(persisted.runId, "goal_test");
 		assert.equal(persisted.runKind, "goal-loop");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -230,7 +231,7 @@ test("SAFETY: shouldGoalWrap returns {enabled:false, reason:'multi-step'} for mu
 		assert.match((decision as { message?: string }).message ?? "", /multi-step/i, "message must explain multi-step crash");
 	} finally {
 		restoreUserHome();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -262,7 +263,7 @@ test("SAFETY: shouldGoalWrap returns {enabled:true} for single-step workflows (i
 		assert.equal(decision.enabled, true, "single-step goal-wrap must be accepted");
 	} finally {
 		restoreUserHome();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -280,7 +281,7 @@ test("shouldGoalWrap returns {enabled:false, reason:'config-off'} when goal-wrap
 		assert.equal(decision.enabled, false);
 		assert.equal(decision.reason, "config-off");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -303,6 +304,6 @@ test("shouldGoalWrap returns {enabled:false, reason:'invalid-config'} for malfor
 		assert.ok((decision as { message?: string }).message, "invalid-config must carry a message");
 	} finally {
 		restoreUserHome();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

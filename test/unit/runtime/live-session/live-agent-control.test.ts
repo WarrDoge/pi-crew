@@ -6,6 +6,7 @@ import test from "node:test";
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { clearLiveAgentsForTest, registerLiveAgent } from "../../../../src/runtime/live-session/live-agent-manager.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("api rejects direct live-agent control for a different run", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-live-control-run-boundary-"));
@@ -45,7 +46,7 @@ test("api rejects direct live-agent control for a different run", async () => {
 		assert.match(firstText(rejected), /does not belong to run/);
 	} finally {
 		clearLiveAgentsForTest();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -94,6 +95,6 @@ test("api rejects steer for live agent with mismatched workspaceId", async () =>
 		assert.equal(rejected.isError, true);
 	} finally {
 		clearLiveAgentsForTest();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

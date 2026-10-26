@@ -43,6 +43,7 @@ import { createRunManifest, loadRunManifestById, saveRunManifest, saveRunTasks }
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "w11b2",
@@ -82,7 +83,7 @@ beforeEach(() => {
 	process.env.PI_TEAMS_HOME = home;
 });
 
-afterEach(() => {
+afterEach(async () => {
 	for (const key of GUARD_ENV_KEYS) {
 		const value = savedEnv[key];
 		if (value === undefined) delete process.env[key];
@@ -90,7 +91,7 @@ afterEach(() => {
 	}
 	if (savedHome === undefined) delete process.env.PI_TEAMS_HOME;
 	else process.env.PI_TEAMS_HOME = savedHome;
-	fs.rmSync(home, { recursive: true, force: true });
+	await removeDirWithRetry(home);
 	__test.reset();
 });
 
@@ -251,7 +252,7 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 			);
 			assert.equal(readManifestFromDisk(manifest).status, "completed", "stamping must not disturb the run status");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -270,7 +271,7 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 			assert.equal(seam.calls.length, 1, "no second sweep for an already-swept run");
 			assert.equal(seam.procScans, 1, "collectRunDescendants must NOT run again (0 calls on pass 2)");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -314,7 +315,7 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 				);
 			}
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -348,7 +349,7 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 			assert.equal(seam.calls.length, 0, "a live run's descendants are legitimate — never swept");
 			assert.equal(readManifestFromDisk(manifest).descendantSweepAt, undefined, "a running run must never receive the sweep marker");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -372,7 +373,7 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 			assert.deepEqual(readManifestFromDisk(manifest).legacyOnlyField, { keep: true }, "unknown fields survive a save");
 			assert.equal(readManifestFromDisk(manifest).descendantSweepAt, undefined);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -393,7 +394,7 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 			);
 		} finally {
 			delete process.env.PI_CREW_REAP_RUN_DESCENDANTS;
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -418,7 +419,7 @@ describe("wave 11b.2 — startup reconciliation reaches a terminal run", () => {
 			await reconcileAllStaleRuns(cwd, makeStubCache([manifest]), Date.now());
 			assert.equal(attempts, 2, "the run stays eligible, so the next pass retries the sweep");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
@@ -466,7 +467,7 @@ describe("wave 11b.3 — the terminal lane is bounded by age, depth and recorded
 			);
 			assert.ok(isIsoTimestamp(readManifestFromDisk(fresh).descendantSweepAt));
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -511,7 +512,7 @@ describe("wave 11b.3 — the terminal lane is bounded by age, depth and recorded
 				"the remaining 35 keep no marker ⇒ eligible on the next pass",
 			);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -545,7 +546,7 @@ describe("wave 11b.3 — the terminal lane is bounded by age, depth and recorded
 			assert.ok(plainCall !== undefined);
 			assert.equal(plainCall.surfacePids, undefined, "no surface state ⇒ no surface exclusion (additive field)");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
@@ -589,7 +590,7 @@ describe("wave 11b.4 — a pending terminal run is retried, a clean one never is
 			assert.ok(isIsoTimestamp(marker.descendantSweepAt), "the retry refreshes the attempt time");
 			assert.equal(marker.descendantSweepPending, undefined, "the retry was clean (empty /proc table) ⇒ no longer pending");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -612,7 +613,7 @@ describe("wave 11b.4 — a pending terminal run is retried, a clean one never is
 			assert.equal(seam.calls.length, 0, "age never resurrects a clean run — only `descendantSweepPending` does");
 			assert.equal(seam.procScans, 0);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

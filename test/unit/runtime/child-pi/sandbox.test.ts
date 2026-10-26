@@ -28,6 +28,7 @@ import {
 	SANDBOX_ENV,
 	SANDBOX_NET_ENV,
 } from "../../../../src/runtime/child-pi/sandbox.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ── (a) CONFIG ──────────────────────────────────────────────────────────
 
@@ -147,7 +148,9 @@ test("(c2) mount ORDER: --tmpfs /tmp precedes any bind under /tmp (scoped agent 
 const bwrapProbe = process.platform === "linux" ? spawnSync("bwrap", ["--version"], { timeout: 5000 }) : null;
 const haveBwrap = !!bwrapProbe && bwrapProbe.status === 0;
 
-test("(d1) REAL bwrap: host home invisible, cwd writable, OS runtime readable", { skip: !haveBwrap && "linux+bwrap required" }, () => {
+test("(d1) REAL bwrap: host home invisible, cwd writable, OS runtime readable", {
+	skip: !haveBwrap && "linux+bwrap required",
+}, async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-sbx-"));
 	try {
 		const wrapped = applySandboxToSpawnSpec(
@@ -182,7 +185,7 @@ test("(d1) REAL bwrap: host home invisible, cwd writable, OS runtime readable", 
 		assert.equal(w.status, 0, `cwd write inside sandbox: ${w.stderr}`);
 		assert.equal(fs.readFileSync(path.join(cwd, "probe.txt"), "utf8"), "ok");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -209,7 +212,7 @@ test("(d2) REAL bwrap net=off: loopback is unreachable inside the namespace", { 
 		});
 		assert.equal(out.status, 3, `net=off must make even loopback unreachable (stderr: ${out.stderr.slice(0, 200)})`);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 		server.close();
 	}
 });

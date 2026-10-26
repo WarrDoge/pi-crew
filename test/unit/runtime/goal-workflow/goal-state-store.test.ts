@@ -6,6 +6,7 @@ import test from "node:test";
 import { GoalStore } from "../../../../src/runtime/goal-workflow/goal-state-store.ts";
 import type { GoalLoopState } from "../../../../src/state/types.ts";
 import { clearProjectRootCache } from "../../../../src/utils/paths.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeTmpCwd(): string {
 	clearProjectRootCache(); // findRepoRoot has a global cache (paths.ts:71) — clear it so each tmpdir resolves correctly.
@@ -37,18 +38,18 @@ function sampleGoal(cwd: string, goalId: string): GoalLoopState {
 	};
 }
 
-test("GoalStore.createGoalId() returns a path-safe id matching the `goal_*` pattern", () => {
+test("GoalStore.createGoalId() returns a path-safe id matching the `goal_*` pattern", async () => {
 	const cwd = makeTmpCwd();
 	try {
 		const store = new GoalStore(cwd);
 		const id = store.createGoalId();
 		assert.match(id, /^goal_[0-9]{14}_[0-9a-f]+$/, "goalId must be path-safe (assertSafePathId regex)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("GoalStore.save/load round-trip persists GoalLoopState atomically", () => {
+test("GoalStore.save/load round-trip persists GoalLoopState atomically", async () => {
 	const cwd = makeTmpCwd();
 	try {
 		const store = new GoalStore(cwd);
@@ -63,11 +64,11 @@ test("GoalStore.save/load round-trip persists GoalLoopState atomically", () => {
 		assert.equal(loaded!.state, "running");
 		assert.deepEqual(loaded!.verdicts, []);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("GoalStore.patch() merges fields and preserves goalId + createdAt", () => {
+test("GoalStore.patch() merges fields and preserves goalId + createdAt", async () => {
 	const cwd = makeTmpCwd();
 	try {
 		const store = new GoalStore(cwd);
@@ -89,11 +90,11 @@ test("GoalStore.patch() merges fields and preserves goalId + createdAt", () => {
 		assert.equal(patched!.createdAt, original!.createdAt, "createdAt must be preserved");
 		assert.equal(patched!.objective, original!.objective, "objective must be preserved");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("GoalStore.setStatus() transitions state and persists", () => {
+test("GoalStore.setStatus() transitions state and persists", async () => {
 	const cwd = makeTmpCwd();
 	try {
 		const store = new GoalStore(cwd);
@@ -107,7 +108,7 @@ test("GoalStore.setStatus() transitions state and persists", () => {
 		const cancelled = store.setStatus(id, "cancelled");
 		assert.equal(cancelled?.state, "cancelled");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -127,11 +128,11 @@ test("GoalStore.list() returns goals (stable order by updatedAt then goalId)", a
 		assert.equal(list.length, 2);
 		assert.equal(list[0].goalId, id1, "id1 was patched last → newest");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("GoalStore.remove() deletes the goal file", () => {
+test("GoalStore.remove() deletes the goal file", async () => {
 	const cwd = makeTmpCwd();
 	try {
 		const store = new GoalStore(cwd);
@@ -146,11 +147,11 @@ test("GoalStore.remove() deletes the goal file", () => {
 		// Removing again is a no-op (returns false).
 		assert.equal(store.remove(id), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("GoalStore.load() returns undefined for missing/corrupt files", () => {
+test("GoalStore.load() returns undefined for missing/corrupt files", async () => {
 	const cwd = makeTmpCwd();
 	try {
 		const store = new GoalStore(cwd);
@@ -163,11 +164,11 @@ test("GoalStore.load() returns undefined for missing/corrupt files", () => {
 		fs.writeFileSync(path.join(goalsDir, `${id}.json`), "{not valid json");
 		assert.equal(store.load(id), undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("GoalStore rejects path-traversal goalIds (§0c C10 — assertSafePathId)", () => {
+test("GoalStore rejects path-traversal goalIds (§0c C10 — assertSafePathId)", async () => {
 	const cwd = makeTmpCwd();
 	try {
 		const store = new GoalStore(cwd);
@@ -182,7 +183,7 @@ test("GoalStore rejects path-traversal goalIds (§0c C10 — assertSafePathId)",
 			/goalId/i,
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

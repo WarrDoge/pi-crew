@@ -34,6 +34,7 @@ import {
 	resolveSessionRecoveryEnabled,
 	shouldAttemptSessionRecovery,
 } from "../../../../src/runtime/child-pi/session-recovery.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ─── env hygiene ─────────────────────────────────────────────────────────────
 
@@ -126,10 +127,10 @@ function writeSessionFile(dir: string, name: string, entries: EntryLike[], opts?
 	return file;
 }
 
-after(() => {
+after(async () => {
 	for (const dir of tempDirs) {
 		try {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await removeDirWithRetry(dir);
 		} catch {
 			/* best effort */
 		}

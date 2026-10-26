@@ -44,6 +44,7 @@ import { createRunManifest, loadRunManifestById, saveRunManifest, saveRunTasks }
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "r7",
@@ -93,7 +94,7 @@ async function withIsolatedHomeAsync<T>(fn: () => Promise<T>): Promise<T> {
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await cleanupStateRoot(home);
 	}
 }
 
@@ -161,7 +162,7 @@ test("R7-1: purge step 6 does NOT cancel a foreground run with a fresh task hear
 			assert.equal(after.manifest.status, "running", "run survives the purge scan");
 			assert.equal(after.tasks[0]!.status, "running", "the running task is not cancelled");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
@@ -185,7 +186,7 @@ test("R7-1 (counterfactual): the same foreground run WITHOUT fresh task evidence
 			const after = loadRunManifestById(cwd, manifest.runId)!;
 			assert.equal(after.manifest.status, "cancelled", "genuinely-dead run is cancelled");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
@@ -235,7 +236,7 @@ test("R7-6: purge step 6 aborts when a fresh manifest.updatedAt appears under th
 				"the abort is recorded as an orphan_skip event with the fresh_liveness_under_lock reason",
 			);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
@@ -277,7 +278,7 @@ test("R7-6: purge step 5 (dead worker pid) aborts when fresh manifest.updatedAt 
 			const after = loadRunManifestById(cwd, adopted.runId)!;
 			assert.equal(after.manifest.status, "running", "run still running after the aborted purge");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
@@ -318,7 +319,7 @@ test("R7-6: cancelOrphanedRuns aborts when a fresh manifest.updatedAt appears un
 				"the abort is recorded as an orphan_skip event with the fresh_liveness_under_lock reason",
 			);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
@@ -365,7 +366,7 @@ test("M-4: applyRecoveryPlan does not requeue a task that completed during the p
 				"recovery still recorded",
 			);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });

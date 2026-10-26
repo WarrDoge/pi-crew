@@ -28,6 +28,7 @@ import {
 	maybeStartInferenceBroker,
 	stopInferenceBroker,
 } from "../../../../src/runtime/child-pi/inference-broker.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const agent: AgentConfig = {
 	name: "executor",
@@ -81,7 +82,7 @@ test("runChildPi wrapper revokes the task inference token on abort-before-spawn 
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;
 		}
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 		upstream.close();
 	}
 });

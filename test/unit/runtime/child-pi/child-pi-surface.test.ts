@@ -16,7 +16,7 @@
  */
 
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -38,6 +38,7 @@ import type {
 	SurfaceSpawnOpts,
 } from "../../../../src/runtime/surface/surface-provider.ts";
 import { runEventBus } from "../../../../src/ui/run-event-bus.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 interface FakeSurface extends SurfaceProvider {
 	sentCommands: string[];
@@ -145,9 +146,9 @@ async function setup(): Promise<{ workRoot: string; launchDir: string }> {
 	return { workRoot, launchDir };
 }
 
-function cleanup(workRoot: string, launchDir: string): void {
-	rmSync(workRoot, { recursive: true, force: true });
-	rmSync(launchDir, { recursive: true, force: true });
+async function cleanup(workRoot: string, launchDir: string): Promise<void> {
+	await cleanupStateRoot(workRoot);
+	await cleanupStateRoot(launchDir);
 }
 
 /** Ghi sẵn `worker.completed` vào RUN event log — mô phỏng D7 report-before-dying

@@ -23,6 +23,7 @@ import { registerActiveRun } from "../../../../src/state/stores/active-run-regis
 import { createRunManifest, loadRunManifestById, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "locktest",
@@ -70,7 +71,7 @@ async function withIsolatedHome<T>(fn: () => Promise<T>): Promise<T> {
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
@@ -143,7 +144,7 @@ test("purgeStaleActiveRunIndex takes withRunLockSync around the orphaned-run can
 				"cancel reason matches the orphaned-run path",
 			);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

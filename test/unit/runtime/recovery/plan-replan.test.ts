@@ -16,6 +16,7 @@ import type { PlanRecord, TeamRunManifest, TeamTaskState } from "../../../../src
 import { allTeams, discoverTeams } from "../../../../src/teams/discover-teams.ts";
 import { allWorkflows, discoverWorkflows } from "../../../../src/workflows/discover-workflows.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function makeRecord(runId: string, version: number, items: Array<{ id: string; dropped?: boolean }>): PlanRecord {
 	const dropped = new Set(items.filter((i) => i.dropped).map((i) => i.id));
@@ -228,7 +229,7 @@ test("E2E linkage: adaptive dispatch writes taskIds into the CURRENT revision (s
 		else process.env.PI_TEAMS_EXECUTE_WORKERS = previousExecute;
 		if (previousMock === undefined) delete process.env.PI_TEAMS_MOCK_CHILD_PI;
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = previousMock;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 

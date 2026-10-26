@@ -24,6 +24,7 @@ import { createRunManifest, loadRunManifestById, saveRunTasks } from "../../../.
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -136,7 +137,7 @@ test("D5 merge: turn tasks missing from the fresh read are appended; fresh-only 
 
 // ── Interleaving at the disk seam: old bare save clobbers, merge preserves ────
 
-test("D5 interleaving: a concurrent writer's fresh state survives the post-turn persist (old bare save would clobber it)", () => {
+test("D5 interleaving: a concurrent writer's fresh state survives the post-turn persist (old bare save would clobber it)", async () => {
 	const setup = (prefix: string) => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -177,8 +178,8 @@ test("D5 interleaving: a concurrent writer's fresh state survives the post-turn 
 		assert.equal(newDisk?.status, "completed", "turn-owned status still applied");
 		assert.equal(newDisk?.finishedAt, "2026-10-15T11:30:00.000Z", "turn-owned finishedAt still applied");
 	} finally {
-		fs.rmSync(old.cwd, { recursive: true, force: true });
-		fs.rmSync(neu.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(old.cwd);
+		await removeDirWithRetry(neu.cwd);
 	}
 });
 

@@ -39,6 +39,7 @@ import {
 	resolveChildPiRpcMode,
 	resolveChildPiRpcPoolEnabled,
 } from "../../../../src/runtime/child-pi/child-pi-rpc.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const FIXTURES_DIR = fileURLToPath(new URL("../../../fixtures", import.meta.url));
 const RPC_FIXTURE_SRC = path.join(FIXTURES_DIR, "fake-pi-rpc.mjs");
@@ -63,7 +64,7 @@ interface Harness {
 	/** Write the fixture (with extra knob flags) into the allowlisted dir. */
 	stageFixture: (source: string, extraArgs: string[]) => string;
 	setMode: (mode: "rpc" | "json" | undefined) => void;
-	cleanup: () => void;
+	cleanup: () => Promise<void>;
 }
 
 async function makeHarness(fixtureArgs: string[] = []): Promise<Harness> {
@@ -107,7 +108,7 @@ async function makeHarness(fixtureArgs: string[] = []): Promise<Harness> {
 			if (mode === undefined) delete process.env.PI_CREW_CHILD_PI_MODE;
 			else process.env.PI_CREW_CHILD_PI_MODE = mode;
 		},
-		cleanup: () => {
+		cleanup: async () => {
 			for (const key of MUTATED_ENV_KEYS) {
 				if (saved[key] === undefined) delete process.env[key];
 				else process.env[key] = saved[key];
@@ -116,7 +117,7 @@ async function makeHarness(fixtureArgs: string[] = []): Promise<Harness> {
 			// window (EBUSY, live-caught CI 2026-10-12) — the test body passed; a
 			// locked temp dir must not fail the run. %TEMP% is ephemeral on CI.
 			try {
-				fs.rmSync(workRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+				await removeDirWithRetry(workRoot);
 			} catch (err) {
 				const code = (err as NodeJS.ErrnoException).code;
 				if (code !== "EBUSY" && code !== "EPERM" && code !== "ENOTEMPTY" && code !== "EACCES") throw err;
@@ -250,7 +251,7 @@ test("rpc mode: clear_queue precedes prompt, streamingBehavior always sent, stdi
 			"fixture must have emitted agent_settled",
 		);
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -268,7 +269,7 @@ test("rpc mode: malformed stdout line survives (stream keeps living)", async () 
 		assert.equal(result.exitCode, 0, `error=${result.error ?? "(none)"}`);
 		assert.ok(result.rawFinalText?.includes("U14-GARBAGE-MARKER"));
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -291,7 +292,7 @@ test("rpc mode: extension_ui_request spam is filtered by type at the consumer", 
 		assert.ok(!types.includes("extension_ui_response"));
 		assert.ok(types.includes("message_end"), "real events still flow");
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -319,7 +320,7 @@ test("rpc mode: stale idle-steer is cleared before prompt and never injected", a
 		);
 		assert.ok(result.rawFinalText?.includes("U14-STALE-MARKER"));
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -363,7 +364,7 @@ test("rpc mode: parent abort mid-run kills the child — aborted flag set, no or
 			"client.abort() must have been sent",
 		);
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -391,7 +392,7 @@ test("rpc mode: soft turn-limit steer is delivered mid-run with a receipt (isStr
 			"steer must have been sent over the wire",
 		);
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -414,7 +415,7 @@ test("rpc mode: idle turn_end NEVER steers (stale idle-steer must not poison the
 			`no steer command may be sent for an idle turn_end; trace=${JSON.stringify(trace.filter((l) => l.kind === "command"))}`,
 		);
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -442,7 +443,7 @@ test("rpc mode: pool reuses ONE process across two runChildPi prompts (same pid)
 		assert.equal(pids[0], pids[1], `both runs must use the SAME pid (pool reuse): ${pids.join(",")}`);
 	} finally {
 		clearRpcPool(); // stops the warm process — nothing may leak past the test
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -460,7 +461,7 @@ test("rpc mode: 'handled' prompt disposition fails the run instead of waiting on
 		assert.equal(result.exitCode, 1);
 		assert.ok(result.error?.includes("handled"), `error=${result.error}`);
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -483,7 +484,7 @@ test("json fallback flag: unset mode stays on the --mode json -p transport (json
 		assert.equal(result.exitCode, 0, `error=${result.error ?? "(none)"} stderr=${result.stderr}`);
 		assert.ok(result.rawFinalText?.includes("[fake-pi]"), `rawFinalText=${result.rawFinalText ?? "(none)"}`);
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -504,7 +505,7 @@ test("json fallback flag: explicit PI_CREW_CHILD_PI_MODE=json also stays on json
 		assert.equal(result.exitCode, 0);
 		assert.ok(result.rawFinalText?.includes("[fake-pi]"));
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -564,7 +565,7 @@ test("abort receipt is SETTLE-GATED and carries NO data payload (real RpcClient 
 			await client.stop();
 		}
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });
 
@@ -586,6 +587,6 @@ test("SIGTERM shutdown: rpc fixture exits 143 with no leftover process", async (
 		assert.ok(exitInfo.code === 143 || exitInfo.signal === "SIGTERM", `exit=${exitInfo.code}/${exitInfo.signal}`);
 		assert.ok(await waitForPidGone(pid), "no orphan after SIGTERM");
 	} finally {
-		h.cleanup();
+		await h.cleanup();
 	}
 });

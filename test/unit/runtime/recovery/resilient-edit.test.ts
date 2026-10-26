@@ -32,6 +32,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { wrapEditWithResilientReplace } from "../../../../src/runtime/resilient-edit.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * The real loader is not an exported subpath of the pi package, so it is loaded
@@ -217,7 +218,7 @@ test("hook retry: 1.0.4 {path, edits:[{oldText,newText}]} input rewrites the fil
 		assert.ok(after.includes("return 2;"), "new text present in the file");
 		assert.ok(!after.includes("return 1;"), "old text replaced in the file");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -230,7 +231,7 @@ test("hook retry: legacy flat snake_case params still work", async () => {
 		assert.ok(result?.content?.[0]?.text.includes("resilient cascade"), "legacy params retried");
 		assert.ok(fs.readFileSync(file, "utf8").includes("x = 42"), "legacy params applied to the file");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -252,7 +253,7 @@ test("hook retry is ALL-OR-NOTHING: an unmatched edit leaves the file untouched"
 		assert.equal(result, undefined, "no replacement when one entry cannot be matched");
 		assert.equal(fs.readFileSync(file, "utf8"), "alpha\nbeta\n", "file untouched (no half-write)");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -281,7 +282,7 @@ test("hook retry: exhausted cascade and unreadable path return undefined (native
 			"no path → no retry",
 		);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -298,7 +299,7 @@ test("hook retry: replaceAll threads through the cascade", async () => {
 		const after = fs.readFileSync(file, "utf8");
 		assert.equal((after.match(/ok/g) ?? []).length, 3, "all occurrences replaced via replaceAll");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 

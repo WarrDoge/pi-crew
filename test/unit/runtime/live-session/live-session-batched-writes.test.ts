@@ -25,6 +25,7 @@ import {
 	flushPendingSidechainWrites,
 	writeSidechainEntry,
 } from "../../../../src/runtime/output/sidechain-output.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -61,7 +62,7 @@ function spyAppendFileSync(): AppendSpy {
 	};
 }
 
-test("spy instrumentation is live — a dead spy fails loudly, not vacuously", () => {
+test("spy instrumentation is live — a dead spy fails loudly, not vacuously", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-batched-live-"));
 	const spy = spyAppendFileSync();
 	try {
@@ -76,7 +77,7 @@ test("spy instrumentation is live — a dead spy fails loudly, not vacuously", (
 	} finally {
 		spy.restore();
 		flushPendingSidechainWrites();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -113,11 +114,11 @@ test("100 writeSidechainEntry calls within one window flush as ONE appendFileSyn
 	} finally {
 		spy.restore();
 		flushPendingSidechainWrites();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("flush-on-dispose drains pending lines synchronously and is idempotent", () => {
+test("flush-on-dispose drains pending lines synchronously and is idempotent", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-batched-drain-"));
 	const spy = spyAppendFileSync();
 	try {
@@ -141,7 +142,7 @@ test("flush-on-dispose drains pending lines synchronously and is idempotent", ()
 	} finally {
 		spy.restore();
 		flushPendingSidechainWrites();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -160,6 +161,6 @@ test("separate paths batch independently — one appendFileSync each", async () 
 	} finally {
 		spy.restore();
 		flushPendingSidechainWrites();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });

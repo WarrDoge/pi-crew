@@ -37,6 +37,7 @@ import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir, removeTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ─── Shared fixtures ────────────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ async function withIsolatedHomeAsync<T>(fn: () => Promise<T>): Promise<T> {
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
@@ -168,7 +169,7 @@ test("purgeStaleActiveRunIndex: orphaned run (dead PID + stale updatedAt + no he
 			const reloaded = loadRunManifestById(cwd, running.runId);
 			assert.equal(reloaded?.manifest.status, "cancelled", "orphaned run is marked cancelled");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
@@ -210,7 +211,7 @@ test("purgeStaleActiveRunIndex: fresh manifest (updatedAt within threshold) is k
 			assert.ok(result.kept.includes(running.runId), "fresh run must be kept");
 			assert.ok(fs.existsSync(running.stateRoot), "stateRoot must be preserved");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

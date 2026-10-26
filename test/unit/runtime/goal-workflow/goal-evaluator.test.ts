@@ -19,6 +19,7 @@ import {
 	longestBacktickRun,
 	synthesizeJudgeAgentConfig,
 } from "../../../../src/runtime/goal-workflow/goal-evaluator.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("synthesizeJudgeAgentConfig applies full C6 lockdown (NOT just tools:[])", () => {
 	const cfg = synthesizeJudgeAgentConfig();
@@ -36,7 +37,7 @@ test("synthesizeJudgeAgentConfig applies full C6 lockdown (NOT just tools:[])", 
 	assert.match(cfg.systemPrompt, /JSON/i);
 });
 
-test("bundleEvidence reads transcript tail + extracts tool calls", () => {
+test("bundleEvidence reads transcript tail + extracts tool calls", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-goal-eval-"));
 	try {
 		const transcript = path.join(dir, "work.attempt-0.jsonl");
@@ -64,7 +65,7 @@ test("bundleEvidence reads transcript tail + extracts tool calls", () => {
 		assert.ok(evidence.transcriptSlice.length > 0, "transcript slice populated");
 		assert.ok(evidence.transcriptSlice.includes("Running tests"), "transcript content captured");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -74,7 +75,7 @@ test("bundleEvidence handles missing transcript gracefully", () => {
 	assert.equal(evidence.transcriptSlice, "");
 });
 
-test("bundleEvidence truncates very long transcripts to ~8 KiB tail", () => {
+test("bundleEvidence truncates very long transcripts to ~8 KiB tail", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-goal-eval-"));
 	try {
 		const transcript = path.join(dir, "work.attempt-0.jsonl");
@@ -83,7 +84,7 @@ test("bundleEvidence truncates very long transcripts to ~8 KiB tail", () => {
 		const evidence = bundleEvidence(transcript);
 		assert.ok(evidence.transcriptSlice.length <= 8192, "tail bounded to ~8 KiB");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 

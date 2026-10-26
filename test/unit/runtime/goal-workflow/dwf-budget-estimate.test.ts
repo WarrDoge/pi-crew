@@ -29,6 +29,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { makeWorkflowCtx } from "../../../../src/runtime/goal-workflow/dynamic-workflow-context.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tmpCwd(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-dwf-est-"));
@@ -91,7 +92,7 @@ test("G14: long prompt reserves proportionally — an 8000-token budget refuses 
 			assert.equal(ctx.budget.spent(), 0, "a refused call must not touch spent");
 		});
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -114,7 +115,7 @@ test("G14: short prompt no longer over-reserves — a 2000-token budget allows a
 			assert.equal(ctx.budget.remaining(), 2000 - 15);
 		});
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -142,7 +143,7 @@ test("G14: long vs short estimates differ by content (the flat 4096 is gone)", a
 			assert.equal(short.ok, true, `short prompt: ~512 estimate ≤ 6000 budget → allow (error=${short.error ?? "none"})`);
 		});
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -177,6 +178,6 @@ test("G14: reserve/refund consistency — a failed spawn un-reserves exactly the
 			assert.equal(ctx.budget.spent(), 15, "success adjust nets reserve back out to real usage");
 		});
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

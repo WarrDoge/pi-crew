@@ -26,6 +26,7 @@ import { registerActiveRun } from "../../../../src/state/stores/active-run-regis
 import { createRunManifest, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "quarantine",
@@ -51,7 +52,7 @@ async function withIsolatedHomeAsync<T>(fn: () => Promise<T>): Promise<T> {
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await cleanupStateRoot(home);
 	}
 }
 
@@ -107,7 +108,7 @@ test("R-01: corrupt manifest is quarantined and stateRoot is preserved (no data 
 			// (c) stateRoot dir still EXISTS
 			assert.ok(fs.existsSync(stateRoot), "R-01: stateRoot must be preserved for manual recovery");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
@@ -143,7 +144,7 @@ test("R-01: terminal-status manifest unregisters without deleting stateRoot", as
 			assert.ok(result.purged.includes(created.manifest.runId), "terminal run should be unregistered");
 			assert.ok(fs.existsSync(stateRoot), "R-01: terminal run stateRoot must NOT be deleted (just unregistered)");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
@@ -186,7 +187,7 @@ test("R-01: missing manifest file unregisters but preserves stateRoot (dual-sign
 			assert.ok(fs.existsSync(stateRoot), "R-01: stateRoot must be preserved when only manifest is missing");
 			assert.ok(fs.existsSync(eventsPath), "R-01: events.jsonl must survive missing-manifest purge");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	});
 });
@@ -225,7 +226,7 @@ test("R-01: missing CWD unregisters but preserves stateRoot (dual-signal guard, 
 			assert.ok(fs.existsSync(cwd), "cwd exists before deletion");
 
 			// Delete ONLY cwd — persistent stateRoot (outside cwd) survives.
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 			assert.ok(!fs.existsSync(cwd), "cwd removed for test");
 			assert.ok(fs.existsSync(persistentStateRoot), "stateRoot survived cwd deletion");
 
@@ -237,8 +238,8 @@ test("R-01: missing CWD unregisters but preserves stateRoot (dual-signal guard, 
 			assert.ok(fs.existsSync(persistentStateRoot), "R-01: stateRoot must be preserved when cwd missing but stateRoot exists");
 			assert.ok(fs.existsSync(eventsPath), "R-01: events.jsonl must survive missing-cwd purge");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
-			fs.rmSync(stateParent, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
+			await cleanupStateRoot(stateParent);
 		}
 	});
 });

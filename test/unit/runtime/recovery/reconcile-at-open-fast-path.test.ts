@@ -46,6 +46,7 @@ import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir, removeTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "u9",
@@ -66,16 +67,16 @@ const workflow: WorkflowConfig = {
 };
 
 /** Sandbox the global active-run registry so ambient entries cannot leak in. */
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T | Promise<T>): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-u9-home-"));
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await cleanupStateRoot(home);
 	}
 }
 

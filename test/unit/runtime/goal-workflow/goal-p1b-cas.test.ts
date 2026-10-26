@@ -13,6 +13,7 @@ import { afterEach, describe, it } from "node:test";
 import { GoalStore } from "../../../../src/runtime/goal-workflow/goal-state-store.ts";
 import type { GoalLoopState } from "../../../../src/state/types.ts";
 import { clearProjectRootCache } from "../../../../src/utils/paths.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function makeTmpCwd(): string {
 	clearProjectRootCache();
@@ -43,14 +44,14 @@ function sampleGoal(cwd: string, goalId: string, state: GoalLoopState["state"] =
 }
 
 describe("GoalStore.compareAndSetStatus", () => {
-	const cleanups: Array<() => void> = [];
-	afterEach(() => {
-		while (cleanups.length) cleanups.pop()!();
+	const cleanups: Array<() => Promise<void>> = [];
+	afterEach(async () => {
+		while (cleanups.length) await cleanups.pop()!();
 	});
 
 	it("succeeds and persists when current state matches expected (running→stuck)", () => {
 		const cwd = makeTmpCwd();
-		cleanups.push(() => fs.rmSync(cwd, { recursive: true, force: true }));
+		cleanups.push(() => cleanupStateRoot(cwd));
 		const store = new GoalStore(cwd);
 		const id = store.createGoalId();
 		store.save(sampleGoal(cwd, id, "running"));
@@ -63,7 +64,7 @@ describe("GoalStore.compareAndSetStatus", () => {
 
 	it("succeeds for stuck→running (resume transition)", () => {
 		const cwd = makeTmpCwd();
-		cleanups.push(() => fs.rmSync(cwd, { recursive: true, force: true }));
+		cleanups.push(() => cleanupStateRoot(cwd));
 		const store = new GoalStore(cwd);
 		const id = store.createGoalId();
 		store.save(sampleGoal(cwd, id, "stuck"));
@@ -76,7 +77,7 @@ describe("GoalStore.compareAndSetStatus", () => {
 
 	it("fails (returns undefined) and does NOT mutate when expected mismatches", () => {
 		const cwd = makeTmpCwd();
-		cleanups.push(() => fs.rmSync(cwd, { recursive: true, force: true }));
+		cleanups.push(() => cleanupStateRoot(cwd));
 		const store = new GoalStore(cwd);
 		const id = store.createGoalId();
 		store.save(sampleGoal(cwd, id, "running"));
@@ -89,7 +90,7 @@ describe("GoalStore.compareAndSetStatus", () => {
 
 	it("returns undefined for an unknown goalId", () => {
 		const cwd = makeTmpCwd();
-		cleanups.push(() => fs.rmSync(cwd, { recursive: true, force: true }));
+		cleanups.push(() => cleanupStateRoot(cwd));
 		const store = new GoalStore(cwd);
 		const result = store.compareAndSetStatus("goal_missing_xyz", "running", "stuck");
 		assert.equal(result, undefined);
@@ -97,7 +98,7 @@ describe("GoalStore.compareAndSetStatus", () => {
 
 	it("emits a goal.state_changed event when an eventsPath is supplied", () => {
 		const cwd = makeTmpCwd();
-		cleanups.push(() => fs.rmSync(cwd, { recursive: true, force: true }));
+		cleanups.push(() => cleanupStateRoot(cwd, eventsPath));
 		const store = new GoalStore(cwd);
 		const id = store.createGoalId();
 		store.save(sampleGoal(cwd, id, "running"));
@@ -115,7 +116,7 @@ describe("GoalStore.compareAndSetStatus", () => {
 
 	it("does NOT emit an event when CAS fails", () => {
 		const cwd = makeTmpCwd();
-		cleanups.push(() => fs.rmSync(cwd, { recursive: true, force: true }));
+		cleanups.push(() => cleanupStateRoot(cwd, eventsPath));
 		const store = new GoalStore(cwd);
 		const id = store.createGoalId();
 		store.save(sampleGoal(cwd, id, "running"));
