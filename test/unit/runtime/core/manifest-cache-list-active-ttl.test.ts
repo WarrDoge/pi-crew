@@ -31,6 +31,7 @@ import { createManifestCache } from "../../../../src/runtime/manifest-cache.ts";
 import { createRunManifest, updateRunStatus } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "act",
@@ -59,7 +60,7 @@ const workflow: WorkflowConfig = {
  * refresh the ESM namespace. This is the same pattern documented in the
  * Node.js test suite (test/parallel/test-mock-fs-statSync).
  */
-test("listActive memoizes within TTL — many calls only scan once", () => {
+test("listActive memoizes within TTL — many calls only scan once", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-list-active-ttl-"));
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -99,11 +100,11 @@ test("listActive memoizes within TTL — many calls only scan once", () => {
 		// Cap is applied post-cache on every return.
 		assert.equal(cache.listActive(2).length, 2, "capped slice must respect the limit");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("listActive re-scans after cache.clear() (the watcher invalidation path)", () => {
+test("listActive re-scans after cache.clear() (the watcher invalidation path)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-list-active-invalidate-"));
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -140,11 +141,11 @@ test("listActive re-scans after cache.clear() (the watcher invalidation path)", 
 			`post-clear call must re-scan and include the newly-created runId=${newRunId} (proves clear drops cache)`,
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("listActive cache does NOT cap by list()'s top-N (all-running semantic preserved)", () => {
+test("listActive cache does NOT cap by list()'s top-N (all-running semantic preserved)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-list-active-no-topn-"));
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -176,6 +177,6 @@ test("listActive cache does NOT cap by list()'s top-N (all-running semantic pres
 		}
 		assert.equal(includedCount, 20, `cached un-capped set must surface all 20 created runs (got ${includedCount}/20)`);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

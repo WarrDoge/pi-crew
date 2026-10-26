@@ -24,6 +24,7 @@ import { clearLiveAgentsForTest } from "../../../src/runtime/live-session/live-a
 import { createRunManifest, loadRunManifestById, saveRunTasks } from "../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
 import type { TeamConfig } from "../../../src/teams/team-config.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 /** Real on-disk run fixture (team-runner-extraction.test.ts pattern). Caller rmSync's cwd. */
 function makeRunFixture(): { cwd: string; runId: string; manifest: TeamRunManifest } {
@@ -92,7 +93,7 @@ test("hint with no expired waiting task short-circuits before the disk load", as
 		const eventsText = fs.readFileSync(loaded.manifest.eventsPath, "utf-8");
 		assert.ok(!eventsText.includes('"ask.timedout"'), "no timeout event may be emitted from a hint-only pass");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -113,7 +114,7 @@ test("hint with expired waiting task proceeds to the locked sweep", async () => 
 		assert.equal(task?.status, "queued");
 		assert.equal(task?.waiting, undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -130,6 +131,6 @@ test("missing manifest short-circuits to undefined on both the hint and no-hint 
 		assert.equal(await sweepExpiredWaitingTasks(cwd, runId, Date.now(), [parked]), undefined);
 		assert.equal(await sweepExpiredWaitingTasks(cwd, runId, Date.now()), undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

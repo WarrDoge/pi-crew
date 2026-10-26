@@ -7,6 +7,7 @@ import { createMetricRegistry } from "../../../../src/observability/metric-regis
 import { exportDiagnostic, listRecentDiagnostic, redactSecrets } from "../../../../src/runtime/diagnostic-export.ts";
 import { appendEvent } from "../../../../src/state/event-log/event-log.ts";
 import { createRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 test("redactSecrets masks sensitive keys recursively", () => {
 	assert.deepEqual(redactSecrets({ apiKey: "abc", nested: { password: "pw", ok: "yes" } }), {
@@ -64,7 +65,7 @@ test("exportDiagnostic writes JSON report with redacted task data", async () => 
 		assert.doesNotMatch(text, /"abc"/);
 		assert.equal(listRecentDiagnostic(path.dirname(exported.path), 60_000) !== undefined, true);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -99,7 +100,7 @@ test("exportDiagnostic includes redacted metrics snapshot when registry is provi
 		assert.ok(exported.report.metricsSnapshot);
 		assert.doesNotMatch(fs.readFileSync(exported.path, "utf-8"), /PI_CREW_TEST_SECRET_VALUE/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 

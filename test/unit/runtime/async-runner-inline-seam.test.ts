@@ -22,6 +22,7 @@ import { test } from "node:test";
 import { isInlineAsyncTestSeamActive, spawnBackgroundTeamRun } from "../../../src/runtime/async-runner.ts";
 import { createRunManifest } from "../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../src/teams/team-config.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 /** Minimal team shape — createRunManifest only reads identifying fields off it. */
 const MINIMAL_TEAM = {
@@ -122,6 +123,6 @@ test("seam active: spawnBackgroundTeamRun executes in-process (pid=self, no deta
 			"inline execution must terminate with async.failed for a bogus goal-loop manifest (got stale? see background.log)",
 		);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });

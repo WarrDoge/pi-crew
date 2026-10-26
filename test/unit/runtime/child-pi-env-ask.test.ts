@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import type { AgentConfig } from "../../../src/agents/agent-config.ts";
 import { assertOnlyControlEnvKeys, prepareSpawnContext } from "../../../src/runtime/child-pi/child-pi-spawn.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 // WP-2/R2 STEP 2 (ADR-0 docs/decisions/2026-08-17-waiting-producer-ask.md
 // item 2 — P0 env plumbing): prepareSpawnContext must set PI_CREW_ASK_ENABLED
@@ -37,11 +38,11 @@ interface AskEnvResult {
 	mergedEnv: Record<string, string | undefined>;
 }
 
-function askEnvFor(
+async function askEnvFor(
 	role: string,
 	agent: AgentConfig,
 	opts?: { agentId?: string; eventsPath?: string; artifactsRoot?: string },
-): AskEnvResult {
+): Promise<AskEnvResult> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-ask-env-"));
 	try {
 		const res = prepareSpawnContext(
@@ -63,7 +64,7 @@ function askEnvFor(
 			mergedEnv: res.ctx.mergedEnv as Record<string, string | undefined>,
 		};
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 }
 
@@ -73,10 +74,10 @@ function askEnvFor(
 // means by "read-only roles can ask".
 const READ_ONLY_ROLES = ["security-reviewer", "reviewer", "explorer"] as const;
 
-test("WP-2 step 2: read-only role spawn carries BOTH ask env vars (NOT scratchpad-gated)", () => {
+test("WP-2 step 2: read-only role spawn carries BOTH ask env vars (NOT scratchpad-gated)", async () => {
 	const eventsPath = "/tmp/pi-crew-ask-state-run-x/events.jsonl";
 	for (const role of READ_ONLY_ROLES) {
-		const { builtEnv, mergedEnv } = askEnvFor(role, makeAgent({ scratchpad: true }), {
+		const { builtEnv, mergedEnv } = await askEnvFor(role, makeAgent({ scratchpad: true }), {
 			agentId: "task-1",
 			eventsPath,
 			artifactsRoot: "/tmp/pi-crew-ask-art-x",
@@ -99,9 +100,9 @@ test("WP-2 step 2: read-only role spawn carries BOTH ask env vars (NOT scratchpa
 	}
 });
 
-test("WP-2 step 2: scratchpad-enabled role gets BOTH ask env vars alongside scratchpad keys", () => {
+test("WP-2 step 2: scratchpad-enabled role gets BOTH ask env vars alongside scratchpad keys", async () => {
 	const eventsPath = "/tmp/pi-crew-ask-state-run-y/events.jsonl";
-	const { builtEnv } = askEnvFor("executor", makeAgent(), {
+	const { builtEnv } = await askEnvFor("executor", makeAgent(), {
 		agentId: "task-2",
 		eventsPath,
 		artifactsRoot: "/tmp/pi-crew-ask-art-y",
@@ -111,30 +112,30 @@ test("WP-2 step 2: scratchpad-enabled role gets BOTH ask env vars alongside scra
 	assert.equal(builtEnv.PI_CREW_STATE_ROOT, path.dirname(eventsPath), "and the run stateRoot");
 });
 
-test("WP-2 step 2: ASK_ENABLED set even without eventsPath; STATE_ROOT stays unset (non-team fail-safe)", () => {
+test("WP-2 step 2: ASK_ENABLED set even without eventsPath; STATE_ROOT stays unset (non-team fail-safe)", async () => {
 	// No eventsPath (non-team spawn): the tool gate is still threaded, but there
 	// is no stateRoot to point at — the worker-side ask tool must fast-fail with
 	// a structured notice instead of hanging on a bogus root.
-	const { builtEnv } = askEnvFor("security-reviewer", makeAgent(), { agentId: "task-3" });
+	const { builtEnv } = await askEnvFor("security-reviewer", makeAgent(), { agentId: "task-3" });
 	assert.equal(builtEnv.PI_CREW_ASK_ENABLED, "1");
 	assert.equal(builtEnv.PI_CREW_STATE_ROOT, undefined, "no eventsPath → no stateRoot (never guess)");
 });
 
-test("WP-2 step 2: ask vars need no agentId (they are not task-bound, unlike scratchpad keys)", () => {
-	const { builtEnv } = askEnvFor("executor", makeAgent(), { eventsPath: "/tmp/sr-z/events.jsonl" });
+test("WP-2 step 2: ask vars need no agentId (they are not task-bound, unlike scratchpad keys)", async () => {
+	const { builtEnv } = await askEnvFor("executor", makeAgent(), { eventsPath: "/tmp/sr-z/events.jsonl" });
 	assert.equal(builtEnv.PI_CREW_ASK_ENABLED, "1");
 	assert.equal(builtEnv.PI_CREW_STATE_ROOT, "/tmp/sr-z");
 });
 
-test("WP-2 step 2: the two ask keys pass the assertOnlyControlEnvKeys canary", () => {
+test("WP-2 step 2: the two ask keys pass the assertOnlyControlEnvKeys canary", async () => {
 	assert.doesNotThrow(() => assertOnlyControlEnvKeys({ PI_CREW_ASK_ENABLED: "1", PI_CREW_STATE_ROOT: "/tmp/sr" }));
 });
 
-test("WP-2 step 2: stateRoot is the dirname of the threaded eventsPath (state-store invariant)", () => {
+test("WP-2 step 2: stateRoot is the dirname of the threaded eventsPath (state-store invariant)", async () => {
 	// manifest.eventsPath === path.join(stateRoot, "events.jsonl")
 	// (state-store.ts DEFAULT_PATHS.state.eventsFile) — the spawn-side
 	// derivation must mirror exactly that, for nested and flat roots alike.
-	const { builtEnv } = askEnvFor("reviewer", makeAgent(), {
+	const { builtEnv } = await askEnvFor("reviewer", makeAgent(), {
 		eventsPath: "/tmp/deep/nested/run-dir/events.jsonl",
 	});
 	assert.equal(builtEnv.PI_CREW_STATE_ROOT, "/tmp/deep/nested/run-dir");

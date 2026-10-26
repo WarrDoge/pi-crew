@@ -8,6 +8,7 @@ import { saveCrewAgents } from "../../../../src/runtime/crew-agent-records.ts";
 import { createRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -111,7 +112,7 @@ test("api refuses resultArtifact and transcript paths outside run artifacts", as
 		const transcriptText = transcript.content[0]?.type === "text" ? transcript.content[0].text : "";
 		assert.doesNotMatch(transcriptText, /OUTSIDE_SECRET_CONTENT/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -185,7 +186,7 @@ test("api refuses directory symlink escapes from artifacts root", async (t) => {
 		const transcriptText = transcript.content[0]?.type === "text" ? transcript.content[0].text : "";
 		assert.doesNotMatch(transcriptText, /SECRET_FROM_OUTSIDE/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -256,6 +257,6 @@ test("api refuses symlink escapes from artifacts root", async (t) => {
 		const transcriptText = transcript.content[0]?.type === "text" ? transcript.content[0].text : "";
 		assert.doesNotMatch(transcriptText, /OUTSIDE_SECRET_CONTENT/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

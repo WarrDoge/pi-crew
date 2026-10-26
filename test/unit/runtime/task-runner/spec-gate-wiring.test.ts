@@ -16,6 +16,7 @@ import test from "node:test";
 import { computeSpecGate } from "../../../../src/runtime/task-runner/spec-evidence.ts";
 import { freezeSpecSnapshot, loadSpecRecord, saveSpecRecord } from "../../../../src/state/stores/spec-store.ts";
 import type { TaskPacket } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const REAL_HOME = process.env.HOME;
 
@@ -39,10 +40,10 @@ function makeCwd(): string {
 	return dir;
 }
 
-function cleanup(cwd: string): void {
+async function cleanup(cwd: string): Promise<void> {
 	if (REAL_HOME === undefined) delete process.env.HOME;
 	else process.env.HOME = REAL_HOME;
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await removeDirWithRetry(cwd);
 }
 
 function packetWith(overrides: Partial<TaskPacket>): TaskPacket {

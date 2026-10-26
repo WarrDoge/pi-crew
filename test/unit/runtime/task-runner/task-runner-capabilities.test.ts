@@ -9,6 +9,7 @@ import { runTeamTask } from "../../../../src/runtime/task-runner.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // TODO (task packet 01_01-agent, FIX 1 follow-up):
 // FIX 1 relaxes the `!attemptModels[i + 1]` short-circuit in the retry loop
@@ -136,6 +137,6 @@ test("runTeamTask writes capability inventory metadata for scaffold runs", async
 		assert.equal(inventory.model.teamRole, "team/model");
 		assert.equal(inventory.model.step, "step/model");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

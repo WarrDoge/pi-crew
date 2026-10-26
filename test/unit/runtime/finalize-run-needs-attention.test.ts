@@ -36,6 +36,7 @@ import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts
 import type { TeamConfig } from "../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir } from "../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 // ─── Fixtures ───────────────────────────────────────────────────────
 
@@ -163,7 +164,7 @@ test("R4-4 (a): run with a needs_attention task → still completed, surfaced su
 		assert.ok(policyArtifact, "policy-decisions.json artifact exists");
 		assert.ok(fs.readFileSync(policyArtifact.path, "utf8").includes("task_needs_attention"));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -178,7 +179,7 @@ test("R4-4 (b): all-green run → unchanged summary, no notify block", async () 
 		assert.equal(result.manifest.summary, "Team workflow completed.");
 		assert.equal(needsAttentionNotify(result.manifest).length, 0, "no task_needs_attention notify on an all-green run");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -195,6 +196,6 @@ test("R4-4 (c): mixed run counts only needs_attention tasks in the summary", asy
 		assert.equal(notify.length, 1);
 		assert.match(notify[0]!.message, /2 task\(s\)/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

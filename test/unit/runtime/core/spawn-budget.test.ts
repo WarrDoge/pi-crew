@@ -8,6 +8,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * CORE-3 — per-task spawn budget cap.
@@ -124,7 +125,7 @@ test("CORE-3: spawn budget caps model fallback spawns at max", async () => {
 			);
 		});
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -166,6 +167,6 @@ test("CORE-3: generous budget allows all model fallback spawns", async () => {
 			assert.equal(spawnBudget.count, 3, `counter should be 3 after 3 spawns`);
 		});
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

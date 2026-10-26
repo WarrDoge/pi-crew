@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { reconcileOrphanedTempWorkspaces } from "../../../../src/runtime/stale-reconciler.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 /**
  * R2-H1 (deep-review wave-1): orphan-reconcile persistence caller pin.
@@ -29,7 +30,7 @@ import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types
 
 const STALE_MS = 20 * 60 * 1000; // 20min — beyond ACTIVE_EVIDENCE_TTL / NO_PID_HEARTBEAT_STALE (5min)
 
-test("R2-H1 orphan reconcile tick retains all sibling tasks; only the zombie is cancelled", () => {
+test("R2-H1 orphan reconcile tick retains all sibling tasks; only the zombie is cancelled", async () => {
 	const isolatedTmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-isotmp-"));
 	const wsDir = fs.mkdtempSync(path.join(isolatedTmp, "pi-crew-test-"));
 	const runId = `run_r2h1_${Date.now()}`;
@@ -137,6 +138,6 @@ test("R2-H1 orphan reconcile tick retains all sibling tasks; only the zombie is 
 		assert.ok(byId.get("task_b")?.finishedAt, "cancelled zombie gets finishedAt");
 		assert.equal(byId.get("task_c")?.status, "completed", "completed sibling must stay completed");
 	} finally {
-		fs.rmSync(isolatedTmp, { recursive: true, force: true });
+		await cleanupStateRoot(isolatedTmp);
 	}
 });

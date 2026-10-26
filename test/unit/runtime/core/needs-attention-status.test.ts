@@ -20,6 +20,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "needs-attention-test",
@@ -72,7 +73,7 @@ test("running can transition to needs_attention (via noYield)", () => {
 
 // --- Agent control idle detection ---
 
-test("agent control marks stale running agents as needs_attention", () => {
+test("agent control marks stale running agents as needs_attention", async () => {
 	const cwd = createTrackedTempDir("pi-crew-needs-attention-");
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -115,11 +116,11 @@ test("agent control marks stale running agents as needs_attention", () => {
 		assert.equal(readCrewAgents(manifest)[0]!.progress?.activityState, "needs_attention");
 		assert.ok(readEvents(manifest.eventsPath).some((e) => e.type === "task.attention" && e.data?.reason === "idle"));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("agent control does NOT mark recently active agents", () => {
+test("agent control does NOT mark recently active agents", async () => {
 	const cwd = createTrackedTempDir("pi-crew-needs-attention-");
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -160,6 +161,6 @@ test("agent control does NOT mark recently active agents", () => {
 
 		assert.equal(updated.progress?.activityState, "active");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

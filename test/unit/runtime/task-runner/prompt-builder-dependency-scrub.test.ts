@@ -34,10 +34,11 @@ import { renderDependencyOutputContext } from "../../../../src/runtime/task-outp
 import { renderTaskPrompt } from "../../../../src/runtime/task-runner/prompt-builder.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import type { WorkflowStep } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const tmpDirs: string[] = [];
-after(() => {
-	for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
+after(async () => {
+	for (const dir of tmpDirs) await removeDirWithRetry(dir);
 });
 
 function makeManifest(): TeamRunManifest {

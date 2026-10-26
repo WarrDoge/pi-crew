@@ -42,6 +42,7 @@ import {
 } from "../../../src/runtime/process/reap-group.ts";
 import { __test, drainReapEscalations, flushReapEscalationsSync, reconcileStaleRun } from "../../../src/runtime/stale-reconciler.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 /** Repo root — the tsx loader (`--import tsx/esm`) must resolve from here. */
 const ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
@@ -124,7 +125,7 @@ describe("stale-reconciler — armed group escalations are drained (MAJOR #3)", 
 		} finally {
 			release();
 			await drainReapEscalations();
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 
@@ -140,7 +141,7 @@ describe("stale-reconciler — armed group escalations are drained (MAJOR #3)", 
 			reconcileStaleRun(makeManifest(stateRoot), [staleTask()], Date.now());
 			await assert.doesNotReject(() => drainReapEscalations());
 		} finally {
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 
@@ -186,7 +187,7 @@ describe("stale-reconciler — the drain pins the loop, the flush delivers the S
 		__resetSelfIdentityForTest();
 	});
 
-	it("(i) holds a REF'D keep-alive while an escalation is in flight — proven in a child process", () => {
+	it("(i) holds a REF'D keep-alive while an escalation is in flight — proven in a child process", async () => {
 		// A resolver-free proof: the child arms an escalation whose only timer is
 		// UNREF'd (exactly like reap-group's poll chain), starts the drain without
 		// awaiting it, and lets its top level end. Without the drain's ref'd pin,
@@ -227,7 +228,7 @@ describe("stale-reconciler — the drain pins the loop, the flush delivers the S
 			assert.equal(seen.settled, true, "the escalation settled before the process exited");
 			assert.ok(seen.elapsed >= 200, `the process must live until the escalation settles (saw ${seen.elapsed}ms)`);
 		} finally {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir);
 		}
 	});
 

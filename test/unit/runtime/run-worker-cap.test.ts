@@ -48,6 +48,7 @@ import {
 	getWorkerCapCapacity,
 	releaseWorkerSlot,
 } from "../../../src/runtime/scheduling/global-worker-cap.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 /** Per-child run interval measured from the shared overlap log (ns, monotonic). */
 interface Span {
@@ -233,8 +234,8 @@ test("T-4: runWorker blocks at the configured cap and releases on settle (real m
 	} finally {
 		__test_resetCap(prevCap);
 		restoreEnv(envSnap);
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(scriptDir, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(scriptDir);
 	}
 });
 
@@ -282,9 +283,9 @@ test("T-4: cap:false bypasses the global worker cap (goal-judge exemption, RFC M
 	} finally {
 		__test_resetCap(prevCap);
 		restoreEnv(envSnap);
-		fs.rmSync(bypassCwd, { recursive: true, force: true });
-		fs.rmSync(cappedCwd, { recursive: true, force: true });
-		fs.rmSync(scriptDir, { recursive: true, force: true });
+		await removeDirWithRetry(bypassCwd);
+		await removeDirWithRetry(cappedCwd);
+		await removeDirWithRetry(scriptDir);
 	}
 });
 
@@ -342,9 +343,9 @@ test("T-4: release-on-throw — a rejecting spawn frees its slot (withWorkerSlot
 	} finally {
 		__test_resetCap(prevCap);
 		restoreEnv(envSnap);
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(scriptDir, { recursive: true, force: true });
-		fs.rmSync(escapeDir, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(scriptDir);
+		await removeDirWithRetry(escapeDir);
 	}
 });
 
@@ -409,7 +410,7 @@ test("F15 (RR-014): runWorker(signal) — waiter aborted while QUEUED settles pr
 	} finally {
 		__test_resetCap(prevCap);
 		restoreEnv(envSnap);
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(scriptDir, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(scriptDir);
 	}
 });

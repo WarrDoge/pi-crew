@@ -14,6 +14,7 @@ import { readPersistedSubagentRecord } from "../../../../src/runtime/subagent-ma
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 describe("H3: Subagent record validation", () => {
 	let tmpDir: string;
@@ -28,7 +29,7 @@ describe("H3: Subagent record validation", () => {
 		return dir;
 	}
 
-	it("should accept valid records with allowed fields", () => {
+	it("should accept valid records with allowed fields", async () => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-test-"));
 		try {
 			writeSubagentFile("agent_test1", {
@@ -45,11 +46,11 @@ describe("H3: Subagent record validation", () => {
 			assert.ok(result, "Should return a valid record");
 			assert.equal((result as unknown as Record<string, unknown>).agentId, "agent_test1");
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			await removeDirWithRetry(tmpDir);
 		}
 	});
 
-	it("should reject records without agentId", () => {
+	it("should reject records without agentId", async () => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-test-"));
 		try {
 			writeSubagentFile("agent_test2", {
@@ -59,11 +60,11 @@ describe("H3: Subagent record validation", () => {
 			const result = readPersistedSubagentRecord(tmpDir, "agent_test2");
 			assert.equal(result, undefined, "Should reject record without agentId");
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			await removeDirWithRetry(tmpDir);
 		}
 	});
 
-	it("should reject records with non-string agentId", () => {
+	it("should reject records with non-string agentId", async () => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-test-"));
 		try {
 			writeSubagentFile("agent_test3", {
@@ -72,11 +73,11 @@ describe("H3: Subagent record validation", () => {
 			const result = readPersistedSubagentRecord(tmpDir, "agent_test3");
 			assert.equal(result, undefined, "Should reject record with numeric agentId");
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			await removeDirWithRetry(tmpDir);
 		}
 	});
 
-	it("should reject records with empty agentId", () => {
+	it("should reject records with empty agentId", async () => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-test-"));
 		try {
 			writeSubagentFile("agent_test4", {
@@ -85,33 +86,33 @@ describe("H3: Subagent record validation", () => {
 			const result = readPersistedSubagentRecord(tmpDir, "agent_test4");
 			assert.equal(result, undefined, "Should reject record with empty agentId");
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			await removeDirWithRetry(tmpDir);
 		}
 	});
 
-	it("should reject non-object records (array)", () => {
+	it("should reject non-object records (array)", async () => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-test-"));
 		try {
 			writeSubagentFile("agent_test5", [{ agentId: "x" }]);
 			const result = readPersistedSubagentRecord(tmpDir, "agent_test5");
 			assert.equal(result, undefined, "Should reject array records");
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			await removeDirWithRetry(tmpDir);
 		}
 	});
 
-	it("should reject null records", () => {
+	it("should reject null records", async () => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-test-"));
 		try {
 			writeSubagentFile("agent_test6", null);
 			const result = readPersistedSubagentRecord(tmpDir, "agent_test6");
 			assert.equal(result, undefined, "Should reject null records");
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			await removeDirWithRetry(tmpDir);
 		}
 	});
 
-	it("should reject records with injected malicious fields (validation runs)", () => {
+	it("should reject records with injected malicious fields (validation runs)", async () => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-test-"));
 		try {
 			// A record with allowed fields plus a malicious injected field
@@ -129,17 +130,17 @@ describe("H3: Subagent record validation", () => {
 			// The raw JSON is still returned as SubagentRecord (backwards compat),
 			// but the validation ensures agentId exists and is a valid string.
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			await removeDirWithRetry(tmpDir);
 		}
 	});
 
-	it("should return undefined for missing files", () => {
+	it("should return undefined for missing files", async () => {
 		tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-test-"));
 		try {
 			const result = readPersistedSubagentRecord(tmpDir, "nonexistent_agent");
 			assert.equal(result, undefined, "Should return undefined for missing file");
 		} finally {
-			fs.rmSync(tmpDir, { recursive: true, force: true });
+			await removeDirWithRetry(tmpDir);
 		}
 	});
 });

@@ -4,8 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { asyncStartMarkerPath, hasAsyncStartMarker, writeAsyncStartMarker } from "../../../../src/runtime/async-marker.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
-test("async start marker reports existing valid marker", () => {
+test("async start marker reports existing valid marker", async () => {
 	const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-async-marker-"));
 	try {
 		const manifest = { stateRoot };
@@ -16,11 +17,11 @@ test("async start marker reports existing valid marker", () => {
 		assert.equal(hasAsyncStartMarker(manifest), true);
 		assert.equal(path.basename(asyncStartMarkerPath(manifest)), "async.pid");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await removeDirWithRetry(stateRoot);
 	}
 });
 
-test("async start marker ignores missing or invalid marker", () => {
+test("async start marker ignores missing or invalid marker", async () => {
 	const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-async-marker-invalid-"));
 	try {
 		const manifest = { stateRoot };
@@ -30,6 +31,6 @@ test("async start marker ignores missing or invalid marker", () => {
 		fs.writeFileSync(asyncStartMarkerPath(manifest), JSON.stringify({ pid: 0, startedAt: "" }), "utf-8");
 		assert.equal(hasAsyncStartMarker(manifest), false);
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await removeDirWithRetry(stateRoot);
 	}
 });

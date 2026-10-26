@@ -21,10 +21,11 @@ import {
 	splitWithImportantLines,
 } from "../../../../src/runtime/compaction/important-line-classifier.ts";
 import { readIfSmall } from "../../../../src/runtime/task-output-context.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // --- isImportantLine unit tests (each pattern) ---
 
-test("isImportantLine matches error keywords (error/failed/exception/fatal/panic)", () => {
+test("isImportantLine matches error keywords (error/failed/exception/fatal/panic)", async () => {
 	assert.ok(isImportantLine("Error: connection refused"));
 	assert.ok(isImportantLine("Test FAILED at line 42"));
 	assert.ok(isImportantLine("Uncaught exception in handler"));
@@ -34,7 +35,7 @@ test("isImportantLine matches error keywords (error/failed/exception/fatal/panic
 	assert.ok(!isImportantLine("All systems operational."));
 });
 
-test("isImportantLine matches file:line diagnostics", () => {
+test("isImportantLine matches file:line diagnostics", async () => {
 	assert.ok(isImportantLine("    at child-pi.ts:383:24"));
 	assert.ok(isImportantLine("src/runtime/foo.ts:99:1 — undefined"));
 	assert.ok(isImportantLine("/abs/path/App.tsx:42:10"));
@@ -42,7 +43,7 @@ test("isImportantLine matches file:line diagnostics", () => {
 	assert.ok(!isImportantLine("hello world"));
 });
 
-test("isImportantLine matches HTTP 4xx/5xx codes", () => {
+test("isImportantLine matches HTTP 4xx/5xx codes", async () => {
 	assert.ok(isImportantLine("upstream returned 503 Service Unavailable"));
 	assert.ok(isImportantLine("GET /api -> 404 Not Found"));
 	assert.ok(isImportantLine("error: HTTP 500 from payment gateway"));
@@ -51,7 +52,7 @@ test("isImportantLine matches HTTP 4xx/5xx codes", () => {
 	assert.ok(!isImportantLine("HTTP 301 Moved Permanently"));
 });
 
-test("isImportantLine matches k8s/linter 'Warning' (case-sensitive)", () => {
+test("isImportantLine matches k8s/linter 'Warning' (case-sensitive)", async () => {
 	assert.ok(isImportantLine("Warning: kubelet had a hiccup"));
 	assert.ok(isImportantLine("Warning  BackOff  pod restart"));
 	// Lowercase prose "warning" should NOT match (avoids noise):
@@ -59,7 +60,7 @@ test("isImportantLine matches k8s/linter 'Warning' (case-sensitive)", () => {
 	assert.ok(!isImportantLine("She gave him a warning look."));
 });
 
-test("isImportantLine matches compiler/linter diagnostic ids", () => {
+test("isImportantLine matches compiler/linter diagnostic ids", async () => {
 	assert.ok(isImportantLine("error TS2304: Cannot find name 'foo'"));
 	assert.ok(isImportantLine("warning CS0246: type not found"));
 	assert.ok(isImportantLine("ESLint: RULE012 unexpected var"));
@@ -69,7 +70,7 @@ test("isImportantLine matches compiler/linter diagnostic ids", () => {
 
 // --- extractImportantLines unit tests ---
 
-test("extractImportantLines returns only important lines, preserving order", () => {
+test("extractImportantLines returns only important lines, preserving order", async () => {
 	const text = [
 		"normal line 1",
 		"Error: something broke",
@@ -85,27 +86,27 @@ test("extractImportantLines returns only important lines, preserving order", () 
 	assert.equal(lines[2], "HTTP 502 Bad Gateway");
 });
 
-test("extractImportantLines caps at maxLines", () => {
+test("extractImportantLines caps at maxLines", async () => {
 	const lines: string[] = [];
 	for (let i = 0; i < 50; i++) lines.push(`Error: failure #${i}`);
 	assert.equal(extractImportantLines(lines.join("\n"), 10).length, 10);
 	assert.equal(extractImportantLines(lines.join("\n"), 30).length, 30);
 });
 
-test("extractImportantLines handles \\r\\n line endings", () => {
+test("extractImportantLines handles \\r\\n line endings", async () => {
 	const text = "line1\r\nError: bad\r\nline3\r\nWarning  BackOff\r\n";
 	const lines = extractImportantLines(text);
 	assert.deepEqual(lines, ["Error: bad", "Warning  BackOff"]);
 });
 
-test("extractImportantLines returns [] for empty / no-match input", () => {
+test("extractImportantLines returns [] for empty / no-match input", async () => {
 	assert.deepEqual(extractImportantLines("", 10), []);
 	assert.deepEqual(extractImportantLines("nothing important here\njust prose", 10), []);
 });
 
 // --- splitWithImportantLines unit tests ---
 
-test("splitWithImportantLines returns input verbatim when value <= maxChars", () => {
+test("splitWithImportantLines returns input verbatim when value <= maxChars", async () => {
 	const r = splitWithImportantLines("short", 100);
 	assert.equal(r.head, "short");
 	assert.equal(r.tail, "");
@@ -113,7 +114,7 @@ test("splitWithImportantLines returns input verbatim when value <= maxChars", ()
 	assert.equal(r.baseDropped, 0);
 });
 
-test("splitWithImportantLines returns head(75%)/tail(25%) with no important lines when preserveImportant:false", () => {
+test("splitWithImportantLines returns head(75%)/tail(25%) with no important lines when preserveImportant:false", async () => {
 	const value = "A".repeat(100) + "Error: in middle\n" + "B".repeat(100);
 	const maxChars = 80;
 	const r = splitWithImportantLines(value, maxChars, {
@@ -125,14 +126,14 @@ test("splitWithImportantLines returns head(75%)/tail(25%) with no important line
 	assert.equal(r.baseDropped, value.length - maxChars);
 });
 
-test("splitWithImportantLines picks important lines from middle when they fit in slack", () => {
+test("splitWithImportantLines picks important lines from middle when they fit in slack", async () => {
 	const value = "HEAD".repeat(400) + "\n" + "Error: middle\n" + "Warning  BackOff\n" + "TAIL".repeat(100);
 	const r = splitWithImportantLines(value, 1000, { slackFactor: 0.15 });
 	assert.ok(r.importantLines.includes("Error: middle"), "error line must be preserved");
 	assert.ok(r.importantLines.includes("Warning  BackOff"), "warning line must be preserved");
 });
 
-test("splitWithImportantLines picks whole lines only (does not slice mid-line)", () => {
+test("splitWithImportantLines picks whole lines only (does not slice mid-line)", async () => {
 	// 15% of 100 = 15 chars slack. Each line is 20+ chars → no line should be picked.
 	const value = "H".repeat(200) + "\n" + "Error: way too long to fit the budget\n" + "T".repeat(100);
 	const r = splitWithImportantLines(value, 100, { slackFactor: 0.15 });
@@ -142,7 +143,7 @@ test("splitWithImportantLines picks whole lines only (does not slice mid-line)",
 	}
 });
 
-test("splitWithImportantLines caps candidate scan at maxImportantLines", () => {
+test("splitWithImportantLines caps candidate scan at maxImportantLines", async () => {
 	// 100 important lines but maxImportantLines=5.
 	const lines = Array.from({ length: 100 }, (_, i) => `Error: line ${i}`);
 	const value = "H".repeat(500) + "\n" + lines.join("\n") + "\n" + "T".repeat(500);
@@ -152,7 +153,7 @@ test("splitWithImportantLines caps candidate scan at maxImportantLines", () => {
 
 // --- compactString integration (REAL function) ---
 
-test("compactString (real) preserves an error line from the middle (default opts)", () => {
+test("compactString (real) preserves an error line from the middle (default opts)", async () => {
 	const maxChars = 4096;
 	const head = "A".repeat(5000);
 	const middle = ["normal line", "Error: crash at runtime", "another normal line"].join("\n");
@@ -165,7 +166,7 @@ test("compactString (real) preserves an error line from the middle (default opts
 	assert.match(result, /important lines preserved/, "marker must mention important-line preservation");
 });
 
-test("compactString (real) with preserveImportant:false does NOT scan middle", () => {
+test("compactString (real) with preserveImportant:false does NOT scan middle", async () => {
 	const maxChars = 4096;
 	const head = "A".repeat(5000);
 	const middle = "Error: should NOT be preserved";
@@ -179,7 +180,7 @@ test("compactString (real) with preserveImportant:false does NOT scan middle", (
 	assert.ok(!result.includes("important lines preserved"), "no important-line marker when preserveImportant:false");
 });
 
-test("compactString (real) without important lines uses the old marker (L4 backward-compat)", () => {
+test("compactString (real) without important lines uses the old marker (L4 backward-compat)", async () => {
 	const value = "A".repeat(2000) + "B".repeat(5000) + "Z".repeat(2000);
 	const result = compactString(value, 4096);
 	// Exact old marker — no "+ K important lines" suffix:
@@ -187,7 +188,7 @@ test("compactString (real) without important lines uses the old marker (L4 backw
 	assert.ok(!result.includes("important lines preserved"));
 });
 
-test("compactString (real) monotonic-shrink still holds with important-line scanning", () => {
+test("compactString (real) monotonic-shrink still holds with important-line scanning", async () => {
 	const threshold = 8192;
 	for (let over = 1; over <= 60; over++) {
 		const value = "y".repeat(threshold + over);
@@ -196,7 +197,7 @@ test("compactString (real) monotonic-shrink still holds with important-line scan
 	}
 });
 
-test("compactString (real) under-threshold returns input unchanged (with or without preserveImportant)", () => {
+test("compactString (real) under-threshold returns input unchanged (with or without preserveImportant)", async () => {
 	const value = "short text without anything important";
 	assert.equal(compactString(value, 8192), value);
 	assert.equal(compactString(value, 8192, { preserveImportant: false }), value);
@@ -213,9 +214,9 @@ function writeTempFile(content: string): {
 	fs.writeFileSync(filePath, content, "utf-8");
 	return {
 		filePath,
-		cleanup: () => {
+		cleanup: async () => {
 			try {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await removeDirWithRetry(dir);
 			} catch {
 				/* best-effort */
 			}
@@ -223,7 +224,7 @@ function writeTempFile(content: string): {
 	};
 }
 
-test("readIfSmall (real) preserves a diagnostic line from the middle of a large file", () => {
+test("readIfSmall (real) preserves a diagnostic line from the middle of a large file", async () => {
 	const head = "H".repeat(10_000);
 	const middle = "normal\nError: file read failed\nmore normal\n";
 	const tail = "T".repeat(10_000);
@@ -235,11 +236,11 @@ test("readIfSmall (real) preserves a diagnostic line from the middle of a large 
 		assert.ok(out.includes("Error: file read failed"), "important middle line must be preserved");
 		assert.ok(out.includes("T".repeat(50)), "tail must be preserved");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("readIfSmall (real) uses old marker (L4 backward-compat) when no important lines", () => {
+test("readIfSmall (real) uses old marker (L4 backward-compat) when no important lines", async () => {
 	const content = "H".repeat(40_000) + "M".repeat(20_000) + "T".repeat(40_000);
 	const { filePath, cleanup } = writeTempFile(content);
 	try {
@@ -248,12 +249,12 @@ test("readIfSmall (real) uses old marker (L4 backward-compat) when no important 
 		assert.match(out, /\[pi-crew truncated \d+ chars, head\+tail preserved\]/);
 		assert.ok(!out.includes("important lines preserved"));
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
 // --- IMPORTANT_LINE_PATTERNS export sanity ---
 
-test("IMPORTANT_LINE_PATTERNS has exactly 5 patterns (matches Hypa classifier)", () => {
+test("IMPORTANT_LINE_PATTERNS has exactly 5 patterns (matches Hypa classifier)", async () => {
 	assert.equal(IMPORTANT_LINE_PATTERNS.length, 5);
 });

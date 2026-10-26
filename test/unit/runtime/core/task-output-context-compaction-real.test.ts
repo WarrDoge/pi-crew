@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 import { MAX_RESULT_INLINE_BYTES, readIfSmall } from "../../../../src/runtime/task-output-context.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * These tests call the REAL exported `readIfSmall` function — no mirror.
@@ -21,9 +22,9 @@ function writeTempFile(content: string): string {
 	return filePath;
 }
 
-function cleanup(filePath: string): void {
+async function cleanup(filePath: string): Promise<void> {
 	try {
-		fs.rmSync(path.dirname(filePath), { recursive: true, force: true });
+		await removeDirWithRetry(path.dirname(filePath));
 	} catch {
 		// best-effort
 	}

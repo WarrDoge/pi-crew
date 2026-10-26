@@ -40,6 +40,7 @@ import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig, WorkflowStep } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ─── Shared fixtures (task-runner-characterization.test.ts pattern) ─────
 
@@ -203,7 +204,7 @@ test("[triage-1] default-off: classifierEnabled absent → classify never called
 		} catch {
 			/* fine if already gone */
 		}
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -247,7 +248,7 @@ test("[triage-2] enabled + classifier answers PERMANENT → queued retry skipped
 		} catch {
 			/* fine if already gone */
 		}
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -289,7 +290,7 @@ test("[triage-3] enabled + classifier answers TRANSIENT → retry proceeds and c
 		} catch {
 			/* fine if already gone */
 		}
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -329,7 +330,7 @@ test("[triage-4] enabled + no credentialed classifier → fallback (retry procee
 		} catch {
 			/* fine if already gone */
 		}
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -392,6 +393,6 @@ test("[triage-6] helper contract: classifier answer informs the decision + event
 		const call = registry.access;
 		assert.ok(call.includes("classify"));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -15,6 +15,7 @@ import { flushEventLogBuffer, readEvents } from "../../../../src/state/event-log
 import { createRunManifest, loadRunManifestById, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * Wave 13 (F2, GAP-1) — live-executor tool heartbeat timer.
@@ -285,7 +286,7 @@ test("[t2] runLiveTask clears the heartbeat timer in its finally — normal comp
 	} finally {
 		spy.restore();
 		env.restore();
-		fs.rmSync(fixture.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(fixture.cwd);
 	}
 });
 
@@ -323,7 +324,7 @@ test("[t2b] runLiveTask clears the heartbeat timer even when the attempt throws"
 	} finally {
 		spy.restore();
 		env.restore();
-		fs.rmSync(fixture.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(fixture.cwd);
 	}
 });
 
@@ -405,6 +406,6 @@ test("[t3] a tick while the tool is in flight refreshes heartbeat.lastSeenAt and
 	} finally {
 		setLiveToolHeartbeatTimerForTests(null);
 		env.restore();
-		fs.rmSync(fixture.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(fixture.cwd);
 	}
 });

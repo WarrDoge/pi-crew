@@ -27,14 +27,15 @@ import {
 } from "../../../../src/runtime/task-output-context.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import type { WorkflowStep } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeTmpDir(prefix: string): { dir: string; cleanup: () => void } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	return {
 		dir,
-		cleanup: () => {
+		cleanup: async () => {
 			try {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await removeDirWithRetry(dir);
 			} catch {
 				/* best-effort */
 			}
@@ -70,7 +71,7 @@ function buildFixtures(dir: string, depResultChars: number) {
 	return { manifest, depTask, mainTask, step, rawResult, fullResultPath };
 }
 
-test("dependency result > tee threshold (1.25× MAX_RESULT_INLINE_BYTES) tees the full output", () => {
+test("dependency result > tee threshold (1.25× MAX_RESULT_INLINE_BYTES) tees the full output", async () => {
 	const { dir, cleanup } = makeTmpDir("fixb-large-");
 	try {
 		const chars = Math.ceil(MAX_RESULT_INLINE_BYTES * 1.25) + 100; // >40K → tee fires
@@ -83,11 +84,11 @@ test("dependency result > tee threshold (1.25× MAX_RESULT_INLINE_BYTES) tees th
 		assert.ok(fs.existsSync(dep.fullOutputPath!), "tee file must exist on disk");
 		assert.equal(fs.readFileSync(dep.fullOutputPath!, "utf-8"), rawResult, "tee file must equal the raw result");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("renderDependencyOutputContext surfaces the recovery hint for dependencies (matches sharedReads wording)", () => {
+test("renderDependencyOutputContext surfaces the recovery hint for dependencies (matches sharedReads wording)", async () => {
 	const { dir, cleanup } = makeTmpDir("fixb-hint-");
 	try {
 		const chars = MAX_RESULT_INLINE_BYTES * 2; // well above tee threshold
@@ -104,11 +105,11 @@ test("renderDependencyOutputContext surfaces the recovery hint for dependencies 
 		// The head+tail inline summary is still present.
 		assert.match(rendered, /## dep-1 \(explorer\)/);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("budget-trimmed dependency context still surfaces a recovery pointer (no lost middle)", () => {
+test("budget-trimmed dependency context still surfaces a recovery pointer (no lost middle)", async () => {
 	const { dir, cleanup } = makeTmpDir("fixb-hint-trim-");
 	try {
 		const chars = MAX_RESULT_INLINE_BYTES * 2; // same oversized fixture
@@ -125,11 +126,11 @@ test("budget-trimmed dependency context still surfaces a recovery pointer (no lo
 			"trimmed form must surface the relative recovery pointer",
 		);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("small dependency result (< MAX_RESULT_INLINE_BYTES) does NOT tee and has no hint", () => {
+test("small dependency result (< MAX_RESULT_INLINE_BYTES) does NOT tee and has no hint", async () => {
 	const { dir, cleanup } = makeTmpDir("fixb-small-");
 	try {
 		const chars = 500; // well below the 32K inline threshold
@@ -142,11 +143,11 @@ test("small dependency result (< MAX_RESULT_INLINE_BYTES) does NOT tee and has n
 		// Full content survives inline (no truncation).
 		assert.ok(rendered.includes(rawResult));
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("re-reading the hinted path recovers the dropped middle (no circular re-read)", () => {
+test("re-reading the hinted path recovers the dropped middle (no circular re-read)", async () => {
 	const { dir, cleanup } = makeTmpDir("fixb-recover-");
 	try {
 		// A structured result where the "middle" carries a unique sentinel that
@@ -187,6 +188,6 @@ test("re-reading the hinted path recovers the dropped middle (no circular re-rea
 		const recovered = fs.readFileSync(dep.fullOutputPath!, "utf-8");
 		assert.ok(recovered.includes(sentinel), "tee full output must contain the dropped sentinel");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });

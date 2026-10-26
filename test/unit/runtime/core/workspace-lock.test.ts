@@ -20,6 +20,7 @@ import {
 	workspaceLockPath,
 } from "../../../../src/runtime/workspace-lock.ts";
 import { clearProjectRootCache } from "../../../../src/utils/paths.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeTmpCwd(): string {
 	clearProjectRootCache(); // findRepoRoot has a global cache — clear so each tmpdir resolves correctly.
@@ -48,8 +49,8 @@ describe("workspace-lock lockfile location + contents", () => {
 	beforeEach(() => {
 		cwd = makeTmpCwd();
 	});
-	afterEach(() => {
-		fs.rmSync(cwd, { recursive: true, force: true });
+	afterEach(async () => {
+		await removeDirWithRetry(cwd);
 	});
 
 	it("writes the lockfile under .crew/state/workspace-locks/<sha256>.lock", async () => {
@@ -111,8 +112,8 @@ describe("workspace-lock PID-recycling detection (startTime mismatch)", () => {
 	beforeEach(() => {
 		cwd = makeTmpCwd();
 	});
-	afterEach(() => {
-		fs.rmSync(cwd, { recursive: true, force: true });
+	afterEach(async () => {
+		await removeDirWithRetry(cwd);
 	});
 
 	it("reclaims a lock whose pid's current startTime differs from the lockfile (PID recycled)", async () => {
@@ -150,8 +151,8 @@ describe("workspace-lock heartbeat staleness", () => {
 	beforeEach(() => {
 		cwd = makeTmpCwd();
 	});
-	afterEach(() => {
-		fs.rmSync(cwd, { recursive: true, force: true });
+	afterEach(async () => {
+		await removeDirWithRetry(cwd);
 	});
 
 	it("reclaims a lock whose heartbeat is older than the threshold", async () => {
@@ -221,8 +222,8 @@ describe("workspace-lock contention policy", () => {
 	beforeEach(() => {
 		cwd = makeTmpCwd();
 	});
-	afterEach(() => {
-		fs.rmSync(cwd, { recursive: true, force: true });
+	afterEach(async () => {
+		await removeDirWithRetry(cwd);
 	});
 
 	it("default: concurrent goals on the same cwd SERIALIZE (queue then proceed on release)", async () => {
@@ -283,8 +284,8 @@ describe("refreshWorkspaceLockHeartbeat (WI-2 / DR-02 R4-3)", () => {
 	beforeEach(() => {
 		cwd = makeTmpCwd();
 	});
-	afterEach(() => {
-		fs.rmSync(cwd, { recursive: true, force: true });
+	afterEach(async () => {
+		await removeDirWithRetry(cwd);
 	});
 
 	it("re-stamps ONLY the heartbeat of a lock still owned by goalId+pid, preserving every other field", async () => {
@@ -374,8 +375,8 @@ describe("heartbeat refresh vs staleness (WI-2 regression: live goal must not be
 	beforeEach(() => {
 		cwd = makeTmpCwd();
 	});
-	afterEach(() => {
-		fs.rmSync(cwd, { recursive: true, force: true });
+	afterEach(async () => {
+		await removeDirWithRetry(cwd);
 	});
 
 	it("WITHOUT refresh: a held lock goes stale after 60s and a second acquire force-steals it (existing behavior pinned)", async () => {
@@ -455,8 +456,8 @@ describe("reclaimStaleLocks", () => {
 	beforeEach(() => {
 		cwd = makeTmpCwd();
 	});
-	afterEach(() => {
-		fs.rmSync(cwd, { recursive: true, force: true });
+	afterEach(async () => {
+		await removeDirWithRetry(cwd);
 	});
 
 	it("reclaims stale locks (old heartbeat) and leaves live locks untouched", () => {
@@ -556,7 +557,7 @@ describe("Wave-3 ownership verification (R3-M-B1/FS4)", () => {
 			assert.equal(onDisk.goalId, "goal_new", "claimed lock provably owned (goalId)");
 			assert.equal(onDisk.pid, process.pid, "claimed lock provably owned (pid)");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -573,11 +574,11 @@ describe("Wave-3 ownership verification (R3-M-B1/FS4)", () => {
 			assert.equal(after.heartbeat, before.heartbeat + 5000, "heartbeat re-stamped");
 			assert.equal(after.goalId, "goal_keep", "identity preserved");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("refresh-mismatch returns false and NEVER writes (missing lock, foreign owner)", () => {
+	it("refresh-mismatch returns false and NEVER writes (missing lock, foreign owner)", async () => {
 		const cwd = makeTmpCwd();
 		try {
 			const lockPath = workspaceLockPath(cwd);
@@ -587,7 +588,7 @@ describe("Wave-3 ownership verification (R3-M-B1/FS4)", () => {
 			assert.equal(refreshWorkspaceLockHeartbeat(lockPath, "goal_x"), false, "foreign owner → false");
 			assert.equal(fs.readFileSync(lockPath, "utf-8"), foreign, "foreign lockfile never clobbered");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

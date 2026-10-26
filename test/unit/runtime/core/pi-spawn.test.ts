@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { getPiSpawnCommand } from "../../../../src/runtime/pi-spawn.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("getPiSpawnCommand preserves requested args", () => {
 	const spec = getPiSpawnCommand(["--version"]);
@@ -11,7 +12,7 @@ test("getPiSpawnCommand preserves requested args", () => {
 	assert.ok(spec.args.includes("--version"));
 });
 
-test("PI_TEAMS_PI_BIN accepts symlink targets in npm-style lib/node_modules", () => {
+test("PI_TEAMS_PI_BIN accepts symlink targets in npm-style lib/node_modules", async () => {
 	// Skip on macOS/Windows in CI — symlink resolution via realpathSync.native
 	// has environment-specific behavior in GitHub Actions macOS runners where
 	// /var/folders is a symlink to /private/var/folders and the validation
@@ -41,6 +42,6 @@ test("PI_TEAMS_PI_BIN accepts symlink targets in npm-style lib/node_modules", ()
 		else process.env.PI_TEAMS_PI_BIN = previousBin;
 		if (previousPrefix === undefined) delete process.env.npm_config_prefix;
 		else process.env.npm_config_prefix = previousPrefix;
-		fs.rmSync(tempPrefix, { recursive: true, force: true });
+		await removeDirWithRetry(tempPrefix);
 	}
 });

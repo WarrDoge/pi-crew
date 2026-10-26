@@ -30,6 +30,7 @@ import type { TaskCheckpointState, TeamTaskState } from "../../../../src/state/t
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { resolveCanonicalDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -53,16 +54,16 @@ function makeTempDir(prefix: string): string {
 	return resolveCanonicalDir(dir);
 }
 
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T | Promise<T>): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = makeTempDir("pi-crew-f3-home-");
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
@@ -80,7 +81,7 @@ function makeTask(id: string, overrides: Partial<TeamTaskState> = {}): TeamTaskS
 }
 
 test("(f3-1) checkpointTask without identity keeps the legacy record shape", () => {
-	withIsolatedHome(() => {
+	withIsolatedHome(async () => {
 		const cwd = makeTempDir("pi-crew-f3-1-");
 		try {
 			const created = createRunManifest({ cwd, team, workflow, goal: "f3-1 legacy checkpoint shape" });
@@ -94,13 +95,13 @@ test("(f3-1) checkpointTask without identity keeps the legacy record shape", () 
 				"no identity keys may appear when the caller passes none",
 			);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
 
 test("(f3-2) checkpointTask spreads a known identity", () => {
-	withIsolatedHome(() => {
+	withIsolatedHome(async () => {
 		const cwd = makeTempDir("pi-crew-f3-2-");
 		try {
 			const created = createRunManifest({ cwd, team, workflow, goal: "f3-2 identity spread" });
@@ -117,7 +118,7 @@ test("(f3-2) checkpointTask spreads a known identity", () => {
 			assert.equal(next.checkpoint?.childStartTime, "998877");
 			assert.equal(next.checkpoint?.childUid, 1000);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
@@ -157,7 +158,7 @@ test("(f3-5) MAJOR #4: a later phase transition CARRIES the spawn-time identity 
 	// with NO identity argument. Pre-fix those calls rebuilt the checkpoint from
 	// scratch and silently dropped childPgid/childStartTime/childUid, so the
 	// pid-proof F3 persists was gone exactly when a reaper needs it.
-	withIsolatedHome(() => {
+	withIsolatedHome(async () => {
 		const cwd = makeTempDir("pi-crew-f3-5-");
 		try {
 			const created = createRunManifest({ cwd, team, workflow, goal: "f3-5 identity carry-over" });
@@ -190,13 +191,13 @@ test("(f3-5) MAJOR #4: a later phase transition CARRIES the spawn-time identity 
 			// false pid proof (it would refuse the real child, or match a stranger).
 			assert.equal(overridden.task.checkpoint?.childUid, undefined, "a new child pid must not carry the old child's uid over");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
 
 test("(f3-6) MINOR #6: identity is carried over ONLY while childPid is unchanged", () => {
-	withIsolatedHome(() => {
+	withIsolatedHome(async () => {
 		const cwd = makeTempDir("pi-crew-f3-6-");
 		try {
 			const created = createRunManifest({ cwd, team, workflow, goal: "f3-6 identity carry-over scope" });
@@ -222,7 +223,7 @@ test("(f3-6) MINOR #6: identity is carried over ONLY while childPid is unchanged
 			assert.equal(respawned.task.checkpoint?.childStartTime, undefined, "old starttime must not survive a new child pid");
 			assert.equal(respawned.task.checkpoint?.childUid, undefined, "old uid must not survive a new child pid");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

@@ -9,6 +9,7 @@ import { readEvents } from "../../../../src/state/event-log/event-log.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "guard",
@@ -25,18 +26,18 @@ const workflow: WorkflowConfig = {
 	steps: [{ id: "execute", role: "executor", task: "Execute" }],
 };
 
-function withTranscript(lines: unknown[], fn: (file: string) => void): void {
+async function withTranscript(lines: unknown[], fn: (file: string) => void): Promise<void> {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-completion-guard-"));
 	try {
 		const file = path.join(dir, "transcript.jsonl");
 		fs.writeFileSync(file, lines.map((line) => JSON.stringify(line)).join("\n"), "utf-8");
 		fn(file);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 }
 
-test("completion guard expects mutations only for mutating roles", () => {
+test("completion guard expects mutations only for mutating roles", async () => {
 	assert.equal(
 		expectsImplementationMutation({
 			role: "executor",
@@ -67,8 +68,8 @@ test("completion guard expects mutations only for mutating roles", () => {
 	);
 });
 
-test("completion guard detects toolCall edit/write mutations", () => {
-	withTranscript(
+test("completion guard detects toolCall edit/write mutations", async () => {
+	await withTranscript(
 		[
 			{
 				message: {
@@ -89,8 +90,8 @@ test("completion guard detects toolCall edit/write mutations", () => {
 	);
 });
 
-test("completion guard detects tool_execution_start bash mutation", () => {
-	withTranscript(
+test("completion guard detects tool_execution_start bash mutation", async () => {
+	await withTranscript(
 		[
 			{
 				type: "tool_execution_start",
@@ -109,10 +110,10 @@ test("completion guard detects tool_execution_start bash mutation", () => {
 	);
 });
 
-test("completion guard detects replace_in_file, insert, delete_files, patch tools", () => {
+test("completion guard detects replace_in_file, insert, delete_files, patch tools", async () => {
 	const mutatingTools = ["replace_in_file", "insert", "delete_files", "create_file", "overwrite", "patch"];
 	for (const tool of mutatingTools) {
-		withTranscript(
+		await withTranscript(
 			[
 				{
 					message: {
@@ -132,10 +133,10 @@ test("completion guard detects replace_in_file, insert, delete_files, patch tool
 	}
 });
 
-test("completion guard detects sed -i, tee, wget -O, curl -o as bash mutations", () => {
+test("completion guard detects sed -i, tee, wget -O, curl -o as bash mutations", async () => {
 	const mutatingCommands = ["sed -i 's/a/b/' file.txt", "tee output.log", "wget https://x -O out", "curl https://x -o out"];
 	for (const command of mutatingCommands) {
-		withTranscript(
+		await withTranscript(
 			[
 				{
 					type: "tool_execution_start",
@@ -155,8 +156,8 @@ test("completion guard detects sed -i, tee, wget -O, curl -o as bash mutations",
 	}
 });
 
-test("completion guard warns for implementation without mutation but not read-only commands", () => {
-	withTranscript(
+test("completion guard warns for implementation without mutation but not read-only commands", async () => {
+	await withTranscript(
 		[
 			{
 				type: "tool_execution_start",
@@ -180,7 +181,7 @@ test("completion guard warns for implementation without mutation but not read-on
 // NEW-P4 (TOCTOU): transcriptText now reads via readFileSync + ENOENT catch
 // instead of existsSync+read. A missing transcriptPath must fall back to stdout
 // without throwing; a present transcript still takes precedence.
-test("completion guard falls back to stdout when transcript file is missing (NEW-P4)", () => {
+test("completion guard falls back to stdout when transcript file is missing (NEW-P4)", async () => {
 	const missingPath = path.join(os.tmpdir(), "pi-crew-nonexistent-transcript-" + Date.now() + ".jsonl");
 	const result = evaluateCompletionMutationGuard({
 		role: "executor",
@@ -196,8 +197,8 @@ test("completion guard falls back to stdout when transcript file is missing (NEW
 	assert.equal(result.observedMutation, true);
 });
 
-test("completion guard reads transcript file when present (NEW-P4)", () => {
-	withTranscript(
+test("completion guard reads transcript file when present (NEW-P4)", async () => {
+	await withTranscript(
 		[
 			{
 				type: "tool_execution_start",
@@ -218,7 +219,7 @@ test("completion guard reads transcript file when present (NEW-P4)", () => {
 	);
 });
 
-test("task attention events dedupe by task and reason", () => {
+test("task attention events dedupe by task and reason", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-attention-dedupe-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -242,6 +243,6 @@ test("task attention events dedupe by task and reason", () => {
 		assert.equal(appendTaskAttentionEvent(input), false);
 		assert.equal(readEvents(manifest.eventsPath).filter((event) => event.type === "task.attention").length, 1);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

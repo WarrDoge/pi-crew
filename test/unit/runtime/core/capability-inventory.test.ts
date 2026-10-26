@@ -4,8 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import { buildCapabilityInventory } from "../../../../src/runtime/capability-inventory.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
-test("capability inventory includes builtin teams, workflows, and agents", () => {
+test("capability inventory includes builtin teams, workflows, and agents", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-cap-inv-"));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	try {
@@ -27,11 +28,11 @@ test("capability inventory includes builtin teams, workflows, and agents", () =>
 			assert.ok(["active", "disabled", "shadowed", "missing"].includes(item.state));
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("capability inventory respects disabledCapabilities policy", () => {
+test("capability inventory respects disabledCapabilities policy", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-cap-inv2-"));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	try {
@@ -45,11 +46,11 @@ test("capability inventory respects disabledCapabilities policy", () => {
 		assert.equal(match.state, "disabled", "expected team to be disabled by policy");
 		assert.equal(match.disabledReason, "disabled by policy");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("capability inventory with empty disabledCapabilities returns all active", () => {
+test("capability inventory with empty disabledCapabilities returns all active", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-cap-inv3-"));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	try {
@@ -59,10 +60,10 @@ test("capability inventory with empty disabledCapabilities returns all active", 
 		const disabledItems = inventory.filter((item) => item.state === "disabled" && item.disabledReason === "disabled by policy");
 		assert.equal(disabledItems.length, 0, "no items should be disabled by policy with empty array");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
-test("capability inventory marks shadowed resources when user/project has same name as builtin", () => {
+test("capability inventory marks shadowed resources when user/project has same name as builtin", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-cap-shadow-"));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	try {
@@ -75,6 +76,6 @@ test("capability inventory marks shadowed resources when user/project has same n
 			assert.ok(item.shadowedBy, `shadowed item ${item.id} should have shadowedBy`);
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -27,12 +27,13 @@ import {
 	readCrewAgentEventsCursor,
 } from "../../../../src/runtime/crew-agent-records.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const createdTmpDirs: string[] = [];
-after(() => {
+after(async () => {
 	for (const d of createdTmpDirs) {
 		try {
-			fs.rmSync(d, { recursive: true, force: true });
+			await cleanupStateRoot(d);
 		} catch {
 			/* best-effort cleanup */
 		}

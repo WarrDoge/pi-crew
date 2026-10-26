@@ -61,6 +61,7 @@ import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -174,7 +175,7 @@ test("[u11-1a] resolveTaskRuntimeKind: inert embedded policy is byte-identical t
 	}
 });
 
-test("[u11-1b] planEmbeddedTier: default-off / non-opted role → undefined plan, no events", () => {
+test("[u11-1b] planEmbeddedTier: default-off / non-opted role → undefined plan, no events", async () => {
 	const { cwd, manifest, task } = makeFixture();
 	try {
 		for (const runtimeConfig of [undefined, {}, { embeddedWorkers: {} }, { embeddedWorkers: { roles: ["explorer"] } }] as Array<
@@ -196,7 +197,7 @@ test("[u11-1b] planEmbeddedTier: default-off / non-opted role → undefined plan
 			"default-off must emit NO tier.* events",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -303,7 +304,7 @@ test("[u11-2d] planEmbeddedTier: routes embedded + emits tier.decision; base liv
 			undefined,
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -323,7 +324,7 @@ test("[u11-5a] depth guard: pre-U11 rule unchanged — live-session at depth>0 s
 	);
 });
 
-test("[u11-5b] depth guard EXTENDED to the embedded upgrade: opted-in role at depth>0 stays child-process", () => {
+test("[u11-5b] depth guard EXTENDED to the embedded upgrade: opted-in role at depth>0 stays child-process", async () => {
 	assert.equal(
 		resolveTaskRuntimeKind("child-process", "explorer", undefined, NESTED_ENV, { policy: POLICY_ON }),
 		"child-process",
@@ -355,7 +356,7 @@ test("[u11-5b] depth guard EXTENDED to the embedded upgrade: opted-in role at de
 			"planner is inert when nested (no mock)",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -378,7 +379,7 @@ test("[u11-3a] fault ledger: persistEmbeddedFault round-trips durably through ta
 		assert.ok(reloadedTask, "persisted task must be reloadable");
 		assert.equal(readEmbeddedFaultCount(reloadedTask!), 2);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -420,7 +421,7 @@ test("[u11-3b] runEmbeddedTier: fault #1 stays live (counted, tier.fault), fault
 		assert.equal(fallbackEvent.faultCount, 2);
 	} finally {
 		__test_resetEmbeddedCeiling();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -467,7 +468,7 @@ test("[u11-3c] runEmbeddedTier: aborted and capacity-rejected faults NEVER count
 		assert.equal(readEmbeddedFaultCount(task), 0, "capacity rejection is a routing signal, not a worker fault");
 	} finally {
 		__test_resetEmbeddedCeiling();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -508,11 +509,11 @@ test("[u11-3d] runEmbeddedTier: thrown attempt counts as session-error; rethrows
 			assert.ok(afterThrow, "task persisted after thrown attempt");
 			assert.equal(readEmbeddedFaultCount(afterThrow!), 1, "thrown attempt counted toward the ledger");
 		} finally {
-			fs.rmSync(fresh.cwd, { recursive: true, force: true });
+			await removeDirWithRetry(fresh.cwd);
 		}
 	} finally {
 		__test_resetEmbeddedCeiling();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -538,7 +539,7 @@ test("[u11-3e] planEmbeddedTier: sticky downgrade after 2 faults → subprocess 
 			"sticky downgrade emits tier.decision(reason=fault-threshold)",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -592,7 +593,7 @@ test("[u11-4a] shared budget: an in-flight embedded attempt holds the SAME globa
 	} finally {
 		__test_resetCap(prevCap);
 		__test_resetEmbeddedCeiling();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -640,7 +641,7 @@ test("[u11-4b] embedded ceiling: fail-fast reroute (never queue) when maxConcurr
 	} finally {
 		__test_resetCap(prevCap);
 		__test_resetEmbeddedCeiling();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -693,7 +694,7 @@ test("[u11-e2e-1] default-off no-op at runTeamTask level: child-process mock pat
 		);
 	} finally {
 		restoreEnv(prev);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -733,7 +734,7 @@ test("[u11-e2e-2] embedded routing E2E: opted-in role runs the in-process live-s
 		);
 	} finally {
 		restoreEnv(prev);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

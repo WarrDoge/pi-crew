@@ -8,6 +8,7 @@ import { writeArtifact } from "../../../../src/state/stores/artifact-store.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "security",
@@ -17,7 +18,7 @@ const team: TeamConfig = {
 	roles: [{ name: "executor", agent: "executor" }],
 };
 
-function isUsableDirectoryLink(linkPath: string): boolean {
+async function isUsableDirectoryLink(linkPath: string): Promise<boolean> {
 	try {
 		fs.lstatSync(linkPath);
 		fs.realpathSync.native(linkPath);
@@ -27,7 +28,7 @@ function isUsableDirectoryLink(linkPath: string): boolean {
 			fs.unlinkSync(linkPath);
 		} catch {
 			try {
-				fs.rmSync(linkPath, { recursive: true, force: true });
+				await removeDirWithRetry(linkPath);
 			} catch {
 				/* ignore cleanup failure */
 			}
@@ -36,21 +37,21 @@ function isUsableDirectoryLink(linkPath: string): boolean {
 	}
 }
 
-function tryDirectorySymlink(target: string, linkPath: string): boolean {
+async function tryDirectorySymlink(target: string, linkPath: string): Promise<boolean> {
 	try {
 		fs.symlinkSync(target, linkPath, "dir");
-		return isUsableDirectoryLink(linkPath);
+		return await isUsableDirectoryLink(linkPath);
 	} catch {
 		try {
 			fs.symlinkSync(target, linkPath, "junction");
-			return isUsableDirectoryLink(linkPath);
+			return await isUsableDirectoryLink(linkPath);
 		} catch {
 			return false;
 		}
 	}
 }
 
-test("artifact and shared output paths reject traversal", () => {
+test("artifact and shared output paths reject traversal", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-artifact-traversal-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -103,11 +104,11 @@ test("artifact and shared output paths reject traversal", () => {
 		);
 		assert.equal(fs.existsSync(path.join(manifest.artifactsRoot, "..", "escape.txt")), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("artifact writes reject symlinked artifacts root escapes", (t) => {
+test("artifact writes reject symlinked artifacts root escapes", async (t) => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-artifact-root-symlink-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -118,8 +119,8 @@ test("artifact writes reject symlinked artifacts root escapes", (t) => {
 		});
 		const outside = path.join(cwd, "outside-artifacts");
 		fs.mkdirSync(outside, { recursive: true });
-		fs.rmSync(manifest.artifactsRoot, { recursive: true, force: true });
-		if (!tryDirectorySymlink(outside, manifest.artifactsRoot)) {
+		await removeDirWithRetry(manifest.artifactsRoot);
+		if (!(await tryDirectorySymlink(outside, manifest.artifactsRoot))) {
 			t.skip("directory symlinks unavailable on this platform");
 			return;
 		}
@@ -135,6 +136,6 @@ test("artifact writes reject symlinked artifacts root escapes", (t) => {
 		);
 		assert.equal(fs.existsSync(path.join(outside, "results", "task.md")), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

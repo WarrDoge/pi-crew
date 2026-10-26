@@ -41,6 +41,7 @@ import type { SpecRecord, TeamRunManifest, TeamTaskState } from "../../../../src
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig, WorkflowStep } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ─── Fixtures (mirrors task-runner-characterization.test.ts) ────────
 
@@ -186,7 +187,7 @@ test("[rr013-ac1] surfaceLost survives runTeamTask: degraded child → needs_att
 		const persisted = result.tasks.find((t) => t.id === task.id);
 		assert.equal(persisted?.status, "needs_attention");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -240,7 +241,7 @@ test("[rr013-ac2] rawFinalText survives runTeamTask: footer found by the spec ga
 		assert.equal(t.specGate!.badge, undefined, "full coverage must pass without an `unverified` badge");
 	} finally {
 		restoreMockEnv(prev);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -278,7 +279,7 @@ test("[rr013-ac6] headless redeploy accepts the task runTeamTask produces (was s
 		assert.deepEqual(second.requeuedTaskIds, [], "must not re-dispatch the same unit twice");
 		assert.equal(second.skipped[0]!.reason, "already re-dispatched once for surface loss");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -299,7 +300,7 @@ test("[rr013-ac10a] over-correction guard: normal successful child-process task 
 			"normal success must NOT write diagnostics.surfaceLost",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -316,6 +317,6 @@ test("[rr013-ac10b] over-correction guard: normal failing child-process task sti
 		assert.ok(!events.includes("task.surface_lost"), "a model failure is NOT a surface loss");
 		assert.ok(!events.includes("task.completed"), "a failed task must not emit task.completed");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

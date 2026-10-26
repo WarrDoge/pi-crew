@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import type { CrewRuntimeConfig } from "../../../../src/config/config.ts";
 import { deliverGroupJoin, resolveGroupJoinMode, shouldGroupJoin } from "../../../../src/runtime/group-join.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 // Note: additional coverage for the live exported surface of group-join.ts.
 // The dead GroupJoinManager class was removed (Round 6 F3); the tests below
@@ -86,7 +87,7 @@ describe("group-join (cov)", () => {
 	});
 
 	describe("deliverGroupJoin", () => {
-		it("classifies completed, failed, and skipped tasks in the delivery", () => {
+		it("classifies completed, failed, and skipped tasks in the delivery", async () => {
 			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-group-join-cov-"));
 			try {
 				const manifest = makeManifest(dir);
@@ -99,11 +100,11 @@ describe("group-join (cov)", () => {
 				assert.deepEqual(delivery.skipped, ["03"]);
 				assert.equal(delivery.partial, false);
 			} finally {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await cleanupStateRoot(dir);
 			}
 		});
 
-		it("'group' mode delivers a single-task batch (no smart threshold)", () => {
+		it("'group' mode delivers a single-task batch (no smart threshold)", async () => {
 			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-group-join-cov-"));
 			try {
 				const manifest = makeManifest(dir);
@@ -114,11 +115,11 @@ describe("group-join (cov)", () => {
 				assert.deepEqual(delivery.completed, ["01"]);
 				assert.equal(delivery.mode, "group");
 			} finally {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await cleanupStateRoot(dir);
 			}
 		});
 
-		it("'off' mode never delivers", () => {
+		it("'off' mode never delivers", async () => {
 			const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-group-join-cov-"));
 			try {
 				const manifest = makeManifest(dir);
@@ -126,7 +127,7 @@ describe("group-join (cov)", () => {
 				const delivery = deliverGroupJoin({ manifest, mode: "off", batch, allTasks: batch });
 				assert.equal(delivery, undefined);
 			} finally {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await cleanupStateRoot(dir);
 			}
 		});
 	});

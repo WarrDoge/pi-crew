@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import { externalTerminalDecision } from "../../../src/runtime/team-runner.ts";
 import { createRunManifest, saveRunManifest, saveRunTasks, updateRunStatus } from "../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 type SchedulerCtx = Parameters<typeof externalTerminalDecision>[0];
 
@@ -56,7 +57,7 @@ function makeCtx(cwd: string, manifest: unknown, tasks: unknown[]): SchedulerCtx
 }
 
 describe("externalTerminalDecision (finding 8: external cancel vs scheduler loop)", () => {
-	it("returns null while the on-disk run is active (normal scheduling untouched)", () => {
+	it("returns null while the on-disk run is active (normal scheduling untouched)", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-f8-active-"));
 		try {
 			fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -64,11 +65,11 @@ describe("externalTerminalDecision (finding 8: external cancel vs scheduler loop
 			const ctx = makeCtx(cwd, manifest, []);
 			assert.equal(externalTerminalDecision(ctx), null);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("STOPS and adopts on-disk state when an external cancel made the run terminal — the live race", () => {
+	it("STOPS and adopts on-disk state when an external cancel made the run terminal — the live race", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-f8-cancel-"));
 		try {
 			fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -82,11 +83,11 @@ describe("externalTerminalDecision (finding 8: external cancel vs scheduler loop
 			assert.equal(decision.result.manifest.status, "cancelled");
 			assert.equal(decision.result.manifest.runId, manifest.runId);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("adopts the on-disk TASKS as truth (the external decision's view wins)", () => {
+	it("adopts the on-disk TASKS as truth (the external decision's view wins)", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-f8-tasks-"));
 		try {
 			fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -103,11 +104,11 @@ describe("externalTerminalDecision (finding 8: external cancel vs scheduler loop
 				"on-disk cancelled tasks win over stale queued view",
 			);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	it("treats completed/failed terminal manifests the same as cancelled", () => {
+	it("treats completed/failed terminal manifests the same as cancelled", async () => {
 		for (const status of ["completed", "failed"] as const) {
 			const cwd = fs.mkdtempSync(path.join(os.tmpdir(), `pi-crew-f8-${status}-`));
 			try {
@@ -119,7 +120,7 @@ describe("externalTerminalDecision (finding 8: external cancel vs scheduler loop
 				const decision = externalTerminalDecision(makeCtx(cwd, manifest, []));
 				assert.ok(decision && decision.kind === "return", `${status} must stop the loop`);
 			} finally {
-				fs.rmSync(cwd, { recursive: true, force: true });
+				await removeDirWithRetry(cwd);
 			}
 		}
 	});

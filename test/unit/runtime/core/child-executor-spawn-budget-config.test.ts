@@ -29,6 +29,7 @@ import { runTeamTask, type SpawnBudget } from "../../../../src/runtime/task-runn
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team = {
 	name: "t",
@@ -115,7 +116,7 @@ test("RT-6: computeSpawnBudgetMax uses configured maxAttempts (not default 3)", 
 	assert.equal(computeSpawnBudgetMax(1, 10), 11);
 });
 
-test("RT-6: resolveConfiguredMaxAttempts reads reliability.retryPolicy.maxAttempts from project config", () => {
+test("RT-6: resolveConfiguredMaxAttempts reads reliability.retryPolicy.maxAttempts from project config", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-rt6-cfg-"));
 	fs.writeFileSync(path.join(cwd, "package.json"), "{}", "utf-8");
 	try {
@@ -127,11 +128,11 @@ test("RT-6: resolveConfiguredMaxAttempts reads reliability.retryPolicy.maxAttemp
 		assert.equal(resolveConfiguredMaxAttempts(cwd), 10, "resolveConfiguredMaxAttempts must read the configured 10, not the default 3");
 	} finally {
 		invalidateConfigCache();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("RT-6: resolveConfiguredMaxAttempts falls back to DEFAULT_RETRY_POLICY when config is unset", () => {
+test("RT-6: resolveConfiguredMaxAttempts falls back to DEFAULT_RETRY_POLICY when config is unset", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-rt6-nocfg-"));
 	fs.writeFileSync(path.join(cwd, "package.json"), "{}", "utf-8");
 	try {
@@ -143,7 +144,7 @@ test("RT-6: resolveConfiguredMaxAttempts falls back to DEFAULT_RETRY_POLICY when
 		);
 	} finally {
 		invalidateConfigCache();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -188,7 +189,7 @@ test("RT-6: runTeamTask auto-computes spawn budget from configured retryPolicy.m
 		});
 	} finally {
 		invalidateConfigCache();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -238,7 +239,7 @@ test("RT-8: runTeamTask does not mutate the input task object (immutable-snapsho
 			);
 		});
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

@@ -15,6 +15,7 @@ import {
 	resolvePeerDepDir,
 } from "../../../../src/runtime/peer-dep.ts";
 import { __setNpmGlobalRootForTest } from "../../../../src/runtime/pi-spawn.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * Build a fake ESM peer-dep package under a temp root and return the root.
@@ -95,7 +96,7 @@ describe("peer-dep resolver", () => {
 		process.argv[1] = origArgv1;
 	});
 
-	it("resolves via the parent-provided env hint (strategy 0, no npm probe)", () => {
+	it("resolves via the parent-provided env hint (strategy 0, no npm probe)", async () => {
 		const { root, pkgDir } = buildFakePeerDep("/fake/agent-envhint");
 		process.env[PEER_DEP_DIR_ENV] = root;
 		const resolved = resolvePeerDep();
@@ -104,7 +105,7 @@ describe("peer-dep resolver", () => {
 		assert.equal(resolved?.dir, pkgDir);
 		assert.match(resolved?.mainUrl ?? "", /^file:\/\//);
 		assert.ok(resolved?.mainUrl.endsWith("index.js"));
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	});
 
 	it("resolutionBases puts the env hint FIRST", () => {
@@ -122,7 +123,7 @@ describe("peer-dep resolver", () => {
 		process.env[PEER_DEP_DIR_ENV] = root;
 		await primePeerDep();
 		assert.equal(getAgentDir(), "/fake/agent-primed");
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	});
 
 	it("primePeerDep is memoized (one dynamic import shared)", async () => {
@@ -134,10 +135,10 @@ describe("peer-dep resolver", () => {
 		const m1 = await p1;
 		const m2 = await primePeerDep();
 		assert.equal(m1, m2, "module namespace cached");
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	});
 
-	it("getAgentDir NEVER throws when not primed — falls back to ~/.pi/agent", () => {
+	it("getAgentDir NEVER throws when not primed — falls back to ~/.pi/agent", async () => {
 		// Force resolution failure: no env hint, argv1 in a temp dir with no
 		// peer dep, and npm root disabled. Resolution returns undefined; cache
 		// stays empty; getAgentDir must still return a sane default.
@@ -150,7 +151,7 @@ describe("peer-dep resolver", () => {
 		const result = getAgentDir();
 		assert.equal(typeof result, "string");
 		assert.ok(result.length > 0);
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await removeDirWithRetry(tmp);
 	});
 
 	it("getAgentDir fallback respects PI_CODING_AGENT_DIR override", () => {
@@ -162,11 +163,11 @@ describe("peer-dep resolver", () => {
 		assert.equal(getAgentDir(), "/custom/agent-dir");
 	});
 
-	it("resolvePeerDepDir returns the dir string (for env propagation)", () => {
+	it("resolvePeerDepDir returns the dir string (for env propagation)", async () => {
 		const { root, pkgDir } = buildFakePeerDep("/fake/agent-dir");
 		process.env[PEER_DEP_DIR_ENV] = root;
 		assert.equal(resolvePeerDepDir(), pkgDir);
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	});
 
 	it("PEER_DEP_NAMES includes both scopes", () => {
@@ -174,7 +175,7 @@ describe("peer-dep resolver", () => {
 		assert.ok(PEER_DEP_NAMES.includes("@mariozechner/pi-coding-agent"));
 	});
 
-	it("W6/P2-4: resolving the legacy @mariozechner fork warns exactly ONCE", () => {
+	it("W6/P2-4: resolving the legacy @mariozechner fork warns exactly ONCE", async () => {
 		const { root, pkgDir } = buildFakeForkPeerDep("/fake/agent-fork");
 		process.env[PEER_DEP_DIR_ENV] = root;
 		const warnings: string[] = [];
@@ -194,11 +195,11 @@ describe("peer-dep resolver", () => {
 			assert.match(warnings[0] ?? "", /legacy/);
 		} finally {
 			console.warn = origWarn;
-			fs.rmSync(root, { recursive: true, force: true });
+			await removeDirWithRetry(root);
 		}
 	});
 
-	it("W6/P2-4: resolving the canonical @earendil-works package does NOT warn", () => {
+	it("W6/P2-4: resolving the canonical @earendil-works package does NOT warn", async () => {
 		const { root } = buildFakePeerDep("/fake/agent-canonical-nowarn");
 		process.env[PEER_DEP_DIR_ENV] = root;
 		const warnings: string[] = [];
@@ -213,7 +214,7 @@ describe("peer-dep resolver", () => {
 			assert.equal(warnings.length, 0, `unexpected warn: ${warnings.join(" | ")}`);
 		} finally {
 			console.warn = origWarn;
-			fs.rmSync(root, { recursive: true, force: true });
+			await removeDirWithRetry(root);
 		}
 	});
 
@@ -226,6 +227,6 @@ describe("peer-dep resolver", () => {
 		const mod = await import(resolved!.mainUrl);
 		assert.equal((mod as { __FAKE__?: boolean }).__FAKE__, true);
 		assert.equal(typeof (mod as { getAgentDir: unknown }).getAgentDir, "function");
-		fs.rmSync(root, { recursive: true, force: true });
+		await removeDirWithRetry(root);
 	});
 });

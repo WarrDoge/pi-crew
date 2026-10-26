@@ -9,6 +9,7 @@ import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../src/s
 import type { TeamTaskState } from "../../../src/state/types.ts";
 import type { TeamConfig } from "../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 /**
  * G24 (SDD-4 WI-2, pi-crew-upgrade-plan-2026-09-29.md §2): the stale
@@ -54,7 +55,7 @@ const workflow: WorkflowConfig = {
 	steps: [{ id: "do", role: "executor", task: "Do" }],
 };
 
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T | Promise<T>): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(realTmp, "pi-crew-g24-home-"));
 	// Create .pi/agent directory structure that userPiRoot() requires
@@ -62,11 +63,11 @@ function withIsolatedHome<T>(fn: () => T): T {
 	fs.mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
@@ -91,7 +92,7 @@ function frozenRunningTask(runId: string): TeamTaskState {
 
 describe("stale-reconciler: G24 foreign-LIVE skip (SDD-4 WI-2)", () => {
 	it("foreign-LIVE run (alive registry entry) is NOT repaired even with frozen heartbeats", () => {
-		withIsolatedHome(() => {
+		withIsolatedHome(async () => {
 			const cwd = fs.mkdtempSync(path.join(realTmp, "pi-crew-g24-live-"));
 			fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 			try {
@@ -119,13 +120,13 @@ describe("stale-reconciler: G24 foreign-LIVE skip (SDD-4 WI-2)", () => {
 				assert.match(result.detail, /skip/i);
 				assert.doesNotMatch(result.detail, /repaired/i);
 			} finally {
-				fs.rmSync(cwd, { recursive: true, force: true });
+				await removeDirWithRetry(cwd);
 			}
 		});
 	});
 
 	it("unregistered dead run with the same frozen-heartbeat shape is still repaired (guard does not over-block)", () => {
-		withIsolatedHome(() => {
+		withIsolatedHome(async () => {
 			const cwd = fs.mkdtempSync(path.join(realTmp, "pi-crew-g24-dead-"));
 			fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 			try {
@@ -143,7 +144,7 @@ describe("stale-reconciler: G24 foreign-LIVE skip (SDD-4 WI-2)", () => {
 				assert.equal(result.verdict, "no_status", "frozen heartbeats + no PID keep the no_status repair path");
 				assert.ok(Array.isArray(result.repairedTasks), "repaired tasks are returned for persistence");
 			} finally {
-				fs.rmSync(cwd, { recursive: true, force: true });
+				await removeDirWithRetry(cwd);
 			}
 		});
 	});

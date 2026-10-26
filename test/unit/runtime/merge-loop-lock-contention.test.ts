@@ -43,6 +43,7 @@ import { createRunManifest, saveRunTasks } from "../../../src/state/stores/state
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
 import type { TeamConfig } from "../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 // ─── fixtures (mirrors team-runner-extraction.test.ts) ─────────────
 
@@ -209,7 +210,7 @@ test("lock-contention: mergeUnitResult survives TRANSIENT run.lock contention (r
 		assert.ok(retries >= 1, `at least one run.lock_retry event logged (got ${retries})`);
 	} finally {
 		holder.stop();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd, manifest.eventsPath);
 	}
 });
 
@@ -240,7 +241,7 @@ test("lock-contention: PERSISTENT contention exhausts the bounded schedule and p
 		assert.equal(retries, MERGE_LOCK_BUSY_RETRY_DELAYS_MS.length, "one run.lock_retry event per retry attempt");
 	} finally {
 		holder.stop();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd, manifest.eventsPath);
 	}
 });
 
@@ -274,7 +275,7 @@ test("lock-busy retry helper: retries transient holder, succeeds after release, 
 		);
 	} finally {
 		holder.stop();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -296,7 +297,7 @@ test("lock-busy retry helper: NON-busy errors propagate immediately (real faults
 		);
 		assert.equal(retries, 0, "non-busy error must not be retried");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -311,6 +312,6 @@ test("lock-busy retry helper: exhausted schedule rethrows the busy error (bounde
 		);
 	} finally {
 		holder.stop();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

@@ -23,6 +23,7 @@ import { detectOscillation, detectPeriod2Oscillation } from "../../../src/runtim
 import { BatchBarrier } from "../../../src/runtime/scheduling/batch-barrier.ts";
 import { CrewScheduler } from "../../../src/runtime/scheduling/scheduler.ts";
 import { sweepStaleSocketFiles } from "../../../src/state/coordination/process-lock.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 test("R3-M-B4: period-2 A,B,A,B oscillation fires", () => {
 	const a = { reason: "the build fails because module X cannot be resolved from the test tree" };
@@ -179,7 +180,7 @@ test("R9-OPS2: stale socket sweep removes old pi-crew/pc sockets, keeps fresh + 
 			});
 		});
 	} catch {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 		t.skip(`unix socket listen unavailable on ${process.platform}`);
 		return;
 	}
@@ -196,7 +197,7 @@ test("R9-OPS2: stale socket sweep removes old pi-crew/pc sockets, keeps fresh + 
 		fs.utimesSync(old, 1000, 1000);
 	} catch {
 		server.close();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 		t.skip(`utimes on socket file refused on ${process.platform}`);
 		return;
 	}
@@ -210,6 +211,6 @@ test("R9-OPS2: stale socket sweep removes old pi-crew/pc sockets, keeps fresh + 
 		assert.equal(fs.existsSync(notASocket), true, "regular file never touched");
 	} finally {
 		server.close();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });

@@ -16,6 +16,7 @@ import test from "node:test";
 
 import { CREW_AGENTS_READ_FAILED, readCrewAgents, upsertCrewAgent } from "../../../src/runtime/crew-agent-records.ts";
 import type { TeamRunManifest } from "../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 function makeManifest(): { manifest: TeamRunManifest; stateRoot: string } {
 	const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pc-fs2-"));
@@ -38,7 +39,7 @@ const record = (id: string, taskId: string): Record<string, unknown> => ({
 	createdAt: new Date().toISOString(),
 });
 
-test("FS2: corrupt agents.json → sentinel, and upsert does NOT overwrite the file", () => {
+test("FS2: corrupt agents.json → sentinel, and upsert does NOT overwrite the file", async () => {
 	const { manifest, stateRoot } = makeManifest();
 	try {
 		const agentsPath = path.join(stateRoot, "agents.json");
@@ -52,11 +53,11 @@ test("FS2: corrupt agents.json → sentinel, and upsert does NOT overwrite the f
 		upsertCrewAgent(manifest, record("agent-2", "task-2") as never);
 		assert.equal(fs.readFileSync(agentsPath, "utf-8"), corrupt, "upsert must NOT persist over unreadable state");
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });
 
-test("FS2: healthy read + upsert still works (no false positives)", () => {
+test("FS2: healthy read + upsert still works (no false positives)", async () => {
 	const { manifest, stateRoot } = makeManifest();
 	try {
 		const agentsPath = path.join(stateRoot, "agents.json");
@@ -69,6 +70,6 @@ test("FS2: healthy read + upsert still works (no false positives)", () => {
 		const after = JSON.parse(fs.readFileSync(agentsPath, "utf-8")) as Array<{ id: string }>;
 		assert.equal(after.length, 2, `both agents retained, got ${after.map((a) => a.id).join(",")}`);
 	} finally {
-		fs.rmSync(stateRoot, { recursive: true, force: true });
+		await cleanupStateRoot(stateRoot);
 	}
 });

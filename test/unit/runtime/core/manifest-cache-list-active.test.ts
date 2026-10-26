@@ -15,6 +15,7 @@ import { createManifestCache } from "../../../../src/runtime/manifest-cache.ts";
 import { createRunManifest, updateRunStatus } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * Global env isolation (pattern: test/unit/manifest-cache-ttl.test.ts).
@@ -59,7 +60,7 @@ const workflow: WorkflowConfig = {
 	steps: [{ id: "explore", role: "explorer", task: "Explore" }],
 };
 
-test("listActive returns every running run regardless of createdAt ordering", () => {
+test("listActive returns every running run regardless of createdAt ordering", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-list-active-"));
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -105,11 +106,11 @@ test("listActive returns every running run regardless of createdAt ordering", ()
 			assert.equal(m.status, "running");
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("listActive caps at the limit (not the underlying list cap)", () => {
+test("listActive caps at the limit (not the underlying list cap)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-list-active-cap-"));
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -127,6 +128,6 @@ test("listActive caps at the limit (not the underlying list cap)", () => {
 			assert.ok(created.includes(m.runId));
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

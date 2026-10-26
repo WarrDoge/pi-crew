@@ -14,6 +14,7 @@ import type { TeamRunManifest } from "../../../../src/state/types.ts";
 import { allTeams } from "../../../../src/teams/discover-teams.ts";
 import { redactSecretString } from "../../../../src/utils/redaction.ts";
 import { allWorkflows } from "../../../../src/workflows/discover-workflows.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const SECRET = "sk-test-secret-123";
 
@@ -93,7 +94,7 @@ test("redacts secrets at event, mailbox, artifact, and agent persistence boundar
 		assertRedacted(fs.readFileSync(path.join(manifest.stateRoot, "agents", "task-1", "output.log"), "utf-8"));
 		assertRedacted(fs.readFileSync(path.join(manifest.stateRoot, "agents", "task-1", "status.json"), "utf-8"));
 	} finally {
-		fs.rmSync(root, { recursive: true, force: true });
+		await cleanupStateRoot(root);
 	}
 });
 
@@ -195,7 +196,7 @@ test("project resources cannot shadow builtin or user resources", () => {
 	);
 });
 
-test("project config cannot override sensitive user trust-boundary settings", () => {
+test("project config cannot override sensitive user trust-boundary settings", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-config-trust-"));
 	const home = path.join(root, "home");
 	const cwd = path.join(root, "project");
@@ -239,14 +240,14 @@ test("project config cannot override sensitive user trust-boundary settings", ()
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(root, { recursive: true, force: true });
+		await cleanupStateRoot(root);
 	}
 });
 
 // FIX: OTLP header key validation
 // Previously, only header values were validated for \r\n\x00 injection;
 // header keys were not checked, allowing CRLF or shell metacharacters.
-test("OTLP headers block prototype pollution attempts", () => {
+test("OTLP headers block prototype pollution attempts", async () => {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-otlp-pollution-"));
 	const home = path.join(root, "home");
@@ -289,11 +290,11 @@ test("OTLP headers block prototype pollution attempts", () => {
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(root, { recursive: true, force: true });
+		await cleanupStateRoot(root);
 	}
 });
 
-test("OTLP headers block malformed key formats", () => {
+test("OTLP headers block malformed key formats", async () => {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-otlp-malformed-"));
 	const home = path.join(root, "home");
@@ -330,13 +331,13 @@ test("OTLP headers block malformed key formats", () => {
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(root, { recursive: true, force: true });
+		await cleanupStateRoot(root);
 	}
 });
 
 // FIX: Project config cannot override otlp.endpoint — it controls where
 // user OTLP headers (potentially containing credentials) are sent.
-test("project config cannot override otlp.endpoint", () => {
+test("project config cannot override otlp.endpoint", async () => {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-otlp-endpoint-"));
 	const home = path.join(root, "home");
 	const cwd = path.join(root, "project");
@@ -369,7 +370,7 @@ test("project config cannot override otlp.endpoint", () => {
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(root, { recursive: true, force: true });
+		await cleanupStateRoot(root);
 	}
 });
 

@@ -24,7 +24,7 @@ async function rmAfterDrain(dir: string): Promise<void> {
 	await new Promise((resolve) => setImmediate(resolve));
 	for (let attempt = 0; attempt < 5; attempt += 1) {
 		try {
-			fs.rmSync(dir, { recursive: true, force: true });
+			await cleanupStateRoot(dir);
 			return;
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException).code;
@@ -35,6 +35,7 @@ async function rmAfterDrain(dir: string): Promise<void> {
 }
 
 import { allWorkflows, discoverWorkflows } from "../../../../src/workflows/discover-workflows.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const roles = [
 	"explorer",

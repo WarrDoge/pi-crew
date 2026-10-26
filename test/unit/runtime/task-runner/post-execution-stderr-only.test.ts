@@ -36,6 +36,7 @@ import type { ArtifactDescriptor, TeamRunManifest, TeamTaskState } from "../../.
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowStep } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ─── Fixtures ───────────────────────────────────────────────────────
 
@@ -236,7 +237,7 @@ describe("finalizeTaskResult — stderr-only result gate (bug-026 A)", () => {
 			assert.ok(fs.existsSync(ovJsonPath), "output-validation.json must be persisted");
 			assert.match(fs.readFileSync(ovJsonPath, "utf-8"), /empty-or-stderr-only-result/);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -261,7 +262,7 @@ describe("finalizeTaskResult — stderr-only result gate (bug-026 A)", () => {
 			);
 			assert.ok(!events.some((e) => e.type === "task.failed"));
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -275,7 +276,7 @@ describe("finalizeTaskResult — stderr-only result gate (bug-026 A)", () => {
 			assert.equal(t.status, "completed", "real content in the artifact must complete the task");
 			assert.equal(t.error, undefined);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -290,7 +291,7 @@ describe("finalizeTaskResult — stderr-only result gate (bug-026 A)", () => {
 			assert.match(t.error ?? "", /empty-or-stderr-only-result/);
 			assert.equal(t.exitCode, 1);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -307,7 +308,7 @@ describe("finalizeTaskResult — stderr-only result gate (bug-026 A)", () => {
 			assert.equal(t.status, "completed", "artifact read error must NOT auto-fail the task");
 			assert.equal(t.error, undefined);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -324,7 +325,7 @@ describe("finalizeTaskResult — stderr-only result gate (bug-026 A)", () => {
 			assert.equal(t.status, "completed", "non-empty stdout is an authoritative source — gate 1 must block auto-fail");
 			assert.equal(t.error, undefined);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -355,7 +356,7 @@ describe("finalizeTaskResult — stderr-only result gate (bug-026 A)", () => {
 				"must emit task.failed",
 			);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -383,7 +384,7 @@ describe("finalizeTaskResult — stderr-only result gate (bug-026 A)", () => {
 			assert.equal(ov.at(-1)!.data?.failureCause, "empty-or-stderr-only-result");
 			assert.equal(ov.at(-1)!.data?.resultSource, "stderr", "event must record the degraded result source");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -405,7 +406,7 @@ describe("finalizeTaskResult — stderr-only result gate (bug-026 A)", () => {
 			assert.equal(t.status, "completed", "findings-sourced artifact is NOT a degraded source");
 			assert.equal(t.error, undefined);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

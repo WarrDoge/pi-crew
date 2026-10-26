@@ -9,6 +9,7 @@ import { writeArtifact } from "../../../../src/state/stores/artifact-store.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "test-team",
@@ -48,7 +49,7 @@ function makeTasks(runId: string, cwd: string, overrides?: Partial<TeamTaskState
 	return { explorer, executor };
 }
 
-test("structured results extracted from JSON result output", () => {
+test("structured results extracted from JSON result output", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-structured-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -81,11 +82,11 @@ test("structured results extracted from JSON result output", () => {
 		});
 		assert.equal(dep.resultSummary, jsonContent);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("structured results undefined for non-JSON output", () => {
+test("structured results undefined for non-JSON output", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-nonjson-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -104,11 +105,11 @@ test("structured results undefined for non-JSON output", () => {
 		assert.equal(ctx.dependencies[0]?.structuredResults, undefined);
 		assert.match(ctx.dependencies[0]!.resultSummary, /Markdown output/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("artifacts produced lists task artifacts from manifest", () => {
+test("artifacts produced lists task artifacts from manifest", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-artifacts-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -144,11 +145,11 @@ test("artifacts produced lists task artifacts from manifest", () => {
 		assert.ok(artifacts.some((a) => a.includes("results")));
 		assert.ok(artifacts.some((a) => a.includes("logs")));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("usage aggregates token counts and duration from task state", () => {
+test("usage aggregates token counts and duration from task state", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-usage-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -173,11 +174,11 @@ test("usage aggregates token counts and duration from task state", () => {
 		assert.equal(usage.outputTokens, 800);
 		assert.equal(usage.durationMs, 5000);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("backward compatible — entries without new fields produce undefined", () => {
+test("backward compatible — entries without new fields produce undefined", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-backcompat-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -198,7 +199,7 @@ test("backward compatible — entries without new fields produce undefined", () 
 		assert.equal(dep.artifactsProduced, undefined);
 		assert.equal(dep.usage, undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

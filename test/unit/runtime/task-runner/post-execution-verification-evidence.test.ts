@@ -45,6 +45,7 @@ import type { ArtifactDescriptor, TeamRunManifest, TeamTaskState, VerificationCo
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowStep } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ─── Fixtures ───────────────────────────────────────────────────────
 
@@ -213,7 +214,7 @@ describe("finalizeTaskResult — R4-5 decorative verification surfacing", () => 
 			assert.equal(evidence.observedGreenLevel, "targeted");
 			assert.equal(evidence.requiredGreenLevel, "targeted");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -229,7 +230,7 @@ describe("finalizeTaskResult — R4-5 decorative verification surfacing", () => 
 			assert.equal(evidence.decorative, undefined, "level none must not be flagged decorative");
 			assert.ok(!(evidence.notes ?? "").includes("self-attested"), "no self-attested note for level none");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
@@ -266,7 +267,7 @@ describe("finalizeTaskResult — B4 verification execution failure is fail-close
 				`expected green_unsatisfied block, got: ${JSON.stringify(decisions)}`,
 			);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
@@ -291,7 +292,7 @@ describe("finalizeTaskResult — B4 verification execution failure is fail-close
 			assert.equal(evidence.notes, "child-process worker finished without reporting a verification failure.");
 			assert.ok(!(evidence.notes ?? "").includes("fail-closed"), "no fail-closed note for level none");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

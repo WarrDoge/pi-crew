@@ -20,7 +20,7 @@
  * reflect outcomes, and `task_failed` must now record a passed:false entry.
  */
 import assert from "node:assert/strict";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -32,14 +32,15 @@ import {
 	type SkillActivation,
 } from "../../../../src/runtime/skill-effectiveness.ts";
 import { projectCrewRoot } from "../../../../src/utils/paths.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const TEST_CWD = process.cwd();
 const TEST_RUN_ID = `test-t7-conf-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-function cleanup(): void {
+async function cleanup(): Promise<void> {
 	const dir = join(projectCrewRoot(TEST_CWD), `state/runs/${TEST_RUN_ID}`);
 	try {
-		if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+		if (existsSync(dir)) await removeDirWithRetry(dir);
 	} catch {
 		// ignore
 	}
@@ -58,19 +59,19 @@ function act(skillId: string, passed: boolean, confidence: number, taskId: strin
 	};
 }
 
-test("T7: computeNextActivationConfidence seeds first activation at 0.3", () => {
-	cleanup();
+test("T7: computeNextActivationConfidence seeds first activation at 0.3", async () => {
+	await cleanup();
 	try {
 		// No prior activations → seed at the tentative floor.
 		const confidence = computeNextActivationConfidence("verification-before-done", [], true);
 		assert.equal(confidence, 0.3);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("T7: computeNextActivationConfidence rolls forward (+0.05 on success)", () => {
-	cleanup();
+test("T7: computeNextActivationConfidence rolls forward (+0.05 on success)", async () => {
+	await cleanup();
 	try {
 		const prior = [act("skill-a", true, 0.3, "t1")];
 		const next = computeNextActivationConfidence("skill-a", prior, true);
@@ -78,12 +79,12 @@ test("T7: computeNextActivationConfidence rolls forward (+0.05 on success)", () 
 		assert.equal(next, adjustConfidence(0.3, true));
 		assert.equal(next, 0.35);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("T7: computeNextActivationConfidence rolls backward (-0.1 on failure)", () => {
-	cleanup();
+test("T7: computeNextActivationConfidence rolls backward (-0.1 on failure)", async () => {
+	await cleanup();
 	try {
 		const prior = [act("skill-a", true, 0.5, "t1")];
 		const next = computeNextActivationConfidence("skill-a", prior, false);
@@ -91,12 +92,12 @@ test("T7: computeNextActivationConfidence rolls backward (-0.1 on failure)", () 
 		assert.equal(next, adjustConfidence(0.5, false));
 		assert.equal(next, 0.4);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("T7: computeNextActivationConfidence only looks at the SAME skill's history", () => {
-	cleanup();
+test("T7: computeNextActivationConfidence only looks at the SAME skill's history", async () => {
+	await cleanup();
 	try {
 		// Two skills interleaved; skill-b's first activation should seed at 0.3
 		// even though skill-a already has a 0.7 record.
@@ -104,12 +105,12 @@ test("T7: computeNextActivationConfidence only looks at the SAME skill's history
 		const next = computeNextActivationConfidence("skill-b", prior, true);
 		assert.equal(next, 0.3);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("T7: recording two successes via the hooks' confidence math evolves the value", () => {
-	cleanup();
+test("T7: recording two successes via the hooks' confidence math evolves the value", async () => {
+	await cleanup();
 	try {
 		// Simulate the task_completed hook's confidence computation path:
 		// activation 1 seeds 0.3; activation 2 rolls to 0.35. Record both
@@ -137,12 +138,12 @@ test("T7: recording two successes via the hooks' confidence math evolves the val
 		assert.equal(metrics.passedActivations, 2);
 		assert.equal(metrics.passRate, 1);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("T7: a failed task now lowers the rolling confidence (regression guard for the no-op task_failed hook)", () => {
-	cleanup();
+test("T7: a failed task now lowers the rolling confidence (regression guard for the no-op task_failed hook)", async () => {
+	await cleanup();
 	try {
 		// Before T7, task_failed recorded NOTHING, so a failure after a success
 		// left confidence unchanged. Now the failure records a passed:false
@@ -166,11 +167,11 @@ test("T7: a failed task now lowers the rolling confidence (regression guard for 
 			`currentConfidence ${metrics.currentConfidence} should reflect the failure rollback`,
 		);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("T7: adjustConfidence is no longer dead — computeNextActivationConfidence calls it", () => {
+test("T7: adjustConfidence is no longer dead — computeNextActivationConfidence calls it", async () => {
 	// Sanity: the previously-dead function is now on the production path.
 	// (If someone deletes the call, this test won't catch it directly, but
 	// the rolling tests above will — their expected values depend on

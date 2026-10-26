@@ -28,6 +28,7 @@ import type { TeamRunManifest } from "../../../../src/state/types.ts";
 import { RenderScheduler } from "../../../../src/ui/render-scheduler.ts";
 import { createRunSnapshotCache } from "../../../../src/ui/run-snapshot-cache.ts";
 import { activeWidgetRuns } from "../../../../src/ui/widget/widget-model.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function tempCwd(prefix: string): string {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -112,7 +113,7 @@ class FakeEvents {
 	}
 }
 
-test("characterization: invalidate(undefined) clears ALL entries — the trap the fix avoids", () => {
+test("characterization: invalidate(undefined) clears ALL entries — the trap the fix avoids", async () => {
 	const cwd = tempCwd("pi-flicker-char-");
 	try {
 		const { manifest } = fixtures(cwd);
@@ -124,11 +125,11 @@ test("characterization: invalidate(undefined) clears ALL entries — the trap th
 		assert.equal(cache.get(manifest.runId), undefined, "invalidate(undefined) wipes the whole cache");
 		assert.equal(cache.snapshotsByKey().size, 0, "snapshotsByKey is empty after invalidate(undefined)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("characterization: refresh() and refreshIfStale() never empty the entry", () => {
+test("characterization: refresh() and refreshIfStale() never empty the entry", async () => {
 	const cwd = tempCwd("pi-flicker-safe-");
 	try {
 		const { manifest } = fixtures(cwd);
@@ -144,11 +145,11 @@ test("characterization: refresh() and refreshIfStale() never empty the entry", (
 		assert.equal(cache.get(manifest.runId), before, "refreshIfStale reuses the fresh snapshot");
 		assert.equal(cache.snapshotsByKey().size > 0, true, "cache non-empty throughout");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("flicker regression: a no-runId RenderScheduler fallback tick must NOT clear the cache", () => {
+test("flicker regression: a no-runId RenderScheduler fallback tick must NOT clear the cache", async () => {
 	const cwd = tempCwd("pi-flicker-tick-");
 	try {
 		const { manifest } = fixtures(cwd);
@@ -189,11 +190,11 @@ test("flicker regression: a no-runId RenderScheduler fallback tick must NOT clea
 			scheduler.dispose();
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("flicker regression: runId refreshIfStale and fs.watch refresh keep the widget populated", () => {
+test("flicker regression: runId refreshIfStale and fs.watch refresh keep the widget populated", async () => {
 	const cwd = tempCwd("pi-flicker-id-");
 	try {
 		const { manifest } = fixtures(cwd);
@@ -211,6 +212,6 @@ test("flicker regression: runId refreshIfStale and fs.watch refresh keep the wid
 		assert.equal(cache.get(manifest.runId) !== undefined, true, "refresh keeps entry populated");
 		assert.equal(activeWidgetRuns(cwd, undefined, cache, [manifest]).length, 1, "widget renders run after fs.watch refresh");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

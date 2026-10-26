@@ -37,14 +37,15 @@ import {
 } from "../../../../src/runtime/task-output-context.ts";
 import type { ArtifactDescriptor, TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import type { WorkflowStep } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeTmpDir(prefix: string): { dir: string; cleanup: () => void } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	return {
 		dir,
-		cleanup: () => {
+		cleanup: async () => {
 			try {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await removeDirWithRetry(dir);
 			} catch {
 				/* best-effort */
 			}
@@ -94,7 +95,7 @@ function collect(manifest: TeamRunManifest, depTask: TeamTaskState, mainTask: Te
 	return collectDependencyOutputContext(manifest, [depTask, mainTask], mainTask, step, cache as never);
 }
 
-test("cache param honored: second collect for the same dep hits the cache (readFile stays 1, hits increment)", () => {
+test("cache param honored: second collect for the same dep hits the cache (readFile stays 1, hits increment)", async () => {
 	const { dir, cleanup } = makeTmpDir("dep-cache-hit-");
 	try {
 		__test__resultReadStats.reset();
@@ -116,11 +117,11 @@ test("cache param honored: second collect for the same dep hits the cache (readF
 		);
 	} finally {
 		__test__resultReadStats.reset();
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("cache pre-warmed by aggregateTaskOutputs (closeout seam) is reused by the dep path", () => {
+test("cache pre-warmed by aggregateTaskOutputs (closeout seam) is reused by the dep path", async () => {
 	const { dir, cleanup } = makeTmpDir("dep-cache-closeout-");
 	try {
 		__test__resultReadStats.reset();
@@ -137,11 +138,11 @@ test("cache pre-warmed by aggregateTaskOutputs (closeout seam) is reused by the 
 		assert.equal(renderDependencyOutputContext(cachedCtx), renderDependencyOutputContext(uncachedCtx));
 	} finally {
 		__test__resultReadStats.reset();
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("bypass without a cache issues fresh reads per collect (old behavior)", () => {
+test("bypass without a cache issues fresh reads per collect (old behavior)", async () => {
 	const { dir, cleanup } = makeTmpDir("dep-cache-nocache-");
 	try {
 		__test__resultReadStats.reset();
@@ -153,11 +154,11 @@ test("bypass without a cache issues fresh reads per collect (old behavior)", () 
 		assert.equal(renderDependencyOutputContext(first), renderDependencyOutputContext(second));
 	} finally {
 		__test__resultReadStats.reset();
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("bypass via PI_CREW_DISABLE_RESULT_READ_CACHE=1 keeps the uncached behavior through the cache param", () => {
+test("bypass via PI_CREW_DISABLE_RESULT_READ_CACHE=1 keeps the uncached behavior through the cache param", async () => {
 	const { dir, cleanup } = makeTmpDir("dep-cache-envbypass-");
 	try {
 		__test__resultReadStats.reset();
@@ -177,11 +178,11 @@ test("bypass via PI_CREW_DISABLE_RESULT_READ_CACHE=1 keeps the uncached behavior
 		}
 	} finally {
 		__test__resultReadStats.reset();
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("tee-band truncation: warm cache is NOT reused — tee file written + fullOutputPath present on every collect", () => {
+test("tee-band truncation: warm cache is NOT reused — tee file written + fullOutputPath present on every collect", async () => {
 	const { dir, cleanup } = makeTmpDir("dep-cache-tee-");
 	try {
 		__test__resultReadStats.reset();
@@ -207,11 +208,11 @@ test("tee-band truncation: warm cache is NOT reused — tee file written + fullO
 		assert.equal(renderDependencyOutputContext(third), renderDependencyOutputContext(second));
 	} finally {
 		__test__resultReadStats.reset();
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("mid-band truncation (above MAX, below tee threshold) still hits the cache byte-identically", () => {
+test("mid-band truncation (above MAX, below tee threshold) still hits the cache byte-identically", async () => {
 	const { dir, cleanup } = makeTmpDir("dep-cache-mid-");
 	try {
 		__test__resultReadStats.reset();
@@ -226,6 +227,6 @@ test("mid-band truncation (above MAX, below tee threshold) still hits the cache 
 		assert.equal(renderDependencyOutputContext(second), renderDependencyOutputContext(first));
 	} finally {
 		__test__resultReadStats.reset();
-		cleanup();
+		await cleanup();
 	}
 });

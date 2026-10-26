@@ -14,6 +14,7 @@ import {
 import { createRunManifest, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -39,7 +40,7 @@ function fixture(): { cwd: string; runId: string } {
 	return { cwd, runId: created.manifest.runId };
 }
 
-test("a still-running detached run yields nothing (stays parked)", () => {
+test("a still-running detached run yields nothing (stays parked)", async () => {
 	const { cwd, runId } = fixture();
 	try {
 		markRunDetached(runId, cwd);
@@ -48,11 +49,11 @@ test("a still-running detached run yields nothing (stays parked)", () => {
 		assert.equal(hasDetachedRuns(), true, "still tracked until it finishes");
 	} finally {
 		clearDetachedRunsForTest();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("a finished detached run is handed over ONCE to its owning session", () => {
+test("a finished detached run is handed over ONCE to its owning session", async () => {
 	const { cwd, runId } = fixture();
 	try {
 		markRunDetached(runId, cwd);
@@ -73,11 +74,11 @@ test("a finished detached run is handed over ONCE to its owning session", () => 
 		assert.equal(hasDetachedRuns(), false);
 	} finally {
 		clearDetachedRunsForTest();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("a finished run stays parked while a DIFFERENT session is current (never lands in a view)", () => {
+test("a finished run stays parked while a DIFFERENT session is current (never lands in a view)", async () => {
 	const { cwd, runId } = fixture();
 	try {
 		markRunDetached(runId, cwd);
@@ -90,24 +91,24 @@ test("a finished run stays parked while a DIFFERENT session is current (never la
 		assert.equal(peekFinishedDetachedRunResults().length, 1, "delivered after returning to main");
 	} finally {
 		clearDetachedRunsForTest();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("a detached run whose state was deleted is dropped without a result", () => {
+test("a detached run whose state was deleted is dropped without a result", async () => {
 	const { cwd, runId } = fixture();
 	try {
 		markRunDetached(runId, cwd);
-		fs.rmSync(path.join(cwd, ".crew", "state", "runs", runId), { recursive: true, force: true });
+		await removeDirWithRetry(path.join(cwd, ".crew", "state", "runs", runId));
 		assert.deepEqual(peekFinishedDetachedRunResults(), []);
 		assert.equal(hasDetachedRuns(), false);
 	} finally {
 		clearDetachedRunsForTest();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("formatDetachedRunResult lists per-task status and roots", () => {
+test("formatDetachedRunResult lists per-task status and roots", async () => {
 	const { cwd, runId } = fixture();
 	try {
 		const manifestPath = path.join(cwd, ".crew", "state", "runs", runId, "manifest.json");
@@ -120,6 +121,6 @@ test("formatDetachedRunResult lists per-task status and roots", () => {
 		assert.match(text, /State: /);
 	} finally {
 		clearDetachedRunsForTest();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

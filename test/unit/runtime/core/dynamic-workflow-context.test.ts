@@ -28,6 +28,7 @@ import {
 } from "../../../../src/runtime/goal-workflow/dynamic-workflow-context.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
 import { cleanupAgentWorktree, prepareAgentWorktree } from "../../../../src/worktree/worktree-manager.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tmpCwd(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-dwf-ctx-"));
@@ -61,18 +62,18 @@ test("synthesizeAgentConfig uses source:'dynamic' (§0c C7 — not 'synthetic')"
 	assert.equal(cfg.inheritProjectContext, false);
 });
 
-test("resolveAgentForRole tier-4 fallback synthesizes when no agent matches", () => {
+test("resolveAgentForRole tier-4 fallback synthesizes when no agent matches", async () => {
 	const cwd = tmpCwd();
 	try {
 		const cfg = resolveAgentForRole("nonexistent-role-xyz", { cwd });
 		assert.equal(cfg.name, "nonexistent-role-xyz");
 		assert.equal(cfg.source, "dynamic", "tier-4 synthesis uses source:'dynamic'");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("resolveAgentForRole tier-1 explicit agent wins over role name", () => {
+test("resolveAgentForRole tier-1 explicit agent wins over role name", async () => {
 	const cwd = tmpCwd();
 	try {
 		// No real agents in tmp cwd → tier-1 miss falls through to tier-4 synthesis,
@@ -83,11 +84,11 @@ test("resolveAgentForRole tier-1 explicit agent wins over role name", () => {
 		});
 		assert.equal(cfg.name, "my-explicit", "explicit agent name preserved in fallback");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("makeWorkflowCtx exposes ONLY documented methods (capability lock)", () => {
+test("makeWorkflowCtx exposes ONLY documented methods (capability lock)", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -105,11 +106,11 @@ test("makeWorkflowCtx exposes ONLY documented methods (capability lock)", () => 
 		assert.equal((ctx as unknown as { manifest?: unknown }).manifest, undefined);
 		assert.equal((ctx as unknown as { process?: unknown }).process, undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("ctx.setResult records the final result; runner reads it via getWorkflowFinalResult", () => {
+test("ctx.setResult records the final result; runner reads it via getWorkflowFinalResult", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -124,7 +125,7 @@ test("ctx.setResult records the final result; runner reads it via getWorkflowFin
 			meta: { ok: true },
 		});
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -147,7 +148,7 @@ test("ctx.agent() returns ok:false on spawn failure (mock without PI_CREW_ALLOW_
 		assert.ok(res.error);
 	} finally {
 		delete process.env.PI_TEAMS_MOCK_CHILD_PI;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -241,7 +242,7 @@ test("review(): returns verdict directly when reviewer emits JSON (1-step)", asy
 		assert.equal(calls[0].disableTools, true, "review defaults disableTools=true");
 		assert.ok(calls[0].systemPrompt, "review passes a JSON-verdict systemPrompt");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -282,7 +283,7 @@ test("review(): 2-step fallback converts prose review → JSON verdict when mode
 		assert.equal(r.outcome, "reject", "judge verdict propagated");
 		assert.equal(r.feedback, "subtracts instead of adds");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -305,7 +306,7 @@ test("review(): when reviewer produces NO text (killed), skips judge + returns f
 		assert.equal(r.outcome, "changes_requested");
 		assert.equal(r.feedback, "(reviewer produced no parseable verdict)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -331,7 +332,7 @@ test("review(): content option is injected into the reviewer prompt", async () =
 		});
 		assert.match(capturedPrompt, /UNIQUE_WORK_MARKER_42/, "content is passed to the reviewer");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -375,7 +376,7 @@ test("round-13 P0-3: ctx.agent() with matching schema returns structured result"
 			else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -411,7 +412,7 @@ test("round-13 P0-3: ctx.agent() with non-matching schema returns ok:false + err
 			else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -439,7 +440,7 @@ test("round-13 P0-3: ctx.agent() without schema preserves existing behavior", as
 			else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -462,7 +463,7 @@ function readEvents(eventsPath: string): Array<{ type: string; data?: Record<str
 		.map((line) => JSON.parse(line));
 }
 
-test("round-12 ctx.phase(title): emits dwf.phase_started event with phase in data", () => {
+test("round-12 ctx.phase(title): emits dwf.phase_started event with phase in data", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -475,11 +476,11 @@ test("round-12 ctx.phase(title): emits dwf.phase_started event with phase in dat
 		assert.ok(phaseStarted, "dwf.phase_started event should be emitted");
 		assert.equal(phaseStarted?.data?.phase, "Scan");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-12 ctx.phase(title): idempotent on same title — no duplicate events", () => {
+test("round-12 ctx.phase(title): idempotent on same title — no duplicate events", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -493,11 +494,11 @@ test("round-12 ctx.phase(title): idempotent on same title — no duplicate event
 		const phaseStarted = events.filter((e) => e.type === "dwf.phase_started");
 		assert.equal(phaseStarted.length, 1, "duplicate phase titles should not emit extra events");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-12 ctx.phase(title): empty string throws TypeError", () => {
+test("round-12 ctx.phase(title): empty string throws TypeError", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -506,11 +507,11 @@ test("round-12 ctx.phase(title): empty string throws TypeError", () => {
 		});
 		assert.throws(() => ctx.phase(""), /non-empty string/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-12 ctx.phase(title): non-string throws TypeError", () => {
+test("round-12 ctx.phase(title): non-string throws TypeError", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -521,11 +522,11 @@ test("round-12 ctx.phase(title): non-string throws TypeError", () => {
 		assert.throws(() => ctx.phase(null as unknown as string), /non-empty string/);
 		assert.throws(() => ctx.phase(undefined as unknown as string), /non-empty string/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-12 ctx.phase(title): sequence phase('A') → phase('B') emits phase_completed(A) then phase_started(B)", () => {
+test("round-12 ctx.phase(title): sequence phase('A') → phase('B') emits phase_completed(A) then phase_started(B)", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -540,11 +541,11 @@ test("round-12 ctx.phase(title): sequence phase('A') → phase('B') emits phase_
 			.map((e) => `${e.type}:${(e.data as { phase: string }).phase}`);
 		assert.deepEqual(phaseEvents, ["dwf.phase_started:A", "dwf.phase_completed:A", "dwf.phase_started:B"]);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-12 getWorkflowPhaseState: returns currentPhase and deduped phases[]", () => {
+test("round-12 getWorkflowPhaseState: returns currentPhase and deduped phases[]", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -562,11 +563,11 @@ test("round-12 getWorkflowPhaseState: returns currentPhase and deduped phases[]"
 		assert.equal(state?.currentPhase, "Scan");
 		assert.deepEqual(state?.phases, ["Scan", "Audit"], "phases[] is deduped; Scan was not re-appended");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-12 ctx.phase(title): 100-cap bounds in-memory phases[] but events still flow", () => {
+test("round-12 ctx.phase(title): 100-cap bounds in-memory phases[] but events still flow", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -584,7 +585,7 @@ test("round-12 ctx.phase(title): 100-cap bounds in-memory phases[] but events st
 		const phaseStarted = events.filter((e) => e.type === "dwf.phase_started");
 		assert.equal(phaseStarted.length, 105, "events still emit past the cap");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -592,7 +593,7 @@ test("round-12 ctx.phase(title): 100-cap bounds in-memory phases[] but events st
 // round-14 P1-2: ctx.budget — per-workflow token budget
 // ---------------------------------------------------------------------------
 
-test("round-14 ctx.budget: total is null by default (unbounded)", () => {
+test("round-14 ctx.budget: total is null by default (unbounded)", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -601,11 +602,11 @@ test("round-14 ctx.budget: total is null by default (unbounded)", () => {
 		});
 		assert.equal(ctx.budget.total, null, "no tokenBudget → total is null (unbounded)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-14 ctx.budget: total reflects opts.tokenBudget", () => {
+test("round-14 ctx.budget: total reflects opts.tokenBudget", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -615,11 +616,11 @@ test("round-14 ctx.budget: total reflects opts.tokenBudget", () => {
 		});
 		assert.equal(ctx.budget.total, 500);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-14 ctx.budget: spent() starts at 0", () => {
+test("round-14 ctx.budget: spent() starts at 0", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -629,11 +630,11 @@ test("round-14 ctx.budget: spent() starts at 0", () => {
 		});
 		assert.equal(ctx.budget.spent(), 0);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-14 ctx.budget: remaining() is Infinity when total is null", () => {
+test("round-14 ctx.budget: remaining() is Infinity when total is null", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -642,11 +643,11 @@ test("round-14 ctx.budget: remaining() is Infinity when total is null", () => {
 		});
 		assert.equal(ctx.budget.remaining(), Infinity);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-14 ctx.budget: remaining() = total - spent when set", () => {
+test("round-14 ctx.budget: remaining() = total - spent when set", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -656,7 +657,7 @@ test("round-14 ctx.budget: remaining() = total - spent when set", () => {
 		});
 		assert.equal(ctx.budget.remaining(), 500);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -679,7 +680,7 @@ test("round-14 ctx.budget: agent() returns ok:false when budget exhausted (total
 		assert.match(res.error ?? "", /budget exhausted/);
 		assert.equal(res.durationMs, 0);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -714,11 +715,11 @@ test("round-14 ctx.budget: after an agent run, spent accumulates from reported u
 			else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-14 ctx.budget: is frozen (immutable surface)", () => {
+test("round-14 ctx.budget: is frozen (immutable surface)", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -728,7 +729,7 @@ test("round-14 ctx.budget: is frozen (immutable surface)", () => {
 		});
 		assert.ok(Object.isFrozen(ctx.budget), "budget object is frozen");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -736,7 +737,7 @@ test("round-14 ctx.budget: is frozen (immutable surface)", () => {
 // round-14 P1-3: ctx.log — workflow-level log API
 // ---------------------------------------------------------------------------
 
-test("round-14 ctx.log('hello'): appends to in-memory logs", () => {
+test("round-14 ctx.log('hello'): appends to in-memory logs", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -746,11 +747,11 @@ test("round-14 ctx.log('hello'): appends to in-memory logs", () => {
 		ctx.log("hello");
 		assert.deepEqual(getWorkflowLogs(ctx), ["hello"]);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-14 ctx.log({a:1}): stringifies non-string messages", () => {
+test("round-14 ctx.log({a:1}): stringifies non-string messages", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -760,11 +761,11 @@ test("round-14 ctx.log({a:1}): stringifies non-string messages", () => {
 		ctx.log({ a: 1 });
 		assert.deepEqual(getWorkflowLogs(ctx), ['{"a":1}']);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-14 ctx.log: emits dwf.log event with the message in data", () => {
+test("round-14 ctx.log: emits dwf.log event with the message in data", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -779,11 +780,11 @@ test("round-14 ctx.log: emits dwf.log event with the message in data", () => {
 		assert.equal(logEvents[0]?.data?.message, "a log line");
 		assert.equal(logEvents[1]?.data?.message, '{"nested":true}');
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-14 ctx.log: 1000-cap bounds in-memory logs but events still flow", () => {
+test("round-14 ctx.log: 1000-cap bounds in-memory logs but events still flow", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -798,7 +799,7 @@ test("round-14 ctx.log: 1000-cap bounds in-memory logs but events still flow", (
 		const logEvents = events.filter((e) => e.type === "dwf.log");
 		assert.equal(logEvents.length, 1001, "events still emit past the cap");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -806,7 +807,7 @@ test("round-14 ctx.log: 1000-cap bounds in-memory logs but events still flow", (
 // round-14 P1-5: ctx.args — typed workflow arguments
 // ---------------------------------------------------------------------------
 
-test("round-14 ctx.args(): returns {} by default when no args provided", () => {
+test("round-14 ctx.args(): returns {} by default when no args provided", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -815,11 +816,11 @@ test("round-14 ctx.args(): returns {} by default when no args provided", () => {
 		});
 		assert.deepEqual(ctx.args(), {});
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-14 ctx.args<T>(): returns the typed value passed via opts.args", () => {
+test("round-14 ctx.args<T>(): returns the typed value passed via opts.args", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -831,11 +832,11 @@ test("round-14 ctx.args<T>(): returns the typed value passed via opts.args", () 
 		assert.equal(args.foo, "bar");
 		assert.equal(args.count, 3);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-14 ctx.args(): accepts non-object args (e.g. an array)", () => {
+test("round-14 ctx.args(): accepts non-object args (e.g. an array)", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -846,7 +847,7 @@ test("round-14 ctx.args(): accepts non-object args (e.g. an array)", () => {
 		const args = ctx.args<string[]>();
 		assert.deepEqual(args, ["a", "b"]);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -863,7 +864,7 @@ test("ctx.pipeline — single stage transform", async () => {
 		const result = await ctx.pipeline([1, 2, 3], (x) => (x as number) * 2);
 		assert.deepEqual(result, [2, 4, 6]);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -880,7 +881,7 @@ test("ctx.pipeline — multiple sequential stages", async () => {
 		);
 		assert.deepEqual(result, [3, 5, 7]);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -893,7 +894,7 @@ test("ctx.pipeline — empty array returns empty", async () => {
 		const result = await ctx.pipeline([], (x) => x);
 		assert.deepEqual(result, []);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -914,7 +915,7 @@ test("ctx.pipeline — failed stage yields null + logs, other items continue", a
 			"error should be logged via ctx.log",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -926,7 +927,7 @@ test("ctx.pipeline — non-array first arg throws TypeError", async () => {
 		});
 		await assert.rejects(() => ctx.pipeline("not-array" as unknown as never[], (x) => x), /expects an array/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -938,7 +939,7 @@ test("ctx.pipeline — non-function stage throws TypeError", async () => {
 		});
 		await assert.rejects(() => ctx.pipeline([1], "not-a-function" as unknown as never), /stages must be functions/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -958,7 +959,7 @@ test("ctx.pipeline — stage receives (previous, original, index)", async () => 
 			[20, 20, 1],
 		]);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -980,7 +981,7 @@ test("ctx.pipeline — stage receives previous stage output as 'previous'", asyn
 		);
 		assert.deepEqual(seen, [12]);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -996,7 +997,7 @@ test("ctx.pipeline — async stages work", async () => {
 		});
 		assert.deepEqual(result, [3, 6, 9]);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1019,7 +1020,7 @@ test("ctx.pipeline — execution bounded by workflow concurrency", async () => {
 		assert.ok(maxInFlight <= 2, `maxInFlight ${maxInFlight} must not exceed concurrency 2`);
 		assert.ok(maxInFlight >= 2, `maxInFlight ${maxInFlight} should reach the concurrency limit`);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1050,7 +1051,7 @@ test("round-17 P2-4: prepareAgentWorktree creates an isolated worktree (cwd === 
 		process.platform === "win32"
 			? "git worktree path-normalization is flaky on Windows (forward/back-slash mismatch); covered on ubuntu/macos CI"
 			: false,
-}, () => {
+}, async () => {
 	const cwd = tmpCwd();
 	try {
 		initGitRepo(cwd);
@@ -1075,13 +1076,13 @@ test("round-17 P2-4: prepareAgentWorktree creates an isolated worktree (cwd === 
 		assert.match(list, new RegExp(escapeRe(wt.worktreePath!)), "git worktree list contains the worktree");
 		cleanupAgentWorktree(manifest, wt.worktreePath!, wt.branch);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
 test("round-17 P2-4: cleanupAgentWorktree removes the worktree dir + branch (no leak)", {
 	skip: process.platform === "win32" ? "git worktree path-normalization is flaky on Windows" : false,
-}, () => {
+}, async () => {
 	const cwd = tmpCwd();
 	try {
 		initGitRepo(cwd);
@@ -1110,13 +1111,13 @@ test("round-17 P2-4: cleanupAgentWorktree removes the worktree dir + branch (no 
 		});
 		assert.doesNotMatch(branchesAfter, new RegExp(escapeRe(branch)), "ephemeral branch deleted after cleanup");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
 test("round-17 P2-4: cleanupAgentWorktree captures a diff artifact when the worktree has changes", {
 	skip: process.platform === "win32" ? "git worktree path-normalization is flaky on Windows" : false,
-}, () => {
+}, async () => {
 	const cwd = tmpCwd();
 	try {
 		initGitRepo(cwd);
@@ -1136,18 +1137,18 @@ test("round-17 P2-4: cleanupAgentWorktree captures a diff artifact when the work
 		const content = fs.readFileSync(path.join(wfDir, diffFiles[0]), "utf-8");
 		assert.match(content, /README\.md/, "diff artifact records the modified file");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-17 P2-4: prepareAgentWorktree returns undefined for non-git cwd (graceful fallback)", () => {
+test("round-17 P2-4: prepareAgentWorktree returns undefined for non-git cwd (graceful fallback)", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
 		const wt = prepareAgentWorktree(manifest, "agent-1");
 		assert.equal(wt, undefined, "non-git cwd → undefined (caller falls back to normal cwd)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1190,7 +1191,7 @@ test("round-17 P2-4: ctx.agent({worktree:true}) isolates the agent and cleans up
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = savedMock;
 		if (savedAllow === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1220,7 +1221,7 @@ test("round-17 P2-4: ctx.agent({worktree:false}) uses normal cwd — no worktree
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = savedMock;
 		if (savedAllow === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1252,7 +1253,7 @@ test("round-17 P2-4: ctx.agent({worktree:true}) falls back gracefully in a non-g
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = savedMock;
 		if (savedAllow === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1289,7 +1290,7 @@ test("round-17 P2-4: ctx.agent({worktree:true}) cleans up the worktree even when
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = savedMock;
 		if (savedAllow === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1331,7 +1332,7 @@ test("round-18 ctx.agent() fires onCheckpoint after each call (success path)", a
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = savedMock;
 		if (savedAllow === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1354,7 +1355,7 @@ test("round-18 ctx.agent() fires onCheckpoint even when the agent fails", async 
 		assert.equal(checkpoints[0].agentCount, 1);
 	} finally {
 		delete process.env.PI_TEAMS_MOCK_CHILD_PI;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1383,7 +1384,7 @@ test("round-18 onCheckpoint agentCount accumulates across multiple calls", async
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = savedMock;
 		if (savedAllow === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1406,11 +1407,11 @@ test("round-18 onCheckpoint never fires when the callback is omitted (backward c
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = savedMock;
 		if (savedAllow === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = savedAllow;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-18 makeWorkflowCtx hydrates vars/phases/logs/spent/agentCount from resumedState", () => {
+test("round-18 makeWorkflowCtx hydrates vars/phases/logs/spent/agentCount from resumedState", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -1442,11 +1443,11 @@ test("round-18 makeWorkflowCtx hydrates vars/phases/logs/spent/agentCount from r
 		// agentCount hydrated.
 		assert.equal(getWorkflowCheckpoint(ctx).agentCount, 4);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-18 makeWorkflowCtx without resumedState starts empty (fresh run, backward compat)", () => {
+test("round-18 makeWorkflowCtx without resumedState starts empty (fresh run, backward compat)", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -1460,11 +1461,11 @@ test("round-18 makeWorkflowCtx without resumedState starts empty (fresh run, bac
 		assert.equal(ctx.budget.spent(), 0);
 		assert.equal(getWorkflowCheckpoint(ctx).agentCount, 0);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-18 resumedState ctx.vars is a copy (mutating it does not affect the source)", () => {
+test("round-18 resumedState ctx.vars is a copy (mutating it does not affect the source)", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -1486,11 +1487,11 @@ test("round-18 resumedState ctx.vars is a copy (mutating it does not affect the 
 		ctx.vars.x = 99;
 		assert.equal(resumed.vars.x, 1, "hydrated ctx.vars is a shallow copy — source checkpoint untouched");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("round-18 getWorkflowCheckpoint() snapshots the current ctx state", () => {
+test("round-18 getWorkflowCheckpoint() snapshots the current ctx state", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -1509,7 +1510,7 @@ test("round-18 getWorkflowCheckpoint() snapshots the current ctx state", () => {
 		assert.equal(cp.agentCount, 0);
 		assert.equal(typeof cp.updatedAt, "string");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1561,7 +1562,7 @@ test("R6-3: same prompt + different inputs → two separate spawns (cache must N
 		assert.notEqual(r1.artifactPath, r2.artifactPath, "different inputs alter the dispatched task — distinct cache entries");
 		assert.equal(countArtifacts(manifest.artifactsRoot), 2, "two real spawns wrote two artifacts (pre-fix: 1, second call cache-hit)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1579,7 +1580,7 @@ test("R6-3: same prompt + different systemPrompt → two separate spawns", async
 		assert.notEqual(r1.artifactPath, r2.artifactPath, "different systemPrompt — distinct cache entries");
 		assert.equal(countArtifacts(manifest.artifactsRoot), 2, "two real spawns");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1617,7 +1618,7 @@ test("R2-M-B5 (Wave-3): identical call twice in ONE run → TWO spawns (cache is
 		assert.notEqual(r3.artifactPath, r1.artifactPath, "sorted-inputs normalization still does not hit within-run");
 		assert.equal(countArtifacts(manifest.artifactsRoot), 3, "three spawns total");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1668,8 +1669,8 @@ test("R6-3: replay from a hydrated PERS-1 record returns structured + artifactPa
 		assert.equal(r2.artifactPath, r1.artifactPath, "R6-3: replay keeps artifactPath");
 		assert.equal(countArtifacts(manifest2.artifactsRoot), 0, "no spawn happened — the hydrated record satisfied the call");
 	} finally {
-		fs.rmSync(cwd1, { recursive: true, force: true });
-		fs.rmSync(cwd2, { recursive: true, force: true });
+		await cleanupStateRoot(cwd1);
+		await cleanupStateRoot(cwd2);
 	}
 });
 
@@ -1693,7 +1694,7 @@ test("R6-10: ctx.retry retries ok:false — two failures then success = 3 agent 
 		assert.equal(res.ok, true, "third attempt's success is returned");
 		assert.equal(res.text, "third-time-ok");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1712,7 +1713,7 @@ test("R6-10: ctx.retry persistent ok:false → 3 attempts, returns the LAST fail
 		assert.equal(res.ok, false, "exhaustion returns the carried AgentResult (return type unchanged)");
 		assert.equal(res.error, "probe-fail-3", "the LAST attempt's failure is returned");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1730,7 +1731,7 @@ test("R6-10: ctx.retry does not swallow DwfAgentCallCapError (cap still terminat
 			"cap errors propagate out of ctx.retry unchanged",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -1762,11 +1763,11 @@ test("R6-12: checkpoint (agentCount + onCheckpoint) lands BEFORE the worktree cl
 		const after = execSync("git worktree list", { cwd, encoding: "utf-8" }).trim().split("\n").length;
 		assert.equal(after, 1, "cleanup still runs before agent() resolves (no worktree leak)");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("R6-12: resumed run does NOT re-emit phase events for checkpoint-recorded phases", () => {
+test("R6-12: resumed run does NOT re-emit phase events for checkpoint-recorded phases", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -1806,11 +1807,11 @@ test("R6-12: resumed run does NOT re-emit phase events for checkpoint-recorded p
 			"only the genuinely-new boundary emits",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("R6-12: fresh run still re-emits when a script re-enters a phase title (guard is resume-only)", () => {
+test("R6-12: fresh run still re-emits when a script re-enters a phase title (guard is resume-only)", async () => {
 	const cwd = tmpCwd();
 	try {
 		const manifest = fakeManifest(cwd);
@@ -1827,6 +1828,6 @@ test("R6-12: fresh run still re-emits when a script re-enters a phase title (gua
 			"no resumedState → hydratedPhases is empty → same-title re-entry still emits",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { appendCrewAgentEvent } from "../../../../src/runtime/crew-agent-records.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 /**
  * Round 22 (defensive caps): The `agentEventSeqCache` Map is module-level
@@ -44,7 +45,7 @@ function buildManifest(cwd: string) {
 	}).manifest;
 }
 
-test("agentEventSeqCache evicts oldest entries when it exceeds the cap (Round 22)", () => {
+test("agentEventSeqCache evicts oldest entries when it exceeds the cap (Round 22)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-seq-cap-"));
 	// createRunManifest uses project state when findRepoRoot() returns a path;
 	// we need a git repo in the tmp dir so files go to the project root
@@ -92,5 +93,5 @@ test("agentEventSeqCache evicts oldest entries when it exceeds the cap (Round 22
 	const parsed2 = JSON.parse(lines2[1]) as { seq: number };
 	assert.equal(parsed2.seq, 2, "second write should have seq=2 (cache hit)");
 
-	fs.rmSync(cwd, { recursive: true, force: true });
+	await cleanupStateRoot(cwd);
 });

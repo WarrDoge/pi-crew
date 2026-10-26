@@ -10,7 +10,7 @@
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 
@@ -25,6 +25,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowStep } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // WorkflowStep/TeamConfig sống ở module khác — cast nhẹ cho fixture.
 const team = {
@@ -176,7 +177,7 @@ describe("finalizeTaskResult — surfaceLost degrade terminalisation (S2-T11)", 
 			assert.ok(!events.includes("task.completed"), "chưa hoàn thành thì không được phát task.completed");
 			assert.ok(!events.includes("task.failed"), "mất pane KHÔNG phải task failure");
 		} finally {
-			rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

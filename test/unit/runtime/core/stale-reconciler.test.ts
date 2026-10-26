@@ -11,6 +11,7 @@ import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir, removeTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const baseManifest: TeamRunManifest = {
 	schemaVersion: 1,
@@ -258,7 +259,7 @@ describe("reconcileStaleRun", () => {
 		assert.equal(result.repaired, true);
 	});
 
-	it("repairs dead PID immediately even with a fresh heartbeat.json (F1: 353s pid_dead lag)", () => {
+	it("repairs dead PID immediately even with a fresh heartbeat.json (F1: 353s pid_dead lag)", async () => {
 		// Regression: a <5min-old heartbeat.json USED to override the authoritative
 		// kill(0) ESRCH verdict (returning alive:true), delaying repair ~5min and
 		// producing the observed ~353s pid_dead detection lag. Now ESRCH wins → repaired
@@ -279,7 +280,7 @@ describe("reconcileStaleRun", () => {
 			assert.equal(result.verdict, "pid_dead");
 			assert.equal(result.repaired, true);
 		} finally {
-			fs.rmSync(tmpRoot, { recursive: true, force: true });
+			await cleanupStateRoot(tmpRoot);
 		}
 	});
 
@@ -379,11 +380,11 @@ describe("reconcileOrphanedTempWorkspaces", () => {
 		tempDirs.push(isolatedTmp);
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		// Clean up any temp dirs created during tests
 		for (const dir of tempDirs.splice(0)) {
 			try {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await cleanupStateRoot(dir);
 			} catch {
 				/* ignore */
 			}

@@ -7,7 +7,7 @@
  * `setPerWriteValidatorsForTest` to inject a known validator + a temp dir.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
@@ -19,6 +19,7 @@ import {
 	validateJson,
 	validateWrittenFile,
 } from "../../../../src/runtime/per-write-validator.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 let dir: string;
 
@@ -27,9 +28,9 @@ beforeEach(() => {
 	setPerWriteValidatorsForTest(undefined); // default registry (json)
 });
 
-afterEach(() => {
+afterEach(async () => {
 	try {
-		rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	} catch {
 		// ignore
 	}

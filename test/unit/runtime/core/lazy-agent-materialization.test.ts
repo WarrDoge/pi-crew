@@ -8,6 +8,7 @@ import { readCrewAgents } from "../../../../src/runtime/crew-agent-records.ts";
 import { unregisterActiveRun } from "../../../../src/state/stores/active-run-registry.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import { firstText } from "../../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function restore(name: string, value: string | undefined): void {
 	if (value === undefined) delete process.env[name];
@@ -61,6 +62,6 @@ test.skip("queued dependency tasks are shown as waiting tasks, not materialized 
 		if (runId) unregisterActiveRun(runId);
 		restore("PI_TEAMS_MOCK_CHILD_PI", previousMock);
 		restore("PI_TEAMS_EXECUTE_WORKERS", previousExecute);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

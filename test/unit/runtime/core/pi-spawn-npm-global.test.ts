@@ -24,6 +24,7 @@ import {
 	getPiSpawnCommand,
 	resolveNpmGlobalRoot,
 } from "../../../../src/runtime/pi-spawn.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("resolveNpmGlobalRoot returns an absolute path on a machine with npm", () => {
 	// Force recompute so we test the live `npm root -g` path, not a prior cache.
@@ -67,7 +68,7 @@ test("buildNpmGlobalPackageDirs maps a root to both scope package dirs", () => {
 	);
 });
 
-test("Issue #33: pi found under a custom npm global root (nvm/Volta/fnm layout), not %APPDATA%", () => {
+test("Issue #33: pi found under a custom npm global root (nvm/Volta/fnm layout), not %APPDATA%", async () => {
 	// Simulate pi installed in an npm global root that is NOT %APPDATA%\npm —
 	// the exact scenario that produced `spawn pi ENOENT` on Windows.
 	const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-npmglobal-"));
@@ -100,11 +101,11 @@ test("Issue #33: pi found under a custom npm global root (nvm/Volta/fnm layout),
 		if (prevBin === undefined) delete process.env.PI_TEAMS_PI_BIN;
 		else process.env.PI_TEAMS_PI_BIN = prevBin;
 		__setNpmGlobalRootForTest(undefined); // reset memo for other tests
-		fs.rmSync(fakeRoot, { recursive: true, force: true });
+		await removeDirWithRetry(fakeRoot);
 	}
 });
 
-test("Issue #33: @mariozechner legacy scope also resolves via the global root", () => {
+test("Issue #33: @mariozechner legacy scope also resolves via the global root", async () => {
 	const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-npmglobal-"));
 	const pkgDir = path.join(fakeRoot, "@mariozechner", "pi-coding-agent");
 	const distDir = path.join(pkgDir, "dist");
@@ -132,6 +133,6 @@ test("Issue #33: @mariozechner legacy scope also resolves via the global root", 
 		if (prevBin === undefined) delete process.env.PI_TEAMS_PI_BIN;
 		else process.env.PI_TEAMS_PI_BIN = prevBin;
 		__setNpmGlobalRootForTest(undefined);
-		fs.rmSync(fakeRoot, { recursive: true, force: true });
+		await removeDirWithRetry(fakeRoot);
 	}
 });

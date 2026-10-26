@@ -13,7 +13,7 @@
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
 
@@ -27,6 +27,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { ArtifactDescriptor, TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowStep } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team = {
 	name: "breakdown-index",
@@ -47,8 +48,8 @@ const agent: AgentConfig = {
 const step = { id: "s", role: "worker", task: "Do the task", source: "builtin" } as never as WorkflowStep;
 
 const tmpDirs: string[] = [];
-after(() => {
-	for (const dir of tmpDirs) rmSync(dir, { recursive: true, force: true });
+after(async () => {
+	for (const dir of tmpDirs) await removeDirWithRetry(dir);
 });
 
 function makeFixture() {

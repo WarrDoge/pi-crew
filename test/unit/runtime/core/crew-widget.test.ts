@@ -8,6 +8,7 @@ import { saveCrewAgents } from "../../../../src/runtime/crew-agent-records.ts";
 import { clearLiveAgentsForTest } from "../../../../src/runtime/live-session/live-agent-manager.ts";
 import { createRunManifest, loadRunManifestById, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
 import { buildCrewWidgetLines, type CrewWidgetState, updateCrewWidget } from "../../../../src/ui/widget/index.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 test("crew widget renders installed-style run and agent summary lines", async () => {
 	clearLiveAgentsForTest();
@@ -83,14 +84,14 @@ test("crew widget renders installed-style run and agent summary lines", async ()
 		);
 		assert.ok(calls.at(-1)?.key === "pi-crew-tasks" && calls.at(-1)?.content?.length, "task list installed after the dock");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(tempHome, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(tempHome);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
 });
 
-test("crew widget hides old fixture runs, shows active runs", () => {
+test("crew widget hides old fixture runs, shows active runs", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-widget-stale-"));
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-widget-home-"));
@@ -165,14 +166,14 @@ test("crew widget hides old fixture runs, shows active runs", () => {
 		lines = buildCrewWidgetLines(cwd, 0);
 		assert.match(lines.join("\n"), /1 running/, `active run should count, got: ${lines.join(" / ")}`);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(tempHome, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(tempHome);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
 });
 
-test("crew widget keeps persistent component until placement changes and refreshes progress", () => {
+test("crew widget keeps persistent component until placement changes and refreshes progress", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-widget-persist-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -278,7 +279,7 @@ test("crew widget keeps persistent component until placement changes and refresh
 		updateCrewWidget(ctx, state, { widgetPlacement: "belowEditor" });
 		assert.equal(setWidgetCalls.filter((call) => call.key === "pi-crew-active" && call.content).length, 2);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -361,7 +362,7 @@ test("crew widget header spinner animates time-based across renders even when st
 		assert.equal(first.slice(0, 2), "┃ ", `the rail survives the spinner, got ${JSON.stringify(first)}`);
 		assert.notEqual(firstGlyph, secondGlyph, "expected spinner glyph to advance with wall-clock time even when state.frame is stable");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -429,11 +430,11 @@ test("compact dock hint line never gets the legacy spinner-frame swap (pi-subtas
 		assert.ok(hint.includes("CREW ▸ "), `counts text must stay intact, got ${JSON.stringify(hint)}`);
 		assert.ok(hint.includes("···· ↓·enter"), `entry hint must stay intact, got ${JSON.stringify(hint)}`);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("crew widget hides active async runs whose background process is stale", () => {
+test("crew widget hides active async runs whose background process is stale", async () => {
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-widget-stale-async-home-"));
 	const previousHome = process.env.PI_TEAMS_HOME;
 	process.env.PI_TEAMS_HOME = home;
@@ -473,14 +474,14 @@ test("crew widget hides active async runs whose background process is stale", ()
 		const lines = buildCrewWidgetLines(cwd, 0);
 		assert.equal(lines.join("\n"), "");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(home);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
 });
 
-test("C4: widget signature cache invalidates on write so genuine state changes trigger re-render", () => {
+test("C4: widget signature cache invalidates on write so genuine state changes trigger re-render", async () => {
 	clearLiveAgentsForTest();
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-widget-c4-"));
 	try {
@@ -579,6 +580,6 @@ test("C4: widget signature cache invalidates on write so genuine state changes t
 		const secondRender = component.render(100).join("\n");
 		assert.match(secondRender, /CREW ▸ /, "re-render after invalidation stays healthy");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

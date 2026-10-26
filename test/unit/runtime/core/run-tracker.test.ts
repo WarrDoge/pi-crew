@@ -16,6 +16,7 @@ import {
 import { createRunManifest, saveRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -58,7 +59,7 @@ test("waitForRun returns immediately for a terminal manifest on disk", async () 
 		});
 		assert.equal(result.manifest.status, "completed");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -88,7 +89,7 @@ test("detachRunPromise releases the foreground waiter while the run is still run
 		assert.equal(detachRunPromise(created.manifest.runId, cwd), true);
 		assert.equal(hasPendingRunDetach(created.manifest.runId), true);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 		clearRunPromisesForTest();
 	}
 });
@@ -110,7 +111,7 @@ test("detach releases a POLLING waiter (promise not registered yet)", async () =
 		// Request was consumed — a later waiter is unaffected.
 		assert.equal(hasPendingRunDetach(created.manifest.runId), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 		clearRunPromisesForTest();
 	}
 });
@@ -127,7 +128,7 @@ test("detach requested before the waiter starts still releases it", async () => 
 		assert.equal(result.detached, true);
 		assert.equal(hasPendingRunDetach(created.manifest.runId), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 		clearRunPromisesForTest();
 	}
 });
@@ -138,7 +139,7 @@ test("detachRunPromise returns false when the run state cannot be read", async (
 	try {
 		assert.equal(detachRunPromise("team_does_not_exist", cwd), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 		clearRunPromisesForTest();
 	}
 });
@@ -176,7 +177,7 @@ test("waitForRun awaits a foreground promise and resolves when run completes", a
 		assert.equal(result.manifest.status, "completed");
 		assert.equal(hasActiveRunPromise(created.manifest.runId), false);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 		clearRunPromisesForTest();
 	}
 });
@@ -212,7 +213,7 @@ test("waitForRun rejects when run promise is rejected", async () => {
 			(error) => (error as Error).message === "Simulated run failure",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 		clearRunPromisesForTest();
 	}
 });
@@ -242,7 +243,7 @@ test("waitForRun times out if run never finishes and no promise is registered", 
 			(error) => (error as Error).message.includes("timed out"),
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 		clearRunPromisesForTest();
 	}
 });
@@ -278,8 +279,8 @@ test("waitForRun honours user scope for markerless cwds (issue #54)", async () =
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(home);
 		clearRunPromisesForTest();
 	}
 });
@@ -322,7 +323,7 @@ test("F1 register/await race: a late-registered promise releases a waiter alread
 		assert.equal(await entry.promise.then((r) => r.waiting?.taskId), "01_explore");
 	} finally {
 		clearRunPromisesForTest();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -392,6 +393,6 @@ test("R37-F1: an oversized timeoutMs is clamped — the waiter does NOT reject a
 		entry.resolve({ manifest: created.manifest, tasks: [] });
 	} finally {
 		clearRunPromisesForTest();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

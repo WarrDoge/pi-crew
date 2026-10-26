@@ -31,6 +31,7 @@ import { describe, test } from "node:test";
 import { TEAM_EVENT_TYPES } from "../../../../src/state/contracts.ts";
 import { allWorkflows, discoverWorkflows, invalidateWorkflowDiscoveryCache } from "../../../../src/workflows/discover-workflows.ts";
 import type { WorkflowStep } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ─── (a) Guard predicate logic ────────────────────────────────────────────
 
@@ -90,7 +91,7 @@ function writeProjectWorkflow(cwd: string, body: string): void {
 }
 
 describe("F-02 source propagation via discoverWorkflows", () => {
-	test("project workflow steps carry source='project'", () => {
+	test("project workflow steps carry source='project'", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-f02-"));
 		try {
 			writeProjectWorkflow(
@@ -117,11 +118,11 @@ describe("F-02 source propagation via discoverWorkflows", () => {
 			assert.equal(step!.source, "project", "step source must be 'project' for project-sourced workflows");
 			assert.equal(step!.preStepScript, undefined, "project-sourced preStepScript must be stripped at discover layer (F-02)");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	test("project workflow preStepScript is stripped at discover layer", () => {
+	test("project workflow preStepScript is stripped at discover layer", async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-f02-strip-"));
 		try {
 			writeProjectWorkflow(
@@ -150,11 +151,11 @@ describe("F-02 source propagation via discoverWorkflows", () => {
 			assert.equal(step!.preStepScript, undefined);
 			assert.equal(step!.preStepArgs, undefined);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 
-	test("builtin workflow steps carry source='builtin'", () => {
+	test("builtin workflow steps carry source='builtin'", async () => {
 		// discoverWorkflows from any cwd always discovers builtin workflows from
 		// the package. Use a temp cwd with no project workflows to isolate.
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-f02builtin-"));
@@ -168,7 +169,7 @@ describe("F-02 source propagation via discoverWorkflows", () => {
 				}
 			}
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

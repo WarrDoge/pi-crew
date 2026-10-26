@@ -7,6 +7,7 @@ import test from "node:test";
 import { runTeamTask } from "../../../../src/runtime/task-runner.ts";
 import { createRunManifest, loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * NEW-4 / G25 (SDD-4 WI-4): child-executor only persisted worker heartbeats
@@ -144,7 +145,7 @@ test("[pulse-1] alive-but-silent worker keeps heartbeat fresh during the silent 
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;
 		}
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

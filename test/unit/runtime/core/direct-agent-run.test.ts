@@ -7,6 +7,7 @@ import { allAgents, discoverAgents } from "../../../../src/agents/discover-agent
 import { handleTeamTool } from "../../../../src/extension/team-tool.ts";
 import { directTeamAndWorkflowFromRun } from "../../../../src/runtime/direct-run.ts";
 import { loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function restoreEnv(name: string, previous: string | undefined): void {
 	if (previous === undefined) delete process.env[name];
@@ -42,7 +43,7 @@ test("direct agent run creates a single task for requested agent", async () => {
 	} finally {
 		restoreEnv("PI_TEAMS_EXECUTE_WORKERS", previousExecute);
 		restoreEnv("PI_TEAMS_MOCK_CHILD_PI", previousMock);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -71,11 +72,11 @@ test("direct agent run persists model override for reconstruction", async () => 
 	} finally {
 		restoreEnv("PI_TEAMS_EXECUTE_WORKERS", previousExecute);
 		restoreEnv("PI_TEAMS_MOCK_CHILD_PI", previousMock);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("direct reconstruction does not hijack custom direct-prefixed teams", () => {
+test("direct reconstruction does not hijack custom direct-prefixed teams", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-direct-prefix-"));
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -102,7 +103,7 @@ test("direct reconstruction does not hijack custom direct-prefixed teams", () =>
 		);
 		assert.equal(reconstructed, undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -129,6 +130,6 @@ test("direct agent runs can resume from generated team/workflow metadata", async
 	} finally {
 		restoreEnv("PI_TEAMS_EXECUTE_WORKERS", previousExecute);
 		restoreEnv("PI_TEAMS_MOCK_CHILD_PI", previousMock);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { reconcileOrphanedTempWorkspaces } from "../../../../src/runtime/stale-reconciler.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 /**
  * Frozen-workspace regression (live 2026-09-26): a session killed between
@@ -56,7 +57,7 @@ function makeWorkspace(isolatedTmp: string): string {
 }
 
 function run(name: string, sentinelAgeMs: number, expectCleaned: boolean): void {
-	test(name, () => {
+	test(name, async () => {
 		const isolatedTmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-isotmp-"));
 		try {
 			const now = Date.now();
@@ -78,7 +79,7 @@ function run(name: string, sentinelAgeMs: number, expectCleaned: boolean): void 
 				assert.ok(fs.existsSync(wsDir), "fresh-sentinel workspace must be preserved");
 			}
 		} finally {
-			fs.rmSync(isolatedTmp, { recursive: true, force: true });
+			await cleanupStateRoot(isolatedTmp);
 		}
 	});
 }

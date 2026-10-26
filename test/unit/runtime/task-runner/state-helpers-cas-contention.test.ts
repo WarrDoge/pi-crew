@@ -58,6 +58,7 @@ import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import { sleepSync } from "../../../../src/utils/sleep.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { resolveCanonicalDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -92,16 +93,16 @@ function makeTempDir(prefix: string): string {
 	return resolveCanonicalDir(dir);
 }
 
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T | Promise<T>): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = makeTempDir("pi-crew-cas-contention-home-");
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
@@ -135,7 +136,7 @@ function writeStormRewriter(scriptDir: string): string {
 // ── Tests ───────────────────────────────────────────────────────────
 
 test("T-6 (a): other-writer commits mid-CAS → retry reloads from disk → success within MAX_CAS_ATTEMPTS", () => {
-	withIsolatedHome(() => {
+	withIsolatedHome(async () => {
 		const cwd = makeTempDir("pi-crew-cas-contention-a-");
 		try {
 			const created = createRunManifest({ cwd, team, workflow, goal: "cas contention deterministic" });
@@ -194,7 +195,7 @@ test("T-6 (a): other-writer commits mid-CAS → retry reloads from disk → succ
 			);
 		} finally {
 			flushPendingAtomicWrites();
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
@@ -301,11 +302,11 @@ test("T-6 (b): sustained lock-free writer pressure — no convergence error, mer
 	} finally {
 		child?.kill();
 		flushPendingAtomicWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
-		fs.rmSync(scriptDir, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
+		await removeDirWithRetry(scriptDir);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 });
 

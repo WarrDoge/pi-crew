@@ -18,6 +18,7 @@ import type { TeamRunManifest } from "../../../src/state/types.ts";
 import type { TeamConfig } from "../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../src/workflows/workflow-config.ts";
 import { resolveCanonicalDir } from "../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 /**
  * US-003 (2026-09-22): dead-letter queue for exhausted-retry failures.
@@ -78,7 +79,7 @@ function entry(taskId: string, overrides: Partial<DeadletterEntry> = {}): Deadle
 	};
 }
 
-test("US-003: appendDeadletter writes run-local file AND project index with the richer schema", () => {
+test("US-003: appendDeadletter writes run-local file AND project index with the richer schema", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "us003-"));
 	try {
 		const manifest = fakeManifest(cwd);
@@ -125,26 +126,26 @@ test("US-003: appendDeadletter writes run-local file AND project index with the 
 		assert.equal(second[0].taskId, "t1", "prior entry preserved");
 		assert.equal(second[1].runStatus, "failed", "index fills runStatus from the manifest when omitted");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("US-003: index survives run-dir pruning (the point of the spec)", () => {
+test("US-003: index survives run-dir pruning (the point of the spec)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "us003-"));
 	try {
 		const manifest = fakeManifest(cwd);
 		appendDeadletter(manifest, entry("t1"));
 		// Simulate auto-prune deleting the run dir.
-		fs.rmSync(path.dirname(manifest.stateRoot), { recursive: true, force: true });
+		await removeDirWithRetry(path.dirname(manifest.stateRoot));
 		const indexPath = deadletterIndexPath(manifest);
 		assert.equal(fs.existsSync(indexPath), true, "project index must survive run-dir deletion");
 		assert.equal(fs.existsSync(manifest.stateRoot), false, "sanity: run dir is really gone");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("US-003: appendDeadletter never throws into the retry path (best-effort contract)", () => {
+test("US-003: appendDeadletter never throws into the retry path (best-effort contract)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "us003-"));
 	try {
 		// Case A — run-local write fails (parent is a FILE), project index still written.
@@ -163,14 +164,14 @@ test("US-003: appendDeadletter never throws into the retry path (best-effort con
 			assert.equal(readDeadletter(manifestB).length, 1, "run-local record still written when the index cannot be");
 			assert.equal(fs.existsSync(deadletterIndexPath(manifestB)), false);
 		} finally {
-			fs.rmSync(cwd2, { recursive: true, force: true });
+			await removeDirWithRetry(cwd2);
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("US-003 AC-3: handleStatus surfaces deadletter count only when entries exist", () => {
+test("US-003 AC-3: handleStatus surfaces deadletter count only when entries exist", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "us003-"));
 	fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
 	try {
@@ -188,6 +189,6 @@ test("US-003 AC-3: handleStatus surfaces deadletter count only when entries exis
 		assert.match(text, /Deadletter: 1 \(max-retries\)/);
 		assert.equal(deadletterStatusLine(created.manifest) !== undefined, true);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

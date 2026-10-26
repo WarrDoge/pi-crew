@@ -7,6 +7,7 @@ import type { AgentConfig } from "../../../../src/agents/agent-config.ts";
 import { runChildPi } from "../../../../src/runtime/child-pi/child-pi.ts";
 import { buildPiWorkerArgs, checkCrewDepth } from "../../../../src/runtime/model/pi-args.ts";
 import { SubagentManager } from "../../../../src/runtime/subagent-manager.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const agent: AgentConfig = {
 	name: "executor",
@@ -109,7 +110,7 @@ test("recursive child worker at max depth is blocked before provider execution",
 		restoreEnv("PI_CREW_DEPTH", previousDepth);
 		restoreEnv("PI_CREW_MAX_DEPTH", previousMax);
 		restoreEnv("PI_TEAMS_MOCK_CHILD_PI", previousMock);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -141,6 +142,6 @@ test("subagent manager surfaces recursive depth guard errors from the runner", a
 		assert.equal(final.status, "error");
 		assert.match(final.error ?? "", /depth guard blocked child worker/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -28,6 +28,7 @@ import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 // Quiesce loop: a flush can itself wake producers that enqueue NEW coalesced
 // writes (50ms timers) — e.g. the E2 modelExhausted path re-persisting task
@@ -157,7 +158,7 @@ test("bug-026 B: ENOSPC in child stderr → task record carries failureCause=eno
 		// an unhandledRejection AFTER the test (live CI ubuntu: mkdir ENOENT).
 		// Quiesce: flush until no NEW coalesced write appears (see helper).
 		await drainPendingWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -187,7 +188,7 @@ test("bug-026 B: failureCause survives the E2 modelExhausted rewrite", async () 
 		// an unhandledRejection AFTER the test (live CI ubuntu: mkdir ENOENT).
 		// Quiesce: flush until no NEW coalesced write appears (see helper).
 		await drainPendingWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -212,6 +213,6 @@ test("bug-026 B: non-fs mock failure → no failureCause on the task record", as
 		// an unhandledRejection AFTER the test (live CI ubuntu: mkdir ENOENT).
 		// Quiesce: flush until no NEW coalesced write appears (see helper).
 		await drainPendingWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

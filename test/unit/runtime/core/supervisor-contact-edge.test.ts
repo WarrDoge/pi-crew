@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { recordSupervisorContact, supervisorContactFromEvent } from "../../../../src/runtime/supervisor-contact.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 // Edge-case suite for `supervisorContactFromEvent`. Previously exercised via
 // the deprecated `parseSupervisorContactFromLine` wrapper; migrated 2026-08-10
@@ -84,7 +85,7 @@ describe("supervisorContactFromEvent edge cases", () => {
 });
 
 describe("recordSupervisorContact", () => {
-	it("writes contact event to event log", () => {
+	it("writes contact event to event log", async () => {
 		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-sc-"));
 		const eventsPath = path.join(tmpDir, "events.jsonl");
 		fs.writeFileSync(eventsPath, "", "utf-8");
@@ -102,7 +103,7 @@ describe("recordSupervisorContact", () => {
 		assert.equal(event.type, "supervisor.contact");
 		assert.equal(event.taskId, "task-1");
 		assert.equal(event.data.reason, "decision_needed");
-		fs.rmSync(tmpDir, { recursive: true });
+		await cleanupStateRoot(tmpDir, eventsPath);
 	});
 
 	it("handles missing eventsPath gracefully", () => {

@@ -15,6 +15,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { appendCrewAgentEvent } from "../../../../src/runtime/crew-agent-records.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function buildManifest(cwd: string) {
 	return createRunManifest({
@@ -37,7 +38,7 @@ function buildManifest(cwd: string) {
 	}).manifest;
 }
 
-test("writeSeqToSidecar lands atomically: correct .seq content, monotonic seqs, no .tmp leftovers (DR-02 D6)", () => {
+test("writeSeqToSidecar lands atomically: correct .seq content, monotonic seqs, no .tmp leftovers (DR-02 D6)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-seq-atomic-"));
 	// createRunManifest uses project state when findRepoRoot() returns a path;
 	// a .git dir keeps files under the tmp cwd (same trick as the seq-cap test).
@@ -73,6 +74,6 @@ test("writeSeqToSidecar lands atomically: correct .seq content, monotonic seqs, 
 		const leftovers = dirEntries.filter((f) => f.endsWith(".tmp"));
 		assert.deepEqual(leftovers, [], "tmp+rename must not leak temp files");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

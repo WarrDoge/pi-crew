@@ -35,6 +35,7 @@ import {
 } from "../../../src/runtime/process/run-descendant-sweep.ts";
 import { __test, reconcileStaleRun } from "../../../src/runtime/stale-reconciler.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../helpers/rm-retry.ts";
 
 const RUN_ID = "team_run_sweep_11b1";
 /** A pid that is provably not in use — the "recorded worker is dead" fixture. */
@@ -232,7 +233,7 @@ function insideRun(manifest: TeamRunManifest, proc: FakeProc): FakeProc {
 // ── g1: the incident shape — a COMPLETED run is swept ────────────────────────
 
 describe("wave 11b.1 — the sweep is reachable for a terminal run", () => {
-	it("(g1) result_exists (run completed) STILL sweeps: the leak that started the wave is reaped", () => {
+	it("(g1) result_exists (run completed) STILL sweeps: the leak that started the wave is reaped", async () => {
 		const stateRoot = makeStateRoot();
 		const created = new Date().toISOString();
 		const manifest = makeManifest(stateRoot, {
@@ -266,11 +267,11 @@ describe("wave 11b.1 — the sweep is reachable for a terminal run", () => {
 				"its OWN group is signalled (a worker-rooted kill cannot reach it)",
 			);
 		} finally {
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 
-	it("(g4) exactly ONE sweep per reconcile pass on the result_exists path", () => {
+	it("(g4) exactly ONE sweep per reconcile pass on the result_exists path", async () => {
 		const stateRoot = makeStateRoot();
 		const manifest = makeManifest(stateRoot);
 		const { opts } = fakeSweep([]);
@@ -279,11 +280,11 @@ describe("wave 11b.1 — the sweep is reachable for a terminal run", () => {
 			reconcileStaleRun(manifest, [completedTask(DEAD_WORKER_PID)], Date.now());
 			assert.equal(calls.length, 1, "two sweeps for one run would signal a group twice");
 		} finally {
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 
-	it("(g4-b) exactly ONE sweep per reconcile pass on the stale-repair path", () => {
+	it("(g4-b) exactly ONE sweep per reconcile pass on the stale-repair path", async () => {
 		const stateRoot = makeStateRoot();
 		const manifest = makeManifest(stateRoot);
 		const { opts } = fakeSweep([]);
@@ -295,7 +296,7 @@ describe("wave 11b.1 — the sweep is reachable for a terminal run", () => {
 			assert.equal(result.repaired, true, "the stale task is cancelled, so the run is terminal for the sweep");
 			assert.equal(calls.length, 1);
 		} finally {
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 
@@ -342,13 +343,13 @@ describe("wave 11b.1 — the sweep is reachable for a terminal run", () => {
 			assert.equal(pidIsAlive(liveWorkerPid), true, "the live worker is still running afterwards");
 		} finally {
 			child.kill("SIGKILL");
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 
 	// ── g3: a running run is never swept ─────────────────────────────────────
 
-	it("(g3) a RUNNING run never sweeps (regression pin)", () => {
+	it("(g3) a RUNNING run never sweeps (regression pin)", async () => {
 		const stateRoot = makeStateRoot();
 		const manifest = makeManifest(stateRoot, {
 			status: "running",
@@ -361,13 +362,13 @@ describe("wave 11b.1 — the sweep is reachable for a terminal run", () => {
 			assert.equal(result.verdict, "healthy", "a live run with a live pid and fresh heartbeats is healthy");
 			assert.equal(calls.length, 0, "an in-flight run's descendants are legitimate — never swept");
 		} finally {
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 
 	// ── g5: never sweep from inside a worker ─────────────────────────────────
 
-	it("(g5) PI_CREW_KIND=subagent ⇒ no sweep, even for a completed run", () => {
+	it("(g5) PI_CREW_KIND=subagent ⇒ no sweep, even for a completed run", async () => {
 		const stateRoot = makeStateRoot();
 		const manifest = makeManifest(stateRoot);
 		const { opts } = fakeSweep([insideRun(manifest, { pid: 800_003, pgid: 900_003, env: { PI_CREW_BROKER_RUN_ID: RUN_ID } })]);
@@ -378,11 +379,11 @@ describe("wave 11b.1 — the sweep is reachable for a terminal run", () => {
 			assert.equal(result.verdict, "result_exists");
 			assert.equal(calls.length, 0, "a worker must never reap processes of its own (still-running) run");
 		} finally {
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 
-	it("(g5-b) a non-zero PI_CREW_DEPTH ⇒ no sweep", () => {
+	it("(g5-b) a non-zero PI_CREW_DEPTH ⇒ no sweep", async () => {
 		const stateRoot = makeStateRoot();
 		const manifest = makeManifest(stateRoot);
 		const { opts } = fakeSweep([insideRun(manifest, { pid: 800_004, pgid: 900_004, env: { PI_CREW_BROKER_RUN_ID: RUN_ID } })]);
@@ -392,7 +393,7 @@ describe("wave 11b.1 — the sweep is reachable for a terminal run", () => {
 			reconcileStaleRun(manifest, [completedTask(DEAD_WORKER_PID)], Date.now());
 			assert.equal(calls.length, 0, "only depth 0 (host session / detached runner) may sweep");
 		} finally {
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 });
@@ -421,7 +422,7 @@ describe("wave 11b.4 — the sweep marker separates ATTEMPT TIME from PENDING st
 		});
 	}
 
-	it("(g6) a live unmatched group leader leaves the run PENDING, not done", () => {
+	it("(g6) a live unmatched group leader leaves the run PENDING, not done", async () => {
 		const stateRoot = makeStateRoot();
 		const manifest = runnableManifest(stateRoot);
 		const { opts, kills } = fakeSweep([
@@ -450,11 +451,11 @@ describe("wave 11b.4 — the sweep marker separates ATTEMPT TIME from PENDING st
 				"a proven-but-blocked leak MUST stay eligible — otherwise 11b.2 buried it for good",
 			);
 		} finally {
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 
-	it("(g7) an interactive candidate (controlling terminal) ⇒ zero signals, run PENDING", () => {
+	it("(g7) an interactive candidate (controlling terminal) ⇒ zero signals, run PENDING", async () => {
 		const stateRoot = makeStateRoot();
 		const manifest = runnableManifest(stateRoot);
 		const { opts, kills } = fakeSweep([
@@ -475,11 +476,11 @@ describe("wave 11b.4 — the sweep marker separates ATTEMPT TIME from PENDING st
 			assert.deepEqual(kills, [], "an interactive candidate is never signalled");
 			assert.equal(readMarker(manifest).descendantSweepPending, true, "the tty'd leak is retried, not forgotten");
 		} finally {
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 
-	it("(g7-b) a CLEAN sweep clears a previously pending flag", () => {
+	it("(g7-b) a CLEAN sweep clears a previously pending flag", async () => {
 		const stateRoot = makeStateRoot();
 		const manifest = runnableManifest(stateRoot, {
 			descendantSweepAt: new Date(Date.now() - 3_600_000).toISOString(),
@@ -504,11 +505,11 @@ describe("wave 11b.4 — the sweep marker separates ATTEMPT TIME from PENDING st
 			assert.ok(Number.isFinite(Date.parse(String(marker.descendantSweepAt))), "the stamp is refreshed");
 			assert.equal(marker.descendantSweepPending, undefined, "nothing left to retry ⇒ the flag is cleared, not set to false");
 		} finally {
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 
-	it("(g7-c) a dry-run report never stamps and never sets pending", () => {
+	it("(g7-c) a dry-run report never stamps and never sets pending", async () => {
 		const stateRoot = makeStateRoot();
 		const manifest = runnableManifest(stateRoot);
 		const { opts } = fakeSweep([
@@ -525,7 +526,7 @@ describe("wave 11b.4 — the sweep marker separates ATTEMPT TIME from PENDING st
 			assert.equal(marker.descendantSweepAt, undefined, "a report-only pass must not consume the marker");
 			assert.equal(marker.descendantSweepPending, undefined);
 		} finally {
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 });
@@ -548,7 +549,7 @@ describe("wave 11c — the run's spawner pid closes the sync-run descent-proof g
 		return calls[0]?.sessionPid;
 	}
 
-	it("(g8) a DEAD recorded sessionPid proves descent for a sync run's leak", () => {
+	it("(g8) a DEAD recorded sessionPid proves descent for a sync run's leak", async () => {
 		const stateRoot = makeStateRoot();
 		// SYNC topology: no `async` block at all, only the session pi that spawned
 		// the workers — and it has since exited.
@@ -579,7 +580,7 @@ describe("wave 11c — the run's spawner pid closes the sync-run descent-proof g
 			);
 			assert.deepEqual(kills, [{ pgid: 910_105, signal: "SIGTERM" }]);
 		} finally {
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 
@@ -608,11 +609,11 @@ describe("wave 11c — the run's spawner pid closes the sync-run descent-proof g
 			assert.equal(pidIsAlive(liveSessionPid), true, "the fixture session survived untouched");
 		} finally {
 			sessionPi.kill("SIGKILL");
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 
-	it("(g10) a pre-11c sync manifest without sessionPid behaves exactly as before (skip, no error)", () => {
+	it("(g10) a pre-11c sync manifest without sessionPid behaves exactly as before (skip, no error)", async () => {
 		const stateRoot = makeStateRoot();
 		// The exact manifest shape the battery 7b probe used: sync run, no
 		// sessionPid (written before 11c), leak naming an unrecorded session pi.
@@ -634,7 +635,7 @@ describe("wave 11c — the run's spawner pid closes the sync-run descent-proof g
 			assert.deepEqual(results[0]?.reaped, [], "an unrecorded parent is still not proof (the documented miss)");
 			assert.equal(kills.length, 0);
 		} finally {
-			fs.rmSync(stateRoot, { recursive: true, force: true });
+			await cleanupStateRoot(stateRoot);
 		}
 	});
 });

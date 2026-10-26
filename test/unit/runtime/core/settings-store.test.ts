@@ -10,6 +10,7 @@ import {
 	loadCrewSettingsTiers,
 	saveCrewSettings,
 } from "../../../../src/runtime/settings-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /** Hermetic helper: write a crew-settings file and return its path. */
 function writeSettingsFile(filePath: string, data: unknown): string {
@@ -18,7 +19,7 @@ function writeSettingsFile(filePath: string, data: unknown): string {
 	return filePath;
 }
 
-test("loadCrewSettings returns defaults when file missing", () => {
+test("loadCrewSettings returns defaults when file missing", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "settings-store-missing-"));
 	try {
 		// Hermetic: pin the user-tier global file too — otherwise a developer's
@@ -26,11 +27,11 @@ test("loadCrewSettings returns defaults when file missing", () => {
 		const settings = loadCrewSettings(cwd, path.join(cwd, "absent-global.json"));
 		assert.deepEqual(settings, {});
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("save + load roundtrip preserves all fields", () => {
+test("save + load roundtrip preserves all fields", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "settings-store-roundtrip-"));
 	const original = {
 		maxConcurrent: 4,
@@ -46,7 +47,7 @@ test("save + load roundtrip preserves all fields", () => {
 		const settings = loadCrewSettings(cwd, path.join(cwd, "absent-global.json"));
 		assert.deepEqual(settings, original);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -109,7 +110,7 @@ test("applyCrewSettingsToConfig handles missing config sections gracefully", () 
 	assert.equal(configWithoutRuntime.notifierIntervalMs, 2000);
 });
 
-test("saveCrewSettings writes to .pi/crew-settings.json within the temp cwd", () => {
+test("saveCrewSettings writes to .pi/crew-settings.json within the temp cwd", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "settings-store-path-"));
 	const settings = { maxConcurrent: 2 };
 	const expectedPath = path.join(cwd, ".pi", "crew-settings.json");
@@ -119,7 +120,7 @@ test("saveCrewSettings writes to .pi/crew-settings.json within the temp cwd", ()
 		const raw = JSON.parse(fs.readFileSync(expectedPath, "utf-8"));
 		assert.deepEqual(raw, settings);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -130,7 +131,7 @@ test("saveCrewSettings writes to .pi/crew-settings.json within the temp cwd", ()
 // (never touches the real ~/.pi/crew-settings.json).
 // ---------------------------------------------------------------------------
 
-test("project crew-settings raising guard values is dropped with the standard warning", () => {
+test("project crew-settings raising guard values is dropped with the standard warning", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "settings-store-tier-raise-"));
 	try {
 		const projectFile = writeSettingsFile(path.join(cwd, ".pi", "crew-settings.json"), {
@@ -160,11 +161,11 @@ test("project crew-settings raising guard values is dropped with the standard wa
 			);
 		}
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("project crew-settings lowering or equalling guard values is applied", () => {
+test("project crew-settings lowering or equalling guard values is applied", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "settings-store-tier-lower-"));
 	try {
 		writeSettingsFile(path.join(cwd, ".pi", "crew-settings.json"), {
@@ -189,11 +190,11 @@ test("project crew-settings lowering or equalling guard values is applied", () =
 		assert.equal(config.notifierIntervalMs, 9000);
 		assert.equal(warnings.length, 0);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("user-tier crew-settings stay fully trusted (raising applies, no tiering)", () => {
+test("user-tier crew-settings stay fully trusted (raising applies, no tiering)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "settings-store-tier-user-"));
 	try {
 		const globalFile = writeSettingsFile(path.join(cwd, "user-crew-settings.json"), {
@@ -213,11 +214,11 @@ test("user-tier crew-settings stay fully trusted (raising applies, no tiering)",
 		assert.equal(config.runtime.graceTurns, 500);
 		assert.equal(warnings.length, 0);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("project guard value with no effective baseline is dropped (cannot verify tightening)", () => {
+test("project guard value with no effective baseline is dropped (cannot verify tightening)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "settings-store-tier-nobaseline-"));
 	try {
 		const projectFile = writeSettingsFile(path.join(cwd, ".pi", "crew-settings.json"), { defaultMaxTurns: 100 });
@@ -229,11 +230,11 @@ test("project guard value with no effective baseline is dropped (cannot verify t
 		assert.ok(warnings.some((w) => w.includes("runtime.maxTurns")));
 		assert.ok(warnings[0].startsWith(projectFile));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("project-tier scheduledJobs gated behind the user-tier opt-in (Wave B2)", () => {
+test("project-tier scheduledJobs gated behind the user-tier opt-in (Wave B2)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "settings-store-tier-jobs-"));
 	try {
 		const projectFile = writeSettingsFile(path.join(cwd, ".pi", "crew-settings.json"), {
@@ -256,11 +257,11 @@ test("project-tier scheduledJobs gated behind the user-tier opt-in (Wave B2)", (
 		// scheduledJobs never interact with the config-guard pipeline.
 		assert.equal(config.runtime.maxTurns, 50);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("project-tier scheduledJobs register only when the user tier sets BOTH opt-in flags", () => {
+test("project-tier scheduledJobs register only when the user tier sets BOTH opt-in flags", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "settings-store-tier-jobs-optin-"));
 	try {
 		const globalFile = writeSettingsFile(path.join(cwd, "user-crew-settings.json"), {
@@ -288,11 +289,11 @@ test("project-tier scheduledJobs register only when the user tier sets BOTH opt-
 			`unexpected scheduledJobs warning: ${JSON.stringify(warnings)}`,
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("project-tier schedulingEnabled is dropped with a warning, both true and false", () => {
+test("project-tier schedulingEnabled is dropped with a warning, both true and false", async () => {
 	for (const value of [true, false]) {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "settings-store-tier-schedflag-"));
 		try {
@@ -313,12 +314,12 @@ test("project-tier schedulingEnabled is dropped with a warning, both true and fa
 			);
 			assert.equal(config.runtime.maxTurns, 50);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	}
 });
 
-test("user-tier scheduledJobs always pass through; partial opt-in flags never opt in", () => {
+test("user-tier scheduledJobs always pass through; partial opt-in flags never opt in", async () => {
 	const userVariants: Array<Record<string, unknown>> = [
 		{},
 		{ schedulingEnabled: true },
@@ -346,12 +347,12 @@ test("user-tier scheduledJobs always pass through; partial opt-in flags never op
 			// User-tier schedulingEnabled itself stays visible on the user tier.
 			assert.equal(tiers.user.schedulingEnabled, variant.schedulingEnabled);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	}
 });
 
-test("allowProjectScheduledJobs survives sanitizeSettings from the raw user-tier file", () => {
+test("allowProjectScheduledJobs survives sanitizeSettings from the raw user-tier file", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "settings-store-tier-flag-"));
 	try {
 		const globalFile = writeSettingsFile(path.join(cwd, "user-crew-settings.json"), {
@@ -364,6 +365,6 @@ test("allowProjectScheduledJobs survives sanitizeSettings from the raw user-tier
 		assert.equal(tiers.user.schedulingEnabled, true);
 		assert.equal((tiers.user as Record<string, unknown>).allowProjectScheduledJobsInvalid, undefined);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

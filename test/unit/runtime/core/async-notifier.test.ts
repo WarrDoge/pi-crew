@@ -17,6 +17,7 @@ import { createRunManifest, loadRunManifestById, saveRunManifest, saveRunTasks }
 import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -72,7 +73,7 @@ test("async notifier reports pre-existing active runs that finish after notifier
 		assert.match(notifications[0]!.text, /failed/);
 	} finally {
 		stopAsyncRunNotifier(state);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -123,7 +124,7 @@ test("async notifier reports run completed across session restart", async () => 
 		assert.match(notifications[0]!.text, /completed/);
 	} finally {
 		stopAsyncRunNotifier(state);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -175,7 +176,7 @@ test("async notifier marks quiet dead background runner as failed", async () => 
 		assert.equal(repaired?.tasks[0]?.status, "failed");
 		assert.equal(readCrewAgents(manifest)[0]?.status, "failed");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -212,7 +213,7 @@ test("async notifier suppresses notifications after generation becomes stale", a
 		assert.equal(notifications.length, 0);
 	} finally {
 		stopAsyncRunNotifier(state);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -245,7 +246,7 @@ test("async notifier still reports runs created after notifier start", async () 
 		assert.equal(notifications[0]!.level, "info");
 	} finally {
 		stopAsyncRunNotifier(state);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -276,7 +277,7 @@ test("async notifier skips toasts for runs owned by another session", async () =
 		assert.equal(notifications.length, 0, "must not toast another session's run");
 	} finally {
 		stopAsyncRunNotifier(state);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -310,7 +311,7 @@ test("async notifier still toasts runs owned by the current session", async () =
 		assert.match(notifications[0]!.text, /completed/);
 	} finally {
 		stopAsyncRunNotifier(state);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -409,7 +410,7 @@ test("R4-7: only tasks STILL active in the fresh locked read are flipped — com
 		assert.equal(done?.finishedAt, completedAt, "its finishedAt must survive verbatim");
 		assert.equal(repaired?.tasks.find((task) => task.id === "live")?.status, "failed", "still-active task is swept");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -429,7 +430,7 @@ test("R4-7 re-entrance: the dead-runner sweep never self-deadlocks when the run 
 		const repaired = loadRunManifestById(cwd, manifest.runId);
 		assert.equal(repaired?.tasks.find((task) => task.id === "swept")?.status, "failed");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 

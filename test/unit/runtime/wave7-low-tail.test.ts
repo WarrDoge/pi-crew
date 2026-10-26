@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { DWF_CHECKPOINT_VERSION, type DwfCheckpointState, DwfStore } from "../../../src/runtime/dwf-state-store.ts";
 import { CrewScheduler, type ScheduleChangeEvent, type ScheduledJob } from "../../../src/runtime/scheduling/scheduler.ts";
 import { loadRunManifestById, loadRunManifestByIdAsync } from "../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 /**
  * WAVE 7 LOW-tail pins (2026-10-20): scheduler event-order (R14-C4),
@@ -78,7 +79,7 @@ test("R14-C4 (control): future `once` job emits `added` with enabled=true unchan
 
 // ── R2-L-A1: a vanished run must read as undefined, never throw ───────────
 
-test("R2-L-A1: loadRunManifestById returns undefined (no throw) when the manifest vanished", () => {
+test("R2-L-A1: loadRunManifestById returns undefined (no throw) when the manifest vanished", async () => {
 	const dir = tmp();
 	try {
 		const stateRoot = path.join(dir, "state", "runs", "team_gone_1234");
@@ -87,7 +88,7 @@ test("R2-L-A1: loadRunManifestById returns undefined (no throw) when the manifes
 		// retry loop must map ENOENT → undefined (best-effort sweep contract).
 		assert.equal(loadRunManifestById(dir, "team_gone_1234"), undefined);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -98,13 +99,13 @@ test("R2-L-A1 (async twin): loadRunManifestByIdAsync returns undefined (no throw
 		fs.mkdirSync(stateRoot, { recursive: true });
 		assert.equal(await loadRunManifestByIdAsync(dir, "team_gone_async"), undefined);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
 // ── R14-C3 (store half): dispatchContext fingerprints survive the roundtrip
 
-test("R14-C3: DwfStore roundtrips the dispatchContext fingerprint (additive, version-stable)", () => {
+test("R14-C3: DwfStore roundtrips the dispatchContext fingerprint (additive, version-stable)", async () => {
 	const dir = tmp();
 	try {
 		const store = new DwfStore(dir);
@@ -132,6 +133,6 @@ test("R14-C3: DwfStore roundtrips the dispatchContext fingerprint (additive, ver
 		assert.ok(loadedLegacy);
 		assert.equal(loadedLegacy.dispatchContext, undefined, "legacy checkpoint loads without the fingerprint");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });

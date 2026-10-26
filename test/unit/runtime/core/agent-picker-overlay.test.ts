@@ -6,8 +6,9 @@ import test from "node:test";
 import { saveCrewAgents } from "../../../../src/runtime/crew-agent-records.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import { AgentPickerOverlay, type AgentPickerSelection } from "../../../../src/ui/overlays/agent-picker-overlay.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
-test("AgentPickerOverlay renders agents and selects current row", () => {
+test("AgentPickerOverlay renders agents and selects current row", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-agent-picker-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -60,7 +61,7 @@ test("AgentPickerOverlay renders agents and selects current row", () => {
 		overlay.handleInput("\r");
 		assert.match(selections[0]?.agentId ?? "", /two$/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

@@ -33,6 +33,7 @@ import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { resolveCanonicalDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -58,16 +59,16 @@ function makeTempDir(prefix: string): string {
 	return resolveCanonicalDir(dir);
 }
 
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T | Promise<T>): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = makeTempDir("pi-crew-r6-merge-home-");
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
@@ -91,7 +92,7 @@ function diskTasksFor(cwd: string, runId: string): TeamTaskState[] {
 }
 
 test("R6-1: cancelled-disk + completed-incoming → disk terminal status + error preserved", () => {
-	withIsolatedHome(() => {
+	withIsolatedHome(async () => {
 		const cwd = makeTempDir("pi-crew-r6-term-");
 		try {
 			const created = createRunManifest({ cwd, team, workflow, goal: "r6-1 terminal preserve" });
@@ -124,13 +125,13 @@ test("R6-1: cancelled-disk + completed-incoming → disk terminal status + error
 			assert.equal(diskTask.status, "cancelled");
 			assert.equal(diskTask.error, cancelledError);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
 
 test("R6-1: running-disk + completed-incoming → completed (normal settle path pinned)", () => {
-	withIsolatedHome(() => {
+	withIsolatedHome(async () => {
 		const cwd = makeTempDir("pi-crew-r6-normal-");
 		try {
 			const created = createRunManifest({ cwd, team, workflow, goal: "r6-1 normal settle" });
@@ -152,13 +153,13 @@ test("R6-1: running-disk + completed-incoming → completed (normal settle path 
 			assert.equal(diskTask.status, "completed");
 			assert.equal(diskTask.finishedAt, "2026-10-16T00:00:05.000Z");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
 
 test("R6-1: idempotent same-terminal (completed-disk + completed-incoming) → unchanged, incoming fields win", () => {
-	withIsolatedHome(() => {
+	withIsolatedHome(async () => {
 		const cwd = makeTempDir("pi-crew-r6-idem-");
 		try {
 			const created = createRunManifest({ cwd, team, workflow, goal: "r6-1 idempotent terminal" });
@@ -183,13 +184,13 @@ test("R6-1: idempotent same-terminal (completed-disk + completed-incoming) → u
 			assert.equal(diskTask.status, "completed");
 			assert.equal(diskTask.finishedAt, "2026-10-16T00:00:08.000Z");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
 
 test("R6-4: broker reserve survives a concurrent heartbeat whole-record persist", () => {
-	withIsolatedHome(() => {
+	withIsolatedHome(async () => {
 		const cwd = makeTempDir("pi-crew-r6-reserve-");
 		try {
 			const created = createRunManifest({ cwd, team, workflow, goal: "r6-4 reserve survives heartbeat" });
@@ -220,13 +221,13 @@ test("R6-4: broker reserve survives a concurrent heartbeat whole-record persist"
 			assert.equal(diskTask.allocation.tokensSpent, 400);
 			assert.equal(diskTask.allocation.tokensGranted, 1000);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
 
 test("R6-4: roll-up final value correct across reserve/roll-up/heartbeat interleavings", () => {
-	withIsolatedHome(() => {
+	withIsolatedHome(async () => {
 		const cwd = makeTempDir("pi-crew-r6-rollup-");
 		try {
 			const created = createRunManifest({ cwd, team, workflow, goal: "r6-4 roll-up interleaving" });
@@ -285,13 +286,13 @@ test("R6-4: roll-up final value correct across reserve/roll-up/heartbeat interle
 			assert.equal(outTask.allocation?.tokensSpent, 220, "terminal settle keeps the reconciled roll-up value");
 			assert.equal(diskTasksFor(cwd, created.manifest.runId).find((t) => t.id === "T")?.allocation?.tokensSpent, 220);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });
 
 test("R6-1+R6-4 compose: preserved terminal verdict + allocation merge in one persist", () => {
-	withIsolatedHome(() => {
+	withIsolatedHome(async () => {
 		const cwd = makeTempDir("pi-crew-r6-compose-");
 		try {
 			const created = createRunManifest({ cwd, team, workflow, goal: "r6-1 + r6-4 compose" });
@@ -325,7 +326,7 @@ test("R6-1+R6-4 compose: preserved terminal verdict + allocation merge in one pe
 			assert.equal(diskTask.status, "cancelled");
 			assert.equal(diskTask.allocation?.tokensSpent, 400);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

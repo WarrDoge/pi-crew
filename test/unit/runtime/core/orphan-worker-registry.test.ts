@@ -21,14 +21,15 @@ import {
 	registerWorker,
 	unregisterWorker,
 } from "../../../../src/runtime/orphan-worker-registry.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function mkdtemp(prefix: string): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-function rmrf(p: string): void {
+async function rmrf(p: string): Promise<void> {
 	try {
-		fs.rmSync(p, { recursive: true, force: true });
+		await removeDirWithRetry(p);
 	} catch {
 		// ignore
 	}
@@ -65,7 +66,7 @@ test.afterEach(() => {
 
 // === registerWorker ===
 
-test("registerWorker writes entry to JSON file", () => {
+test("registerWorker writes entry to JSON file", async () => {
 	registerWorker(12345, "session-A", "run-1", 99999);
 	const raw = JSON.parse(fs.readFileSync(REGISTRY_FILE, "utf-8"));
 	assert.equal(raw.length, 1);
@@ -76,7 +77,7 @@ test("registerWorker writes entry to JSON file", () => {
 	assert.ok(typeof raw[0].registeredAt === "number");
 });
 
-test("registerWorker is idempotent (dedupes by PID)", () => {
+test("registerWorker is idempotent (dedupes by PID)", async () => {
 	registerWorker(100, "session-A", "run-1", 50);
 	registerWorker(100, "session-B", "run-2", 60); // same PID, replaces
 
@@ -86,14 +87,14 @@ test("registerWorker is idempotent (dedupes by PID)", () => {
 	assert.equal(raw[0].parentPid, 60);
 });
 
-test("registerWorker rejects invalid PIDs", () => {
+test("registerWorker rejects invalid PIDs", async () => {
 	registerWorker(0, "session", "run", 1);
 	registerWorker(-1, "session", "run", 1);
 	registerWorker(NaN, "session", "run", 1);
 	assert.ok(!fs.existsSync(REGISTRY_FILE), "no file written for invalid PIDs");
 });
 
-test("registerWorker tolerates invalid parentPid (stores 0)", () => {
+test("registerWorker tolerates invalid parentPid (stores 0)", async () => {
 	registerWorker(100, "session", "run", NaN);
 	const raw = JSON.parse(fs.readFileSync(REGISTRY_FILE, "utf-8"));
 	assert.equal(raw[0].parentPid, 0);
@@ -101,7 +102,7 @@ test("registerWorker tolerates invalid parentPid (stores 0)", () => {
 
 // === unregisterWorker ===
 
-test("unregisterWorker removes the entry", () => {
+test("unregisterWorker removes the entry", async () => {
 	registerWorker(100, "session-A", "run-1", 50);
 	registerWorker(200, "session-A", "run-2", 50);
 	unregisterWorker(100);
@@ -111,14 +112,14 @@ test("unregisterWorker removes the entry", () => {
 	assert.equal(raw[0].pid, 200);
 });
 
-test("unregisterWorker is a no-op for unknown PID", () => {
+test("unregisterWorker is a no-op for unknown PID", async () => {
 	registerWorker(100, "session-A", "run-1", 50);
 	unregisterWorker(999);
 	const raw = JSON.parse(fs.readFileSync(REGISTRY_FILE, "utf-8"));
 	assert.equal(raw.length, 1);
 });
 
-test("unregisterWorker rejects invalid PIDs", () => {
+test("unregisterWorker rejects invalid PIDs", async () => {
 	registerWorker(100, "session-A", "run-1", 50);
 	unregisterWorker(0);
 	unregisterWorker(-1);
@@ -129,7 +130,7 @@ test("unregisterWorker rejects invalid PIDs", () => {
 
 // === cleanupOrphanWorkers ===
 
-test("cleanupOrphanWorkers handles missing registry file", () => {
+test("cleanupOrphanWorkers handles missing registry file", async () => {
 	// No registerWorker called, file doesn't exist
 	const result = cleanupOrphanWorkers("session-A");
 	assert.equal(result.scanned, 0);
@@ -138,7 +139,7 @@ test("cleanupOrphanWorkers handles missing registry file", () => {
 	assert.equal(result.kept, 0);
 });
 
-test("cleanupOrphanWorkers prunes dead PIDs from registry", () => {
+test("cleanupOrphanWorkers prunes dead PIDs from registry", async () => {
 	// Register a PID that doesn't exist (very high number)
 	registerWorker(999_999_999, "session-A", "run-dead", 999_999_998);
 
@@ -183,7 +184,7 @@ test("cleanupOrphanWorkers keeps current session's workers (concurrent session s
 			/* already dead */
 		}
 	} finally {
-		rmrf(tmp);
+		await rmrf(tmp);
 	}
 });
 
@@ -234,7 +235,7 @@ setInterval(() => {}, 1000);`,
 		}
 		assert.equal(stillAlive, false, "process should be dead after SIGKILL");
 	} finally {
-		rmrf(tmp);
+		await rmrf(tmp);
 	}
 });
 
@@ -270,18 +271,18 @@ test("cleanupOrphanWorkers keeps workers with alive parentPid (concurrent sessio
 
 		child.kill();
 	} finally {
-		rmrf(tmp);
+		await rmrf(tmp);
 	}
 });
 
-test("cleanupOrphanWorkers tolerates corrupt registry file", () => {
+test("cleanupOrphanWorkers tolerates corrupt registry file", async () => {
 	fs.writeFileSync(REGISTRY_FILE, "this is not JSON");
 	const result = cleanupOrphanWorkers("session-A");
 	assert.equal(result.scanned, 0);
 	assert.equal(result.killed, 0);
 });
 
-test("cleanupOrphanWorkers prunes registry entries that no longer match the schema", () => {
+test("cleanupOrphanWorkers prunes registry entries that no longer match the schema", async () => {
 	// Mix of valid and invalid entries
 	const mixed = [
 		{
@@ -370,6 +371,6 @@ test("cleanupOrphanWorkers prunes (not kills) when startTime mismatches (PID rec
 		}
 		assert.equal(stillAlive, true, "process should still be running");
 	} finally {
-		rmrf(tmp);
+		await rmrf(tmp);
 	}
 });

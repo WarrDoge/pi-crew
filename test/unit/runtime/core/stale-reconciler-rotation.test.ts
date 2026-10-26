@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { reconcileOrphanedTempWorkspaces } from "../../../../src/runtime/stale-reconciler.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 /**
  * Bug B regression (live 2026-09-26): the temp-workspace sweep took only the
@@ -56,7 +57,7 @@ function makeDir(
 	return dir;
 }
 
-test("batch ROTATION reaches dirs behind a stuck alphabetical head cluster", () => {
+test("batch ROTATION reaches dirs behind a stuck alphabetical head cluster", async () => {
 	const isolatedTmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-isotmp-"));
 	try {
 		// 2 batches at scanBatchSize=50: batch 0 = 50 STUCK dirs (fresh sentinels,
@@ -92,6 +93,6 @@ test("batch ROTATION reaches dirs behind a stuck alphabetical head cluster", () 
 		);
 		assert.equal(r0.cleanedDirs, 0);
 	} finally {
-		fs.rmSync(isolatedTmp, { recursive: true, force: true });
+		await cleanupStateRoot(isolatedTmp);
 	}
 });

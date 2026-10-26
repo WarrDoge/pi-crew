@@ -27,6 +27,7 @@ import {
 	type SubagentSpawnOptions,
 	savePersistedSubagentRecord,
 } from "../../../../src/runtime/subagent-manager.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const makeTempDir = () => {
 	let dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagent-test-"));
@@ -52,7 +53,7 @@ const makeRunner =
 	async (_options: SubagentSpawnOptions, _signal?: AbortSignal): Promise<PiTeamsToolResult> =>
 		result;
 
-test("isValidSubagentId accepts valid IDs", () => {
+test("isValidSubagentId accepts valid IDs", async () => {
 	const dir = makeTempDir();
 	try {
 		const record: SubagentRecord = {
@@ -69,11 +70,11 @@ test("isValidSubagentId accepts valid IDs", () => {
 		assert.ok(loaded);
 		assert.equal(loaded?.id, "agent_test_123");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("savePersistedSubagentRecord silently rejects path-traversal IDs (does not write file)", () => {
+test("savePersistedSubagentRecord silently rejects path-traversal IDs (does not write file)", async () => {
 	const dir = makeTempDir();
 	try {
 		const record: SubagentRecord = {
@@ -91,11 +92,11 @@ test("savePersistedSubagentRecord silently rejects path-traversal IDs (does not 
 		const filePath = path.join(dir, ".crew", "state", "subagents", "..", "..", "..", "etc", "passwd.json");
 		assert.ok(!fs.existsSync(filePath), "file should not be created for path-traversal ID");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("savePersistedSubagentRecord silently rejects IDs with slashes (does not write file)", () => {
+test("savePersistedSubagentRecord silently rejects IDs with slashes (does not write file)", async () => {
 	const dir = makeTempDir();
 	try {
 		const record: SubagentRecord = {
@@ -112,11 +113,11 @@ test("savePersistedSubagentRecord silently rejects IDs with slashes (does not wr
 		const filePath = path.join(dir, ".crew", "state", "subagents", "foo", "bar.json");
 		assert.ok(!fs.existsSync(filePath), "file should not be created for slashed ID");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("savePersistedSubagentRecord silently rejects IDs over 128 chars (does not write file)", () => {
+test("savePersistedSubagentRecord silently rejects IDs over 128 chars (does not write file)", async () => {
 	const dir = makeTempDir();
 	try {
 		const longId = "a".repeat(129);
@@ -134,21 +135,21 @@ test("savePersistedSubagentRecord silently rejects IDs over 128 chars (does not 
 		const filePath = path.join(dir, ".crew", "state", "subagents", `${longId}.json`);
 		assert.ok(!fs.existsSync(filePath), "file should not be created for over-128-char ID");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("readPersistedSubagentRecord returns undefined for missing file", () => {
+test("readPersistedSubagentRecord returns undefined for missing file", async () => {
 	const dir = makeTempDir();
 	try {
 		const result = readPersistedSubagentRecord(dir, "nonexistent");
 		assert.equal(result, undefined);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("savePersistedSubagentRecord creates directory and file", () => {
+test("savePersistedSubagentRecord creates directory and file", async () => {
 	const dir = makeTempDir();
 	fs.mkdirSync(path.join(dir, ".crew"), { recursive: true });
 	try {
@@ -166,11 +167,11 @@ test("savePersistedSubagentRecord creates directory and file", () => {
 		const filePath = path.join(dir, ".crew", "state", "subagents", "agent_001.json");
 		assert.ok(fs.existsSync(filePath), "file should be created");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("SubagentManager.spawn creates a record with running status", () => {
+test("SubagentManager.spawn creates a record with running status", async () => {
 	const dir = makeTempDir();
 	const manager = new SubagentManager();
 	try {
@@ -189,11 +190,11 @@ test("SubagentManager.spawn creates a record with running status", () => {
 		assert.equal(record.status, "running");
 	} finally {
 		void manager.abortAll();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("SubagentManager.spawn queues when at maxConcurrent", () => {
+test("SubagentManager.spawn queues when at maxConcurrent", async () => {
 	const dir = makeTempDir();
 	const manager = new SubagentManager(1);
 	try {
@@ -226,7 +227,7 @@ test("SubagentManager.spawn queues when at maxConcurrent", () => {
 		assert.equal(r2.status, "queued");
 	} finally {
 		void manager.abortAll();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -255,11 +256,11 @@ test("SubagentManager.abort returns false for already-completed record", async (
 		const result = manager.abort(record.id);
 		assert.equal(result, false, "should not abort completed record");
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("SubagentManager.getRecord returns the record by id", () => {
+test("SubagentManager.getRecord returns the record by id", async () => {
 	const dir = makeTempDir();
 	const manager = new SubagentManager();
 	try {
@@ -277,11 +278,11 @@ test("SubagentManager.getRecord returns the record by id", () => {
 		assert.equal(fetched, record);
 	} finally {
 		void manager.abortAll();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
-test("SubagentManager.listAgents returns all records sorted by startedAt", () => {
+test("SubagentManager.listAgents returns all records sorted by startedAt", async () => {
 	const dir = makeTempDir();
 	const manager = new SubagentManager();
 	try {
@@ -309,7 +310,7 @@ test("SubagentManager.listAgents returns all records sorted by startedAt", () =>
 		assert.equal(list.length, 2);
 	} finally {
 		void manager.abortAll();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -354,7 +355,7 @@ test("F12-N1: terminal records are evicted beyond the retained bound", async () 
 		assert.ok(manager.getRecord(spawned[total - 1]!.id), "the newest terminal record is retained");
 	} finally {
 		void manager.abortAll();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });
 
@@ -388,6 +389,6 @@ test("F12-N1: a live (non-terminal) record is never evicted by terminal churn", 
 		await live.promise;
 	} finally {
 		void manager.abortAll();
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	}
 });

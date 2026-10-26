@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { deliverGroupJoin, resolveGroupJoinMode, shouldGroupJoin } from "../../../../src/runtime/group-join.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 /**
  * Round 25 (test coverage gaps): `group-join.ts` provides group-join mode
@@ -85,7 +86,7 @@ test("shouldGroupJoin: 'smart' mode returns true only for batch size > 1", () =>
 
 // ─── deliverGroupJoin (live delivery path) ─────────────────────────────────
 
-test("deliverGroupJoin: returns undefined when batch does not qualify", () => {
+test("deliverGroupJoin: returns undefined when batch does not qualify", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-group-join-"));
 	try {
 		const manifest = makeManifest(dir);
@@ -99,11 +100,11 @@ test("deliverGroupJoin: returns undefined when batch does not qualify", () => {
 		assert.equal(delivery, undefined);
 		assert.equal(readOutbox(manifest).length, 0);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });
 
-test("deliverGroupJoin: writes artifact, mailbox message, and completed event", () => {
+test("deliverGroupJoin: writes artifact, mailbox message, and completed event", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-group-join-"));
 	try {
 		const manifest = makeManifest(dir);
@@ -138,11 +139,11 @@ test("deliverGroupJoin: writes artifact, mailbox message, and completed event", 
 		// Event log records the completion delivery
 		assert.match(fs.readFileSync(manifest.eventsPath, "utf-8"), /agent\.group_join\.completed/);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });
 
-test("deliverGroupJoin: reuses existing mailbox message on repeat delivery", () => {
+test("deliverGroupJoin: reuses existing mailbox message on repeat delivery", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-group-join-"));
 	try {
 		const manifest = makeManifest(dir);
@@ -158,11 +159,11 @@ test("deliverGroupJoin: reuses existing mailbox message on repeat delivery", () 
 		assert.equal(readOutbox(manifest).length, 1);
 		assert.match(fs.readFileSync(manifest.eventsPath, "utf-8"), /agent\.group_join\.delivery_reused/);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });
 
-test("deliverGroupJoin: partial=true when queued tasks remain, event type reflects it", () => {
+test("deliverGroupJoin: partial=true when queued tasks remain, event type reflects it", async () => {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-group-join-"));
 	try {
 		const manifest = makeManifest(dir);
@@ -176,6 +177,6 @@ test("deliverGroupJoin: partial=true when queued tasks remain, event type reflec
 		assert.deepEqual(delivery.remaining, ["03"]);
 		assert.match(fs.readFileSync(manifest.eventsPath, "utf-8"), /agent\.group_join\.partial/);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await cleanupStateRoot(dir);
 	}
 });

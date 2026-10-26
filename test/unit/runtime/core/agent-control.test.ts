@@ -9,6 +9,7 @@ import { readEvents } from "../../../../src/state/event-log/event-log.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "control",
@@ -25,7 +26,7 @@ const workflow: WorkflowConfig = {
 	steps: [{ id: "execute", role: "executor", task: "Execute" }],
 };
 
-test("agent control marks stale running agents as needs_attention", () => {
+test("agent control marks stale running agents as needs_attention", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-agent-control-"));
 	try {
 		fs.mkdirSync(path.join(cwd, ".crew"), { recursive: true });
@@ -68,6 +69,6 @@ test("agent control marks stale running agents as needs_attention", () => {
 			true,
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

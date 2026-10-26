@@ -9,6 +9,7 @@ import { appendEvent } from "../../../../src/state/event-log/event-log.ts";
 import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import { createRunSnapshotCache } from "../../../../src/ui/run-snapshot-cache.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function tempCwd(prefix: string): string {
 	let cwd = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -76,7 +77,7 @@ function fixtures(cwd: string): {
 	return { manifest: created.manifest, tasks: created.tasks };
 }
 
-test("RunSnapshotCache reuses fresh entries and updates signature after file changes", () => {
+test("RunSnapshotCache reuses fresh entries and updates signature after file changes", async () => {
 	const cwd = tempCwd("pi-crew-snapshot-");
 	try {
 		const { manifest, tasks } = fixtures(cwd);
@@ -97,11 +98,11 @@ test("RunSnapshotCache reuses fresh entries and updates signature after file cha
 		assert.equal(changed.progress.completed, 1);
 		assert.equal(changed.usage.tokensIn, 10);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("RunSnapshotCache signature flips when planApproval status changes (WP-3)", () => {
+test("RunSnapshotCache signature flips when planApproval status changes (WP-3)", async () => {
 	const cwd = tempCwd("pi-crew-snapshot-plan-");
 	try {
 		const { manifest } = fixtures(cwd);
@@ -137,11 +138,11 @@ test("RunSnapshotCache signature flips when planApproval status changes (WP-3)",
 		assert.notEqual(approved.signature, pending.signature, "approval must change the signature again");
 		assert.equal(approved.manifest.planApproval?.status, "approved");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("RunSnapshotCache stays functional on parse errors (R10-4 parity: recovers like async)", () => {
+test("RunSnapshotCache stays functional on parse errors (R10-4 parity: recovers like async)", async () => {
 	const cwd = tempCwd("pi-crew-snapshot-parse-");
 	try {
 		const { manifest } = fixtures(cwd);
@@ -160,11 +161,11 @@ test("RunSnapshotCache stays functional on parse errors (R10-4 parity: recovers 
 		assert.ok(typeof recovered.progress.total === "number", "recovered snapshot must have valid progress");
 		assert.deepEqual(Object.keys(recovered).sort(), Object.keys(first).sort(), "same snapshot shape");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("RunSnapshotCache exposes structured cancellation reason", () => {
+test("RunSnapshotCache exposes structured cancellation reason", async () => {
 	const cwd = tempCwd("pi-crew-snapshot-cancel-reason-");
 	try {
 		const { manifest } = fixtures(cwd);
@@ -178,7 +179,7 @@ test("RunSnapshotCache exposes structured cancellation reason", () => {
 		const snapshot = cache.refresh(manifest.runId);
 		assert.equal(snapshot.cancellationReason, "leader_interrupted");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -239,11 +240,11 @@ test("RunSnapshotCache keeps entries populated across event-bus signals", async 
 		const afterCoalesce = cache.get(runId);
 		assert.ok(afterCoalesce, "cache entry must remain populated after coalesced refresh");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("RunSnapshotCache marks mailbox counts approximate when tail-truncated", () => {
+test("RunSnapshotCache marks mailbox counts approximate when tail-truncated", async () => {
 	const cwd = tempCwd("pi-crew-snapshot-mailbox-large-");
 	try {
 		const { manifest } = fixtures(cwd);
@@ -259,11 +260,11 @@ test("RunSnapshotCache marks mailbox counts approximate when tail-truncated", ()
 		assert.equal(snapshot.mailbox.approximate, true);
 		assert.ok(snapshot.mailbox.inboxUnread > 0);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("RunSnapshotCache captures mailbox badges and LRU-evicts old entries", () => {
+test("RunSnapshotCache captures mailbox badges and LRU-evicts old entries", async () => {
 	const cwd = tempCwd("pi-crew-snapshot-lru-");
 	try {
 		const first = fixtures(cwd).manifest;
@@ -291,6 +292,6 @@ test("RunSnapshotCache captures mailbox badges and LRU-evicts old entries", () =
 		assert.ok(cache.get(second.runId));
 		assert.ok(cache.get(third.runId));
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

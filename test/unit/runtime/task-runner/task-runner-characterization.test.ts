@@ -50,6 +50,7 @@ import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig, WorkflowStep } from "../../../../src/workflows/workflow-config.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // ─── Shared fixtures ────────────────────────────────────────────────
 
@@ -166,7 +167,7 @@ test("[char-core5-1] cancel-before-start: pre-aborted signal → task cancelled,
 		assert.ok(!types.includes("task.started"), "must NOT emit task.started on cancel-before-start");
 		assert.ok(!types.some((ty) => ty.startsWith("task.")), `must NOT emit any task.* event, got: ${types.join(",")}`);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -212,7 +213,7 @@ test("[char-core5-2] child-process happy path: mock exit 0 + JSON output → com
 		assert.ok(types.includes("task.completed"), "must emit task.completed");
 	} finally {
 		restoreMockEnv(prev);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -249,7 +250,7 @@ test("[char-core5-3] yield-exclusion: child-process task with NO submit_result s
 		assert.ok(!types.includes("task.needs_attention"), "child-process must NOT emit task.needs_attention for a no-submit_result run");
 	} finally {
 		restoreMockEnv(prev);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -317,7 +318,7 @@ test("[char-core5-4] model-fallback: retryable failure on attempt 1 → attempt 
 		} catch {
 			/* fine if already gone */
 		}
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -359,7 +360,7 @@ test("[char-core5-5] mutation-guard(warn): executor role, no mutation tool call 
 		assert.equal(guardAttention!.data?.activityState, "needs_attention");
 	} finally {
 		restoreMockEnv(prev);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -399,7 +400,7 @@ test("[char-core5-6] mutation-guard(fail): completionMutationGuard='fail' → ta
 		assert.ok(last!.error && /Completion mutation guard failed/i.test(last!.error), "last attempt error must carry the guard message");
 	} finally {
 		restoreMockEnv(prev);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -445,7 +446,7 @@ test("[char-core5-7] verification-contract: step.verify=true → requiredGreenLe
 		assert.equal(t.verification!.commands.length, 0, "standard task packet yields no executed verification commands");
 	} finally {
 		restoreMockEnv(prev);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -487,7 +488,7 @@ test("[char-core5-8] scaffold-branch: executeWorkers=false → completed, .md re
 			"scaffold verification note must state commands were not executed",
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -531,7 +532,7 @@ test("[char-core5-9] mutation-guard(off): completionMutationGuard='off' → no c
 		assert.equal(guardAttention.length, 0, "off mode must NOT emit a completion_guard attention event");
 	} finally {
 		restoreMockEnv(prev);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -572,7 +573,7 @@ test("[char-core5-10] mutation-guard(read-only): analyst role with no mutation �
 		assert.equal(guardAttention.length, 0, "read-only role must not emit a completion_guard attention event");
 	} finally {
 		restoreMockEnv(prev);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

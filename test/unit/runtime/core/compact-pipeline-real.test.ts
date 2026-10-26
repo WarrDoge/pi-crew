@@ -34,10 +34,11 @@ import {
 	TruncationStage,
 } from "../../../../src/runtime/compaction/compact-stages/index.ts";
 import { readIfSmall } from "../../../../src/runtime/task-output-context.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // --- Pipeline core: monotonic-shrink gate (CRITICAL SAFETY PROPERTY) ---
 
-test("applyCompactPipeline never expands input — a stage that expands is silently dropped", () => {
+test("applyCompactPipeline never expands input — a stage that expands is silently dropped", async () => {
 	const expandingStage: ICompactStage = {
 		id: "evil-expand",
 		apply: () => "this output is much longer than the input",
@@ -47,7 +48,7 @@ test("applyCompactPipeline never expands input — a stage that expands is silen
 	assert.deepEqual(result.applied, [], "expanding stage's id must NOT be in applied");
 });
 
-test("applyCompactPipeline accepts a stage whose output equals input length (idempotent no-op)", () => {
+test("applyCompactPipeline accepts a stage whose output equals input length (idempotent no-op)", async () => {
 	const noOpStage: ICompactStage = {
 		id: "no-op",
 		apply: (text) => text, // same length by definition
@@ -57,7 +58,7 @@ test("applyCompactPipeline accepts a stage whose output equals input length (ide
 	assert.deepEqual(result.applied, ["no-op"], "equal-length output is accepted (gate uses <=)");
 });
 
-test("applyCompactPipeline chains multiple stages, applied[] reflects accepted stages only", () => {
+test("applyCompactPipeline chains multiple stages, applied[] reflects accepted stages only", async () => {
 	const stages: ICompactStage[] = [
 		{ id: "a", apply: (t) => t + " a" }, // expands → dropped
 		{ id: "b", apply: (t) => t.slice(0, 3) }, // shrinks → accepted
@@ -69,7 +70,7 @@ test("applyCompactPipeline chains multiple stages, applied[] reflects accepted s
 	assert.deepEqual(result.applied, ["b", "d"]);
 });
 
-test("applyCompactPipeline skips malformed stages (non-string output, missing apply)", () => {
+test("applyCompactPipeline skips malformed stages (non-string output, missing apply)", async () => {
 	const stages: Array<Partial<ICompactStage>> = [
 		{ id: "bad-1", apply: () => null as unknown as string },
 		{ id: "bad-2", apply: 42 as unknown as (text: string) => string },
@@ -80,7 +81,7 @@ test("applyCompactPipeline skips malformed stages (non-string output, missing ap
 	assert.deepEqual(result.applied, ["good"]);
 });
 
-test("applyCompactPipeline with no stages returns input unchanged and empty applied", () => {
+test("applyCompactPipeline with no stages returns input unchanged and empty applied", async () => {
 	const result = applyCompactPipeline("unchanged", []);
 	assert.equal(result.text, "unchanged");
 	assert.deepEqual(result.applied, []);
@@ -88,14 +89,14 @@ test("applyCompactPipeline with no stages returns input unchanged and empty appl
 
 // --- AnsiStripStage ---
 
-test("AnsiStripStage strips CSI color/cursor codes", () => {
+test("AnsiStripStage strips CSI color/cursor codes", async () => {
 	assert.equal(ANSI_STRIP_STAGE.apply("\x1b[31mred\x1b[0m"), "red");
 	assert.equal(ANSI_STRIP_STAGE.apply("\x1b[1;32mbold green\x1b[0m"), "bold green");
 	assert.equal(ANSI_STRIP_STAGE.apply("cursor\x1b[2Jmove\x1b[H"), "cursormove");
 	assert.equal(ANSI_STRIP_STAGE.apply("\x1b[?25lhidden\x1b[?25h"), "hidden");
 });
 
-test("AnsiStripStage is idempotent (no ANSI in → unchanged; ANSI in → ANSI out)", () => {
+test("AnsiStripStage is idempotent (no ANSI in → unchanged; ANSI in → ANSI out)", async () => {
 	const plain = "no escape codes here";
 	assert.equal(ANSI_STRIP_STAGE.apply(plain), plain);
 	// Apply twice — second pass on already-stripped text is a no-op.
@@ -104,7 +105,7 @@ test("AnsiStripStage is idempotent (no ANSI in → unchanged; ANSI in → ANSI o
 	assert.equal(twice, once);
 });
 
-test("AnsiStripStage fast-path: text without \\x1b returns immediately (identity)", () => {
+test("AnsiStripStage fast-path: text without \\x1b returns immediately (identity)", async () => {
 	const custom = new AnsiStripStage();
 	assert.equal(custom.apply(""), "");
 	assert.equal(custom.apply("a".repeat(1000)), "a".repeat(1000));
@@ -112,14 +113,14 @@ test("AnsiStripStage fast-path: text without \\x1b returns immediately (identity
 
 // --- BlankCollapseStage ---
 
-test("BlankCollapseStage collapses 3+ consecutive newlines to a single blank line (\\n\\n)", () => {
+test("BlankCollapseStage collapses 3+ consecutive newlines to a single blank line (\\n\\n)", async () => {
 	assert.equal(BLANK_COLLAPSE_STAGE.apply("a\n\n\n\nb"), "a\n\nb");
 	assert.equal(BLANK_COLLAPSE_STAGE.apply("a\n\n\nb"), "a\n\nb");
 	assert.equal(BLANK_COLLAPSE_STAGE.apply("a\n\nb"), "a\n\nb", "exactly 2 newlines must be preserved");
 	assert.equal(BLANK_COLLAPSE_STAGE.apply("a\nb"), "a\nb", "single newline preserved");
 });
 
-test("BlankCollapseStage is configurable (minConsecutive threshold)", () => {
+test("BlankCollapseStage is configurable (minConsecutive threshold)", async () => {
 	const stage5 = new BlankCollapseStage(5);
 	assert.equal(stage5.apply("a\n\n\n\n\n\nb"), "a\n\nb", "6 newlines → 2 (>=5 threshold)");
 	assert.equal(stage5.apply("a\n\n\n\nb"), "a\n\n\n\nb", "4 newlines preserved (<5 threshold)");
@@ -127,27 +128,27 @@ test("BlankCollapseStage is configurable (minConsecutive threshold)", () => {
 
 // --- DeduplicateStage ---
 
-test("DeduplicateStage collapses CONSECUTIVE duplicate lines (non-adjacent duplicates kept)", () => {
+test("DeduplicateStage collapses CONSECUTIVE duplicate lines (non-adjacent duplicates kept)", async () => {
 	assert.equal(DEDUPLICATE_STAGE.apply("a\na\nb\nb\nc"), "a\nb\nc");
 	assert.equal(DEDUPLICATE_STAGE.apply("a\nb\na\nb"), "a\nb\na\nb", "non-adjacent duplicates preserved");
 	assert.equal(DEDUPLICATE_STAGE.apply(""), "");
 	assert.equal(DEDUPLICATE_STAGE.apply("single"), "single");
 });
 
-test("DeduplicateStage preserves \\r\\n line endings", () => {
+test("DeduplicateStage preserves \\r\\n line endings", async () => {
 	assert.equal(DEDUPLICATE_STAGE.apply("a\r\na\r\nb"), "a\r\nb");
 });
 
 // --- TruncationStage (parameterized marker) ---
 
-test("TruncationStage default marker (compacted ... chars) matches compactString wording", () => {
+test("TruncationStage default marker (compacted ... chars) matches compactString wording", async () => {
 	const stage = new TruncationStage(100);
 	const out = stage.apply("A".repeat(500) + "B".repeat(500));
 	assert.match(out, /\[pi-crew compacted \d+ chars, head\+tail preserved\]/);
 	assert.equal(stage.id, "truncation");
 });
 
-test("TruncationStage with truncated marker (readIfSmall wording)", () => {
+test("TruncationStage with truncated marker (readIfSmall wording)", async () => {
 	const stage = new TruncationStage(100, {
 		marker: { verb: "truncated", headSeparator: "\n\n" },
 	});
@@ -157,7 +158,7 @@ test("TruncationStage with truncated marker (readIfSmall wording)", () => {
 	assert.ok(out.includes("A\n\n...[pi-crew truncated"), "double-newline headSeparator applied");
 });
 
-test("TruncationStage rejects non-positive maxChars", () => {
+test("TruncationStage rejects non-positive maxChars", async () => {
 	assert.throws(() => new TruncationStage(0));
 	assert.throws(() => new TruncationStage(-1));
 	assert.throws(() => new TruncationStage(NaN));
@@ -165,7 +166,7 @@ test("TruncationStage rejects non-positive maxChars", () => {
 
 // --- compactString integration (P0-A pipeline = [truncation]) ---
 
-test("compactString pipeline produces bit-identical L4 marker when no important lines and plain text", () => {
+test("compactString pipeline produces bit-identical L4 marker when no important lines and plain text", async () => {
 	// No ANSI, no blank runs, no consecutive duplicates → all non-truncation
 	// stages would be no-ops. The output marker should be exactly the pre-P0-A
 	// wording.
@@ -175,7 +176,7 @@ test("compactString pipeline produces bit-identical L4 marker when no important 
 	assert.ok(!out.includes("important lines preserved"));
 });
 
-test("compactString pipeline preserves important lines (P0-B still works through P0-A)", () => {
+test("compactString pipeline preserves important lines (P0-B still works through P0-A)", async () => {
 	const maxChars = 4096;
 	const head = "A".repeat(5000);
 	const middle = "normal\nError: middle\nmore normal\n";
@@ -187,7 +188,7 @@ test("compactString pipeline preserves important lines (P0-B still works through
 	assert.match(out, /important lines preserved/);
 });
 
-test("compactString pipeline is monotonic-shrink safe across the boundary window", () => {
+test("compactString pipeline is monotonic-shrink safe across the boundary window", async () => {
 	for (let over = 1; over <= 60; over++) {
 		const out = compactString("y".repeat(8192 + over), 8192);
 		assert.ok(out.length <= 8192 + over, `over=${over}: output ${out.length} must be <= input ${8192 + over}`);
@@ -205,9 +206,9 @@ function writeTempFile(content: string): {
 	fs.writeFileSync(filePath, content, "utf-8");
 	return {
 		filePath,
-		cleanup: () => {
+		cleanup: async () => {
 			try {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await removeDirWithRetry(dir);
 			} catch {
 				/* best-effort */
 			}
@@ -215,7 +216,7 @@ function writeTempFile(content: string): {
 	};
 }
 
-test("readIfSmall pipeline strips ANSI color codes before truncating", () => {
+test("readIfSmall pipeline strips ANSI color codes before truncating", async () => {
 	// Long file with ANSI codes throughout — after readIfSmall, no \x1b should
 	// remain in the result.
 	const lines: string[] = [];
@@ -231,11 +232,11 @@ test("readIfSmall pipeline strips ANSI color codes before truncating", () => {
 		assert.ok(!out.includes("\x1b"), "ANSI must be stripped before truncation");
 		assert.match(out, /\[pi-crew truncated \d+ chars, head\+tail preserved\]/);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("readIfSmall pipeline collapses 3+ blank lines before truncating", () => {
+test("readIfSmall pipeline collapses 3+ blank lines before truncating", async () => {
 	// Long file with blank-line noise — must exceed MAX_RESULT_INLINE_BYTES (32000) so truncation actually fires.
 	const filler = "filler\n".repeat(12_000); // ~84KB
 	const blanks = "\n\n\n\n\n\n"; // 6 newlines
@@ -247,11 +248,11 @@ test("readIfSmall pipeline collapses 3+ blank lines before truncating", () => {
 		assert.ok(out);
 		assert.ok(!out.includes("\n\n\n\n\n\n"), "6-blank-line run must be collapsed before truncation");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("readIfSmall pipeline is bit-identical to pre-P0-A wording on plain text (L4 backward-compat)", () => {
+test("readIfSmall pipeline is bit-identical to pre-P0-A wording on plain text (L4 backward-compat)", async () => {
 	// Plain ASCII, no ANSI, no blank runs → the new pipeline's pre-truncation
 	// stages are no-ops, so the marker wording matches the pre-P0-A format.
 	const content = "H".repeat(40_000) + "M".repeat(20_000) + "T".repeat(40_000);
@@ -262,13 +263,13 @@ test("readIfSmall pipeline is bit-identical to pre-P0-A wording on plain text (L
 		assert.match(out, /\[pi-crew truncated \d+ chars, head\+tail preserved\]/);
 		assert.ok(!out.includes("important lines preserved"));
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
 // --- Pipeline observability (applied[]) ---
 
-test("compactString result is byte-identical pre/post P0-A for plain text (no stage observability leak)", () => {
+test("compactString result is byte-identical pre/post P0-A for plain text (no stage observability leak)", async () => {
 	// The `applied` array is internal to the pipeline — compactString returns
 	// just the string. This test guards against accidentally exposing the
 	// pipeline result type or changing the return shape.
@@ -277,7 +278,7 @@ test("compactString result is byte-identical pre/post P0-A for plain text (no st
 	assert.equal(typeof out, "string", "compactString must return a string, not a PipelineResult");
 });
 
-test("applyCompactPipeline applied[] lists each accepted stage once", () => {
+test("applyCompactPipeline applied[] lists each accepted stage once", async () => {
 	const stages: ICompactStage[] = [
 		{ id: "strip-ansi", apply: (t) => t.replace(/\x1b\[[0-9;]*m/g, "") },
 		{ id: "shrink", apply: (t) => t.toUpperCase().slice(0, 5) },

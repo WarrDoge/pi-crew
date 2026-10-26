@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { appendDeadletter, readDeadletter } from "../../../../src/runtime/deadletter.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team = {
 	name: "t",
@@ -21,7 +22,7 @@ const workflow = {
 	steps: [{ id: "s", role: "r", task: "x" }],
 } as never;
 
-test("deadletter appends and reads entries", () => {
+test("deadletter appends and reads entries", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-deadletter-"));
 	try {
 		const { manifest } = createRunManifest({
@@ -43,6 +44,6 @@ test("deadletter appends and reads entries", () => {
 		assert.equal(entry?.reason, "max-retries");
 		assert.equal(entry?.attemptId, `${manifest.runId}:01_s:attempt-3`);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

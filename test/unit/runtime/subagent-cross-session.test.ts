@@ -22,6 +22,7 @@ import {
 	savePersistedSubagentRecord,
 } from "../../../src/runtime/subagent-manager.ts";
 import { firstText } from "../../fixtures/tool-result-helpers.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -120,7 +121,7 @@ test("(a) get_subagent_result refuses a record owned by another session", async 
 		assert.equal(result.isError, true);
 	} finally {
 		void manager.abortAll();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -145,7 +146,7 @@ test("(a2) get_subagent_result refuses when current session has no sessionManage
 		assert.equal(result.isError, true);
 	} finally {
 		void manager.abortAll();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -170,7 +171,7 @@ test("(b) get_subagent_result serves a legacy record (no ownerSessionId)", async
 		assert.doesNotMatch(text, /belongs to another session/);
 	} finally {
 		void manager.abortAll();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -195,7 +196,7 @@ test("(b2) get_subagent_result serves own-session record", async () => {
 		assert.doesNotMatch(text, /belongs to another session/);
 	} finally {
 		void manager.abortAll();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -226,7 +227,7 @@ test("(c) resultConsumed is NOT written when reading another session's record", 
 		assert.notEqual(persisted?.resultConsumed, true, "resultConsumed must NOT be set by another session");
 	} finally {
 		void manager.abortAll();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -247,7 +248,7 @@ test("(c2) resultConsumed IS written when owner reads their own record", async (
 		assert.equal(persisted?.resultConsumed, true, "owner session should consume the result");
 	} finally {
 		void manager.abortAll();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

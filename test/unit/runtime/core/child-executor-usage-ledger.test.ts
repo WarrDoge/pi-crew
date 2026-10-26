@@ -26,6 +26,7 @@ import { runTeamTask } from "../../../../src/runtime/task-runner.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team = {
 	name: "t",
@@ -137,6 +138,6 @@ test("U16: lifetimeUsage accumulates cost + cacheRead from object-cost message_e
 			assert.ok(usage.cacheRead !== undefined, "task.usage.cacheRead must be present");
 		});
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

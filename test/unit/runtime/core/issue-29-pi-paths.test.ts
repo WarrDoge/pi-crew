@@ -26,6 +26,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { projectCrewRoot } from "../../../../src/utils/paths.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /** Canonicalize dir to long-name form on Windows via realpathSync.native */
 function canonicalizeDir(dir: string): string {
@@ -57,35 +58,35 @@ function makeCrewProject(): string {
 	return dir;
 }
 
-function rmTemp(dir: string): void {
+async function rmTemp(dir: string): Promise<void> {
 	try {
-		fs.rmSync(dir, { recursive: true, force: true });
+		await removeDirWithRetry(dir);
 	} catch {
 		/* ignore */
 	}
 }
 
-test("issue #29 — projectCrewRoot returns .pi/teams/ for .pi-based project", () => {
+test("issue #29 — projectCrewRoot returns .pi/teams/ for .pi-based project", async () => {
 	const dir = makePiProject();
 	try {
 		const root = projectCrewRoot(dir);
 		assert.equal(root, path.join(dir, ".pi", "teams"));
 	} finally {
-		rmTemp(dir);
+		await rmTemp(dir);
 	}
 });
 
-test("issue #29 — projectCrewRoot returns .crew/ when .crew/ exists (precedence)", () => {
+test("issue #29 — projectCrewRoot returns .crew/ when .crew/ exists (precedence)", async () => {
 	const dir = makeCrewProject();
 	try {
 		const root = projectCrewRoot(dir);
 		assert.equal(root, path.join(dir, ".crew"));
 	} finally {
-		rmTemp(dir);
+		await rmTemp(dir);
 	}
 });
 
-test("issue #29 — projectCrewRoot returns .pi/teams/ when both .pi/ and .crew/ exist (existing .crew wins)", () => {
+test("issue #29 — projectCrewRoot returns .pi/teams/ when both .pi/ and .crew/ exist (existing .crew wins)", async () => {
 	const dir = canonicalizeDir(fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-issue-29-")));
 	fs.mkdirSync(path.join(dir, ".pi"), { recursive: true });
 	fs.mkdirSync(path.join(dir, ".crew"), { recursive: true });
@@ -94,7 +95,7 @@ test("issue #29 — projectCrewRoot returns .pi/teams/ when both .pi/ and .crew/
 		// .crew/ wins per the documented precedence.
 		assert.equal(root, path.join(dir, ".crew"));
 	} finally {
-		rmTemp(dir);
+		await rmTemp(dir);
 	}
 });
 
@@ -127,7 +128,7 @@ test("issue #29 — run-tracker waitForRun error message points at .pi/teams/ in
 			`Error message should NOT reference .crew/state/runs/ in .pi-based project; got: ${caught!.message}`,
 		);
 	} finally {
-		rmTemp(dir);
+		await rmTemp(dir);
 	}
 });
 
@@ -151,7 +152,7 @@ test("issue #29 — run-tracker waitForRun error message points at .crew/ in a .
 			`Error message should reference .crew/ for .crew-based project; got: ${caught!.message}`,
 		);
 	} finally {
-		rmTemp(dir);
+		await rmTemp(dir);
 	}
 });
 
@@ -174,7 +175,7 @@ test("issue #29 — checkpoint save/load round-trips through .pi/teams/state/run
 		assert.ok(!fs.existsSync(wrongDir), `Checkpoint file should NOT exist at the wrong path: ${wrongDir}`);
 		// Cleanup: rmTemp(dir) in the finally block removes the whole tree
 	} finally {
-		rmTemp(dir);
+		await rmTemp(dir);
 	}
 });
 
@@ -203,7 +204,7 @@ test("issue #29 — skill-effectiveness paths land in .pi/teams/state/runs/ in a
 		const wrong = path.join(dir, ".crew", "state", "runs", runId, "skill-activations.jsonl");
 		assert.ok(!fs.existsSync(wrong), `Activations file should NOT exist at ${wrong}`);
 	} finally {
-		rmTemp(dir);
+		await rmTemp(dir);
 	}
 });
 
@@ -233,15 +234,12 @@ test("issue #29 — decision-ledger getLedgerPath uses projectCrewRoot() when st
 		assert.ok(expectedFromCwd.includes(path.join("state", "runs", runId)), "Expected path structure should include state/runs/<runId>");
 		// Cleanup
 		try {
-			fs.rmSync(path.join(processCwdRoot, "state", "runs", runId), {
-				recursive: true,
-				force: true,
-			});
+			await removeDirWithRetry(path.join(processCwdRoot, "state", "runs", runId));
 		} catch {
 			/* ignore */
 		}
 	} finally {
-		rmTemp(dir);
+		await rmTemp(dir);
 	}
 });
 
@@ -300,6 +298,6 @@ test("issue #29 — subagent-manager.start() does not crash when record.promise 
 				`If status=1, the defense-in-depth .catch did not prevent unhandledRejection.`,
 		);
 	} finally {
-		rmTemp(dir);
+		await rmTemp(dir);
 	}
 });

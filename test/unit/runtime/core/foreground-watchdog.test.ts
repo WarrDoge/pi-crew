@@ -37,6 +37,7 @@ import {
 } from "../../../../src/runtime/foreground-watchdog.ts";
 import { createRunManifest, saveRunManifest, saveRunTasks } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 // Minimal team/workflow fixtures (cast as never — matches heartbeat-watcher.test.ts).
 const team = {
@@ -206,7 +207,7 @@ test("startForegroundWatchdog: detects a hung run (stale heartbeat + idle agents
 		assert.deepEqual(hung.options, { deliverAs: "followUp" }, "delivered as followUp");
 	} finally {
 		stopWatchdog(runId);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -228,7 +229,7 @@ test("startForegroundWatchdog: notifies exactly once on terminal completion then
 		assert.deepEqual(completions[0].options, { deliverAs: "followUp" });
 	} finally {
 		stopWatchdog(runId);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -245,7 +246,7 @@ test("startForegroundWatchdog: a healthy active run (fresh heartbeat, running ag
 		assert.equal(pi.messages.length, 0, "no notification sent for a healthy active run");
 	} finally {
 		stopWatchdog(runId);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -264,7 +265,7 @@ test("startForegroundWatchdog: does not stack duplicate timers for the same runI
 		assert.equal(completions.length, 1, "dedup ensures a single timer → single notification");
 	} finally {
 		stopWatchdog(runId);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -273,7 +274,7 @@ test("startForegroundWatchdog: stops silently when the run manifest is gone (no 
 	const pi = makePi();
 	try {
 		// Delete the run state dir so loadRunManifestById returns undefined.
-		fs.rmSync(path.join(cwd, ".crew", "state", "runs", runId), { recursive: true, force: true });
+		await removeDirWithRetry(path.join(cwd, ".crew", "state", "runs", runId));
 
 		startForegroundWatchdog({ pi: pi as never, cwd, runId, checkIntervalMs: 5 });
 		await sleep(80);
@@ -281,7 +282,7 @@ test("startForegroundWatchdog: stops silently when the run manifest is gone (no 
 		assert.equal(pi.messages.length, 0, "missing manifest → no notification and no throw");
 	} finally {
 		stopWatchdog(runId);
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -316,7 +317,7 @@ test("WD-DEDUP: a persistently hung run alerts 'appears hung' exactly once — e
 	} finally {
 		stopWatchdog(runId);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -341,7 +342,7 @@ test("WD-DEDUP: run that went terminal before the emit point never alerts (re-ve
 		stopWatchdog(runId);
 		setReverifyLoaderForTests(null);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -368,7 +369,7 @@ test("WD-DEDUP: run completing after the first alert yields one completion notic
 	} finally {
 		stopWatchdog(runId);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -397,7 +398,7 @@ test("WD-DEDUP: hung-alert dedup map is bounded — oldest evicted at cap, no le
 	} finally {
 		stopWatchdog(runId);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -433,7 +434,7 @@ test("WD-STALE-RECORD: manifest running + ALL tasks terminal → 0 hung alerts, 
 	} finally {
 		stopWatchdog(runId);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -456,7 +457,7 @@ test("WD-STALE-RECORD: manifest running + ONE task still running → hung alert 
 	} finally {
 		stopWatchdog(runId);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -489,7 +490,7 @@ test("WD-STALE-RECORD: tasks.json MISSING → no crash and NEVER a stale-record 
 	} finally {
 		stopWatchdog(runId);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -513,7 +514,7 @@ test("WD-STALE-RECORD: CORRUPT tasks.json → fail-open (legacy hung alert, no c
 	} finally {
 		stopWatchdog(runId);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -541,7 +542,7 @@ test("WD-STALE-RECORD: stale notice is per-runId across watchdog restarts (modul
 	} finally {
 		stopWatchdog(runId);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -565,7 +566,7 @@ test("WD-INTERVAL: PI_CREW_WATCHDOG_INTERVAL_MS drives the poll cadence when no 
 		if (previous === undefined) delete process.env.PI_CREW_WATCHDOG_INTERVAL_MS;
 		else process.env.PI_CREW_WATCHDOG_INTERVAL_MS = previous;
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -643,7 +644,7 @@ test("WD-DELIVER-GUARD: alert emitted while running is DROPPED when the run fini
 		debug.restore();
 		setDeliveryTimingForTests();
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -672,7 +673,7 @@ test("WD-DELIVER-GUARD: a run still hung at delivery time IS delivered (exactly 
 		stopWatchdog(runId);
 		setDeliveryTimingForTests();
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -700,7 +701,7 @@ test("WD-DELIVER-GUARD: unreadable / indeterminate state at delivery FAILS OPEN 
 	} finally {
 		stopWatchdog(runId);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 
 	// (b) manifest vanished between emit and delivery → indeterminate → deliver.
@@ -725,7 +726,7 @@ test("WD-DELIVER-GUARD: unreadable / indeterminate state at delivery FAILS OPEN 
 		stopWatchdog(second.runId);
 		setDeliveryTimingForTests();
 		resetHungAlertDedupForTests();
-		fs.rmSync(second.cwd, { recursive: true, force: true });
+		await removeDirWithRetry(second.cwd);
 	}
 });
 
@@ -764,7 +765,7 @@ test("WD-DELIVER-GUARD: the drop happens once per runId — dedup + no drip acro
 		debug.restore();
 		setDeliveryTimingForTests();
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -787,7 +788,7 @@ test("WD-DELIVER-GUARD: no idle probe (legacy caller) → verify-then-send, stil
 	} finally {
 		stopWatchdog(runId);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -840,7 +841,7 @@ test("WD-DELIVER-GUARD cap-expiry: session never idles — a run whose tasks are
 		debug.restore();
 		setDeliveryTimingForTests();
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -875,7 +876,7 @@ test("WD-DELIVER-GUARD cap-expiry: manifest terminal at the cap → dropped (no 
 		debug.restore();
 		setDeliveryTimingForTests();
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -902,7 +903,7 @@ test("WD-DELIVER-GUARD cap-expiry: a run still hung at the cap IS delivered (lat
 		stopWatchdog(runId);
 		setDeliveryTimingForTests();
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -929,7 +930,7 @@ test("WD-DELIVER-GUARD cap-expiry: unreadable state at the cap FAILS OPEN (alert
 		stopWatchdog(runId);
 		setDeliveryTimingForTests();
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -972,7 +973,7 @@ test("wave-13 F1 (w1): a live registry claim with fresh evidence suppresses the 
 		stopWatchdog(runId);
 		setLiveClaimConsultForTests(null);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -997,7 +998,7 @@ test("wave-13 F1 (w2): a fresh task heartbeat (registry empty) suppresses the hu
 		stopWatchdog(runId);
 		setLiveClaimConsultForTests(null);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -1024,7 +1025,7 @@ test("wave-13 F1 (w3): no claim + stale heartbeat ⇒ the original ladder still 
 		stopWatchdog(runId);
 		setLiveClaimConsultForTests(null);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -1053,7 +1054,7 @@ test("wave-13 F1 (w4): claim present but evidence older than CLAIMED_RUN_HUNG_MS
 		stopWatchdog(runId);
 		setLiveClaimConsultForTests(null);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -1079,6 +1080,6 @@ test("wave-13 F3 (w5): the hung alert carries its evidence time — `as of <ISO>
 		stopWatchdog(runId);
 		setLiveClaimConsultForTests(null);
 		resetHungAlertDedupForTests();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -7,6 +7,7 @@ import test from "node:test";
 import { saveCrewAgents } from "../../../../src/runtime/crew-agent-records.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 /**
  * Phase 3.1 (decision α) regression: the agents-record lock file now carries a
@@ -66,7 +67,7 @@ const records = [
 	},
 ];
 
-test("crew-agent-records: token-guarded release removes the lock after saveCrewAgents", () => {
+test("crew-agent-records: token-guarded release removes the lock after saveCrewAgents", async () => {
 	const cwd = tempCwd("pi-crew-agents-lock-release-");
 	try {
 		const manifest = makeManifest(cwd);
@@ -75,11 +76,11 @@ test("crew-agent-records: token-guarded release removes the lock after saveCrewA
 		assert.equal(fs.existsSync(lockFile), false, "lock must be removed after release (token matched)");
 		assert.ok(fs.existsSync(path.join(manifest.stateRoot, "agents.json")), "agents.json must exist");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("crew-agent-records: stale NEW-format lock (with token) is stolen and cleaned up", () => {
+test("crew-agent-records: stale NEW-format lock (with token) is stolen and cleaned up", async () => {
 	const cwd = tempCwd("pi-crew-agents-lock-stale-new-");
 	try {
 		const manifest = makeManifest(cwd);
@@ -97,11 +98,11 @@ test("crew-agent-records: stale NEW-format lock (with token) is stolen and clean
 		saveCrewAgents(manifest, records);
 		assert.equal(fs.existsSync(lockFile), false, "stale token-bearing lock must be stolen and removed");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("crew-agent-records: stale LEGACY-format lock (no token) is still stolen (backward compat)", () => {
+test("crew-agent-records: stale LEGACY-format lock (no token) is still stolen (backward compat)", async () => {
 	const cwd = tempCwd("pi-crew-agents-lock-stale-legacy-");
 	try {
 		const manifest = makeManifest(cwd);
@@ -119,6 +120,6 @@ test("crew-agent-records: stale LEGACY-format lock (no token) is still stolen (b
 		saveCrewAgents(manifest, records);
 		assert.equal(fs.existsSync(lockFile), false, "stale legacy lock must be stolen and removed");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -9,6 +9,7 @@ import { activeRunRoots, registerActiveRun, unregisterActiveRun } from "../../..
 import { createRunManifest, updateRunStatus } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "idx",
@@ -25,7 +26,7 @@ const workflow: WorkflowConfig = {
 	steps: [{ id: "explore", role: "explorer", task: "Explore" }],
 };
 
-test("listRecentRuns limits manifest scans for widget hot paths", () => {
+test("listRecentRuns limits manifest scans for widget hot paths", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-run-index-"));
 	fs.mkdirSync(path.join(cwd, ".crew"));
 	try {
@@ -34,11 +35,11 @@ test("listRecentRuns limits manifest scans for widget hot paths", () => {
 		assert.equal(recent.length, 2);
 		assert.ok(recent[0]!.createdAt >= recent[1]!.createdAt);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
-test("listRecentRuns in project scope ignores user-global runs", () => {
+test("listRecentRuns in project scope ignores user-global runs", async () => {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-run-index-home-"));
 	process.env.PI_TEAMS_HOME = home;
@@ -66,15 +67,15 @@ test("listRecentRuns in project scope ignores user-global runs", () => {
 		// listRecentRuns merges project + user runs; user runs may appear
 		assert.ok(recent.length >= 1);
 	} finally {
-		fs.rmSync(projectCwd, { recursive: true, force: true });
-		fs.rmSync(userCwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(projectCwd);
+		await removeDirWithRetry(userCwd);
+		await removeDirWithRetry(home);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
 });
 
-test("active-run index exposes only registered active runs across cwd", () => {
+test("active-run index exposes only registered active runs across cwd", async () => {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-active-idx-home-"));
 	process.env.PI_TEAMS_HOME = home;
@@ -120,15 +121,15 @@ test("active-run index exposes only registered active runs across cwd", () => {
 		);
 		assert.equal(activeRunRoots().length, 0);
 	} finally {
-		fs.rmSync(runCwd, { recursive: true, force: true });
-		fs.rmSync(viewerCwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(runCwd);
+		await removeDirWithRetry(viewerCwd);
+		await removeDirWithRetry(home);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
 });
 
-test("blocked active-run registry entries are surfaced across cwd", () => {
+test("blocked active-run registry entries are surfaced across cwd", async () => {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-active-blocked-idx-home-"));
 	process.env.PI_TEAMS_HOME = home;
@@ -161,15 +162,15 @@ test("blocked active-run registry entries are surfaced across cwd", () => {
 			cache.dispose();
 		}
 	} finally {
-		fs.rmSync(runCwd, { recursive: true, force: true });
-		fs.rmSync(viewerCwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(runCwd);
+		await removeDirWithRetry(viewerCwd);
+		await removeDirWithRetry(home);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}
 });
 
-test("listRecentRuns outside project reads user-global runs only", () => {
+test("listRecentRuns outside project reads user-global runs only", async () => {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-run-index-home-"));
 	process.env.PI_TEAMS_HOME = home;
@@ -195,9 +196,9 @@ test("listRecentRuns outside project reads user-global runs only", () => {
 			true,
 		);
 	} finally {
-		fs.rmSync(userCwd, { recursive: true, force: true });
-		fs.rmSync(projectCwd, { recursive: true, force: true });
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(userCwd);
+		await removeDirWithRetry(projectCwd);
+		await removeDirWithRetry(home);
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
 	}

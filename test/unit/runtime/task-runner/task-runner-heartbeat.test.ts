@@ -5,6 +5,7 @@ import test from "node:test";
 import { runTeamTask } from "../../../../src/runtime/task-runner.ts";
 import { createRunManifest, loadRunManifestById } from "../../../../src/state/stores/state-store.ts";
 import { createTrackedTempDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team = {
 	name: "t",
@@ -77,6 +78,6 @@ test("runTeamTask refreshes worker heartbeat while child JSON events stream", as
 		else process.env.PI_TEAMS_MOCK_CHILD_PI = previousMock;
 		if (previousAllowMock === undefined) delete process.env.PI_CREW_ALLOW_MOCK;
 		else process.env.PI_CREW_ALLOW_MOCK = previousAllowMock;
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

@@ -13,6 +13,7 @@ import {
 	formatTranscriptText,
 	readRunTranscript,
 } from "../../../../src/ui/transcript-viewer.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function manifest(tmp: string): TeamRunManifest {
 	return {
@@ -57,7 +58,7 @@ test("formatTranscriptText styles partial tool events as running", () => {
 	assert.equal(lines[0], "<accent>⋯ [Tool: read] tool_result</accent>");
 });
 
-test("transcript cache reuses parsed lines until file changes", () => {
+test("transcript cache reuses parsed lines until file changes", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-transcript-cache-"));
 	try {
 		const transcriptPath = path.join(tmp, "transcript.jsonl");
@@ -77,11 +78,11 @@ test("transcript cache reuses parsed lines until file changes", () => {
 		assert.equal(parses, 2);
 		assert.equal(getTranscriptCacheEntry(transcriptPath)?.readCount, 2);
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await cleanupStateRoot(tmp);
 	}
 });
 
-test("transcript cache defaults to bounded tail and can force full reads", () => {
+test("transcript cache defaults to bounded tail and can force full reads", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-transcript-tail-"));
 	try {
 		const transcriptPath = path.join(tmp, "large.jsonl");
@@ -106,11 +107,11 @@ test("transcript cache defaults to bounded tail and can force full reads", () =>
 		assert.equal(fullEntry?.truncated, false);
 		assert.equal(fullEntry?.size, fs.statSync(transcriptPath).size);
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await cleanupStateRoot(tmp);
 	}
 });
 
-test("DurableTranscriptViewer renders transcript overlay and scroll controls", () => {
+test("DurableTranscriptViewer renders transcript overlay and scroll controls", async () => {
 	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-transcript-viewer-"));
 	try {
 		const run = manifest(tmp);
@@ -162,6 +163,6 @@ test("DurableTranscriptViewer renders transcript overlay and scroll controls", (
 		);
 		assert.ok(resultViewer.render(80).some((line) => line.includes("result hello")));
 	} finally {
-		fs.rmSync(tmp, { recursive: true, force: true });
+		await cleanupStateRoot(tmp);
 	}
 });

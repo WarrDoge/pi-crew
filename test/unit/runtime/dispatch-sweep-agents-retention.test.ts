@@ -21,6 +21,7 @@ import { clearLiveAgentsForTest } from "../../../src/runtime/live-session/live-a
 import { createRunManifest, loadRunManifestById, saveRunTasks } from "../../../src/state/stores/state-store.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../src/state/types.ts";
 import type { TeamConfig } from "../../../src/teams/team-config.ts";
+import { removeDirWithRetry } from "../../helpers/rm-retry.ts";
 
 function makeRunFixture(): { cwd: string; runId: string; manifest: TeamRunManifest } {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-r4a1-sweep-"));
@@ -96,6 +97,6 @@ test("R4-A1 sweep path: requeueing an expired park retains ALL sibling agent rec
 		assert.equal(byTaskId.get("sib_done")?.status, "completed", "completed sibling record survives");
 		assert.equal(byTaskId.get("wait")?.status, "queued", "requeued task gets a fresh record");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });

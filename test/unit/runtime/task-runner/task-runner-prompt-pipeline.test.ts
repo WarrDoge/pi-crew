@@ -9,6 +9,7 @@ import { runTeamTask } from "../../../../src/runtime/task-runner.ts";
 import { createRunManifest } from "../../../../src/state/stores/state-store.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team = {
 	name: "t",
@@ -85,7 +86,7 @@ test("runTeamTask writes stable prompt pipeline metadata for scaffold runs", asy
 		assert.equal(pipeline.stages[2]?.details?.disabled, false);
 		assert.equal(typeof pipeline.stages[2]?.details?.skillInstructionCount, "number");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 
@@ -118,7 +119,7 @@ test("prompt pipeline records disabled skills without a skill artifact reference
 		assert.equal(pipeline.stages[2]?.details?.disabled, true);
 		assert.equal(pipeline.stages[2]?.details?.skillInstructionCount, 0);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await removeDirWithRetry(cwd);
 	}
 });
 

@@ -34,14 +34,15 @@ import {
 	readIfSmallWithTee,
 	teePathForArtifact,
 } from "../../../../src/runtime/task-output-context.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 function makeTmpDir(prefix: string): { dir: string; cleanup: () => void } {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 	return {
 		dir,
-		cleanup: () => {
+		cleanup: async () => {
 			try {
-				fs.rmSync(dir, { recursive: true, force: true });
+				await removeDirWithRetry(dir);
 			} catch {
 				/* best-effort */
 			}
@@ -51,12 +52,12 @@ function makeTmpDir(prefix: string): { dir: string; cleanup: () => void } {
 
 // --- readIfSmallWithTee: core behavior ---
 
-test("readIfSmallWithTee returns undefined when the file does not exist", () => {
+test("readIfSmallWithTee returns undefined when the file does not exist", async () => {
 	const result = readIfSmallWithTee("/nonexistent/path/file.txt");
 	assert.equal(result, undefined);
 });
 
-test("readIfSmallWithTee returns full content (no tee) when file is at or below MAX_RESULT_INLINE_BYTES", () => {
+test("readIfSmallWithTee returns full content (no tee) when file is at or below MAX_RESULT_INLINE_BYTES", async () => {
 	const { dir, cleanup } = makeTmpDir("p1a-small-");
 	try {
 		const filePath = path.join(dir, "small.txt");
@@ -71,11 +72,11 @@ test("readIfSmallWithTee returns full content (no tee) when file is at or below 
 		assert.equal(result.fullOutputPath, undefined, "no tee for small files");
 		assert.ok(!fs.existsSync(teePath), "tee file must NOT be created for small inputs");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("readIfSmallWithTee returns truncated content WITHOUT tee when file is between maxChars and TEE_THRESHOLD_MULTIPLIER × maxChars", () => {
+test("readIfSmallWithTee returns truncated content WITHOUT tee when file is between maxChars and TEE_THRESHOLD_MULTIPLIER × maxChars", async () => {
 	const { dir, cleanup } = makeTmpDir("p1a-mid-");
 	try {
 		const filePath = path.join(dir, "mid.txt");
@@ -93,11 +94,11 @@ test("readIfSmallWithTee returns truncated content WITHOUT tee when file is betw
 		assert.equal(result.fullOutputPath, undefined, "no tee when under tee threshold (materially lossy check)");
 		assert.ok(!fs.existsSync(teePath), "tee file must NOT be created below tee threshold");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("R2: readIfSmallWithTee tees (recovery path) when file is between TEE_THRESHOLD_MULTIPLIER × and 2× maxChars", () => {
+test("R2: readIfSmallWithTee tees (recovery path) when file is between TEE_THRESHOLD_MULTIPLIER × and 2× maxChars", async () => {
 	const { dir, cleanup } = makeTmpDir("p1a-r2band-");
 	try {
 		const filePath = path.join(dir, "r2band.txt");
@@ -118,11 +119,11 @@ test("R2: readIfSmallWithTee tees (recovery path) when file is between TEE_THRES
 		const teeContent = fs.readFileSync(teePath, "utf-8");
 		assert.equal(teeContent, content, "tee content must be byte-equal to the full original");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("readIfSmallWithTee tees the full content and returns fullOutputPath when file is well above the tee threshold", () => {
+test("readIfSmallWithTee tees the full content and returns fullOutputPath when file is well above the tee threshold", async () => {
 	const { dir, cleanup } = makeTmpDir("p1a-large-");
 	try {
 		const filePath = path.join(dir, "large.txt");
@@ -143,11 +144,11 @@ test("readIfSmallWithTee tees the full content and returns fullOutputPath when f
 		assert.equal(teeContent.length, content.length, "tee content must equal full file content (no truncation)");
 		assert.equal(teeContent, content, "tee content must be byte-equal to original");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("readIfSmallWithTee creates the tee directory if it does not exist (mkdir recursive)", () => {
+test("readIfSmallWithTee creates the tee directory if it does not exist (mkdir recursive)", async () => {
 	const { dir, cleanup } = makeTmpDir("p1a-mkdir-");
 	try {
 		const filePath = path.join(dir, "x.txt");
@@ -163,11 +164,11 @@ test("readIfSmallWithTee creates the tee directory if it does not exist (mkdir r
 		assert.equal(result.fullOutputPath, teePath);
 		assert.ok(fs.existsSync(teeDir), "nested tee directory must be created");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("readIfSmallWithTee returns truncated content WITHOUT fullOutputPath when tee write fails (bad path)", () => {
+test("readIfSmallWithTee returns truncated content WITHOUT fullOutputPath when tee write fails (bad path)", async () => {
 	const { dir, cleanup } = makeTmpDir("p1a-badtee-");
 	try {
 		const filePath = path.join(dir, "x.txt");
@@ -184,11 +185,11 @@ test("readIfSmallWithTee returns truncated content WITHOUT fullOutputPath when t
 		assert.ok(result.content.length < content.length, "truncation still applied");
 		assert.equal(result.fullOutputPath, undefined, "fullOutputPath must be omitted when tee write fails");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("readIfSmallWithTee without tee opts behaves like the legacy path (no fullOutputPath ever)", () => {
+test("readIfSmallWithTee without tee opts behaves like the legacy path (no fullOutputPath ever)", async () => {
 	const { dir, cleanup } = makeTmpDir("p1a-notee-");
 	try {
 		const filePath = path.join(dir, "x.txt");
@@ -198,13 +199,13 @@ test("readIfSmallWithTee without tee opts behaves like the legacy path (no fullO
 		assert.ok(result.content.length < MAX_RESULT_INLINE_BYTES * 3);
 		assert.equal(result.fullOutputPath, undefined, "no tee opts → no fullOutputPath");
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
 // --- readIfSmall (backward-compat wrapper) ---
 
-test("readIfSmall (legacy wrapper) returns the same string as readIfSmallWithTee(...).content", () => {
+test("readIfSmall (legacy wrapper) returns the same string as readIfSmallWithTee(...).content", async () => {
 	const { dir, cleanup } = makeTmpDir("p1a-legacy-");
 	try {
 		const filePath = path.join(dir, "x.txt");
@@ -215,23 +216,23 @@ test("readIfSmall (legacy wrapper) returns the same string as readIfSmallWithTee
 		assert.equal(legacy, content);
 		assert.equal(legacy, enriched?.content);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("readIfSmall (legacy) returns undefined for missing files (backward-compat)", () => {
+test("readIfSmall (legacy) returns undefined for missing files (backward-compat)", async () => {
 	assert.equal(readIfSmall("/nonexistent/file.txt"), undefined);
 });
 
 // --- teePathForArtifact: path safety + format ---
 
 // biome-ignore lint/suspicious/noTemplateCurlyInString: literal path pattern in test description
-test("teePathForArtifact produces ${artifactsRoot}/tee/${taskId}-${artifactName}.full.txt", () => {
+test("teePathForArtifact produces ${artifactsRoot}/tee/${taskId}-${artifactName}.full.txt", async () => {
 	const p = teePathForArtifact("/run/artifacts", "task-42", "build-output.txt");
 	assert.equal(p, path.join("/run/artifacts", "tee", "task-42-build-output.txt.full.txt"));
 });
 
-test("teePathForArtifact sanitizes path separators and unsafe chars in taskId + artifactName", () => {
+test("teePathForArtifact sanitizes path separators and unsafe chars in taskId + artifactName", async () => {
 	const p = teePathForArtifact("/run/artifacts", "../escape/me", "../../etc/passwd");
 	// Path-safety assertions: the tee file must land inside artifactsRoot/tee/,
 	// not escape via `..` or path separators. Use path.sep for cross-platform
@@ -248,14 +249,14 @@ test("teePathForArtifact sanitizes path separators and unsafe chars in taskId + 
 	assert.ok(fileName.endsWith(".full.txt"), `filename must end with .full.txt: ${fileName}`);
 });
 
-test("teePathForArtifact handles unusual but safe characters in names", () => {
+test("teePathForArtifact handles unusual but safe characters in names", async () => {
 	const p = teePathForArtifact("/artifacts", "t_123", "result.with.dots.txt");
 	assert.equal(p, path.join("/artifacts", "tee", "t_123-result.with.dots.txt.full.txt"));
 });
 
 // --- Integration: sharedReads entry shape via the public construction path ---
 
-test("sharedReads entry includes fullOutputPath only when file size > tee threshold (R2: 1.25×)", () => {
+test("sharedReads entry includes fullOutputPath only when file size > tee threshold (R2: 1.25×)", async () => {
 	const { dir, cleanup } = makeTmpDir("p1a-shared-");
 	try {
 		// Set up a minimal manifest-shaped directory:
@@ -317,13 +318,13 @@ test("sharedReads entry includes fullOutputPath only when file size > tee thresh
 		// Avoid unused-var noise for the `manifest` cast above.
 		void manifest;
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
 // --- L4 backward-compat: readIfSmall marker wording unchanged ---
 
-test("L4 backward-compat: readIfSmallWithTee truncated marker wording matches pre-P1-A format on plain text", () => {
+test("L4 backward-compat: readIfSmallWithTee truncated marker wording matches pre-P1-A format on plain text", async () => {
 	const { dir, cleanup } = makeTmpDir("p1a-l4-");
 	try {
 		const filePath = path.join(dir, "x.txt");
@@ -334,6 +335,6 @@ test("L4 backward-compat: readIfSmallWithTee truncated marker wording matches pr
 		assert.match(result.content, /\[pi-crew truncated \d+ chars, head\+tail preserved\]/);
 		assert.ok(!result.content.includes("important lines preserved"));
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });

@@ -17,6 +17,7 @@ import {
 import { renderTaskPrompt } from "../../../../src/runtime/task-runner/prompt-builder.ts";
 import type { TeamRunManifest, TeamTaskState } from "../../../../src/state/types.ts";
 import type { WorkflowStep } from "../../../../src/workflows/workflow-config.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 const manifest: TeamRunManifest = {
 	schemaVersion: 1,
@@ -158,7 +159,7 @@ test("renderSkillInstructions loads selected SKILL.md content for worker prompts
 		assert.match(rendered.block, /Path: .+skills[\\/]verification-before-done/);
 	}));
 
-test("renderSkillInstructions prefers package skills over project skills (SEC-003 CATASTROPHIC FIX)", () => {
+test("renderSkillInstructions prefers package skills over project skills (SEC-003 CATASTROPHIC FIX)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-skill-"));
 	try {
 		// Create a malicious project skill that could override trusted package skill
@@ -191,12 +192,12 @@ test("renderSkillInstructions prefers package skills over project skills (SEC-00
 		assert.doesNotMatch(rendered.block, /Source: project:skills/);
 		assert.match(rendered.block, /Source: package:skills/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
 test("renderSkillInstructions uses project skills when no package skill exists", () =>
-	withFullSkills(() => {
+	withFullSkills(async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-skill-"));
 		try {
 			// Create a project-only skill (no package equivalent)
@@ -219,7 +220,7 @@ test("renderSkillInstructions uses project skills when no package skill exists",
 			assert.match(rendered.block, /My Custom Skill/);
 			assert.match(rendered.block, /Source: project:skills/);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	}));
 
@@ -243,7 +244,7 @@ function writeProjectSkill(cwd: string, name: string, body: string): void {
 }
 
 test("renderSkillInstructions truncates oversized individual skills", () =>
-	withFullSkills(() => {
+	withFullSkills(async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-skill-"));
 		try {
 			writeProjectSkill(cwd, "giant-skill", `# Giant\n\n${"A".repeat(5000)}\n\n## Verification\nshould be trimmed`);
@@ -255,7 +256,7 @@ test("renderSkillInstructions truncates oversized individual skills", () =>
 			assert.match(rendered.block, /skill instructions truncated/);
 			assert.ok(rendered.block.length < 3500);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	}));
 
@@ -272,7 +273,7 @@ test("renderSkillInstructions caps selected skill count and missing-skill budget
 });
 
 test("renderSkillInstructions refreshes negative and stale cache entries", () =>
-	withFullSkills(() => {
+	withFullSkills(async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-skill-cache-"));
 		try {
 			clearSkillInstructionCache();
@@ -298,12 +299,12 @@ test("renderSkillInstructions refreshes negative and stale cache entries", () =>
 			assert.match(updated.block, /updated content/);
 		} finally {
 			clearSkillInstructionCache();
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	}));
 
 test("renderSkillInstructions enforces total skill budget", () =>
-	withFullSkills(() => {
+	withFullSkills(async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-skill-"));
 		try {
 			const names = ["budget-a", "budget-b", "budget-c", "budget-d", "budget-e", "budget-f"];
@@ -316,7 +317,7 @@ test("renderSkillInstructions enforces total skill budget", () =>
 			assert.match(rendered.block, /skill instruction budget exceeded/);
 			assert.ok(rendered.block.length < 13_000);
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	}));
 
@@ -452,7 +453,7 @@ test("skill cache hit rate is high in a realistic multi-role team run workload",
 	resetSkillCacheStats();
 });
 
-test("skill cache evicts oldest entries when capacity is exceeded (LRU)", () => {
+test("skill cache evicts oldest entries when capacity is exceeded (LRU)", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-skill-evict-"));
 	try {
 		clearSkillInstructionCache();
@@ -482,12 +483,12 @@ test("skill cache evicts oldest entries when capacity is exceeded (LRU)", () => 
 		_setSkillCacheMaxEntriesForTesting(128);
 		clearSkillInstructionCache();
 		resetSkillCacheStats();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
 test("skill cache invalidation increments misses when file mtime changes", () =>
-	withFullSkills(() => {
+	withFullSkills(async () => {
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-skill-inval-"));
 		try {
 			clearSkillInstructionCache();
@@ -530,7 +531,7 @@ test("skill cache invalidation increments misses when file mtime changes", () =>
 		} finally {
 			clearSkillInstructionCache();
 			resetSkillCacheStats();
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await cleanupStateRoot(cwd);
 		}
 	}));
 
@@ -639,7 +640,7 @@ test("R3-23: package-only selection omits the trust warning entirely", () => {
 	assert.doesNotMatch(slim.block, /UNTRUSTED/);
 });
 
-test("R3-23: advertisedByHost flags project-sourced skills as UNTRUSTED by name", () => {
+test("R3-23: advertisedByHost flags project-sourced skills as UNTRUSTED by name", async () => {
 	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-crew-skill-r323-"));
 	try {
 		writeProjectSkill(cwd, "untrusted-review", "# U\n\nproject body");
@@ -652,7 +653,7 @@ test("R3-23: advertisedByHost flags project-sourced skills as UNTRUSTED by name"
 		assert.match(slim.block, /Project-sourced skills \(untrusted-review\)/);
 		assert.match(slim.block, /UNTRUSTED/);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 

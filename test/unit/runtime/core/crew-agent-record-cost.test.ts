@@ -46,6 +46,7 @@ import {
 import type { CrewAgentRecord } from "../../../../src/runtime/crew-agent-runtime.ts";
 import { flushPendingAtomicWrites, hasPendingCoalescedWrite } from "../../../../src/state/atomic-write.ts";
 import type { TeamRunManifest } from "../../../../src/state/types.ts";
+import { cleanupStateRoot } from "../../../helpers/rm-retry.ts";
 
 function makeManifest(stateRoot: string): TeamRunManifest {
 	return {
@@ -122,7 +123,7 @@ function countAgentsIndexRenames(manifest: TeamRunManifest, fn: () => void): num
 // F06 — coalescing must survive the read-after-write path
 // ---------------------------------------------------------------------------
 
-test("F06: a burst of progress upserts does not force one agents.json write each", () => {
+test("F06: a burst of progress upserts does not force one agents.json write each", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		const record = makeRecord("01_a");
@@ -137,11 +138,11 @@ test("F06: a burst of progress upserts does not force one agents.json write each
 		assert.equal(hasPendingCoalescedWrite(path.join(manifest.stateRoot, "agents.json")), true, "index write stays coalesced");
 	} finally {
 		flushPendingAtomicWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F06: read-after-write still sees the newest record before the drain", () => {
+test("F06: read-after-write still sees the newest record before the drain", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		const record = makeRecord("01_a");
@@ -161,11 +162,11 @@ test("F06: read-after-write still sees the newest record before the drain", () =
 		assert.deepEqual(thirdRead.map((item) => item.taskId).sort(), ["01_a", "02_b"]);
 	} finally {
 		flushPendingAtomicWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F06: updating one terminal record does not rewrite the untouched records' status", () => {
+test("F06: updating one terminal record does not rewrite the untouched records' status", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		const records = ["01_a", "02_b", "03_c", "04_d"].map((taskId) => makeRecord(taskId, { status: "completed" }));
@@ -192,11 +193,11 @@ test("F06: updating one terminal record does not rewrite the untouched records' 
 		assert.equal(readCrewAgents(manifest).find((item) => item.taskId === "01_a")?.status, "failed");
 	} finally {
 		flushPendingAtomicWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F06: saveCrewAgents reports zero status writes when nothing changed", () => {
+test("F06: saveCrewAgents reports zero status writes when nothing changed", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		const records = ["01_a", "02_b", "03_c"].map((taskId) => makeRecord(taskId, { status: "completed" }));
@@ -213,11 +214,11 @@ test("F06: saveCrewAgents reports zero status writes when nothing changed", () =
 		assert.equal(__test__lastAgentStatusWriteCount(), 1, "only the changed record is written");
 	} finally {
 		flushPendingAtomicWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F06: the deliberate duplicate terminal status write is preserved (H2/F4 durability)", () => {
+test("F06: the deliberate duplicate terminal status write is preserved (H2/F4 durability)", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		const record = makeRecord("01_a", { status: "completed" });
@@ -232,11 +233,11 @@ test("F06: the deliberate duplicate terminal status write is preserved (H2/F4 du
 		);
 	} finally {
 		flushPendingAtomicWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F06: a non-terminal save still coalesces its status writes (durability unchanged)", () => {
+test("F06: a non-terminal save still coalesces its status writes (durability unchanged)", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		saveCrewAgents(manifest, [makeRecord("01_a")]);
@@ -249,7 +250,7 @@ test("F06: a non-terminal save still coalesces its status writes (durability unc
 		assert.equal(fs.existsSync(agentStatusPath(manifest, "01_a")), true);
 	} finally {
 		flushPendingAtomicWrites();
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
@@ -269,7 +270,7 @@ function seedEvents(manifest: TeamRunManifest, taskId: string, count: number): n
 	return fs.statSync(eventsPath).size;
 }
 
-test("F07: an idle poll on a large event file reads zero event bytes", () => {
+test("F07: an idle poll on a large event file reads zero event bytes", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		const size = seedEvents(manifest, "task-1", 10_000);
@@ -289,11 +290,11 @@ test("F07: an idle poll on a large event file reads zero event bytes", () => {
 		// Baseline: size × 3 = linear in file size, per idle poll.
 		assert.equal(__test__agentEventBytesRead(), 0, `3 idle polls must read 0 event bytes (baseline: ${size * 3})`);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F07: an append reads only the delta, not the whole history", () => {
+test("F07: an append reads only the delta, not the whole history", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		seedEvents(manifest, "task-1", 10_000);
@@ -307,11 +308,11 @@ test("F07: an append reads only the delta, not the whole history", () => {
 		assert.equal(result.total, 1);
 		assert.ok(__test__agentEventBytesRead() < 1024, `an append must cost < 1 KiB, got ${__test__agentEventBytesRead()} bytes`);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F07: parity with the legacy reader for explicit seq, legacy seq, and limit", () => {
+test("F07: parity with the legacy reader for explicit seq, legacy seq, and limit", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		const eventsPath = agentEventsPath(manifest, "task-1");
@@ -372,11 +373,11 @@ test("F07: parity with the legacy reader for explicit seq, legacy seq, and limit
 			[1, 2, 3, 4, 5],
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F07: parity holds when the file grows between polls (legacy seq indices stay absolute)", () => {
+test("F07: parity holds when the file grows between polls (legacy seq indices stay absolute)", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		const eventsPath = agentEventsPath(manifest, "task-1");
@@ -406,11 +407,11 @@ test("F07: parity holds when the file grows between polls (legacy seq indices st
 		assert.deepEqual(cold.events, second.events, "warm delta and cold full read agree");
 		assert.equal(cold.total, second.total);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F07: Unicode payloads survive the incremental read without replacement chars", () => {
+test("F07: Unicode payloads survive the incremental read without replacement chars", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		const eventsPath = agentEventsPath(manifest, "task-1");
@@ -429,11 +430,11 @@ test("F07: Unicode payloads survive the incremental read without replacement cha
 		);
 		assert.equal(JSON.stringify(result.events).includes("\uFFFD"), false, "no U+FFFD replacement characters");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F07: a partially-written trailing line is neither lost nor duplicated", () => {
+test("F07: a partially-written trailing line is neither lost nor duplicated", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		const eventsPath = agentEventsPath(manifest, "task-1");
@@ -455,11 +456,11 @@ test("F07: a partially-written trailing line is neither lost nor duplicated", ()
 		const again = readCrewAgentEventsCursor(manifest, "task-1", { sinceSeq: 2 });
 		assert.deepEqual(again.events, [], "and it is not duplicated on the next poll");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F07: truncation resets the cursor instead of losing events", () => {
+test("F07: truncation resets the cursor instead of losing events", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		seedEvents(manifest, "task-1", 50);
@@ -480,11 +481,11 @@ test("F07: truncation resets the cursor instead of losing events", () => {
 			[1, 2, 3],
 		);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F07: inode replacement (rotation) is detected even when the size grows back", () => {
+test("F07: inode replacement (rotation) is detected even when the size grows back", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		const eventsPath = agentEventsPath(manifest, "task-1");
@@ -524,11 +525,11 @@ test("F07: inode replacement (rotation) is detected even when the size grows bac
 		);
 		assert.equal(after.total, 10);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F07: an anchor older than the consumed prefix still gets full history", () => {
+test("F07: an anchor older than the consumed prefix still gets full history", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		seedEvents(manifest, "task-1", 10);
@@ -541,11 +542,11 @@ test("F07: an anchor older than the consumed prefix still gets full history", ()
 		assert.equal(replay.events.length, 10);
 		assert.equal(replay.nextSeq, 10);
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });
 
-test("F07: two idle polls of the transcript consumer return identical results at delta cost", () => {
+test("F07: two idle polls of the transcript consumer return identical results at delta cost", async () => {
 	const { cwd, manifest } = newRun();
 	try {
 		seedEvents(manifest, "task-1", 500);
@@ -562,6 +563,6 @@ test("F07: two idle polls of the transcript consumer return identical results at
 		assert.equal(second.total, third.total);
 		assert.equal(__test__agentEventBytesRead(), 0, "both idle polls cost zero event bytes");
 	} finally {
-		fs.rmSync(cwd, { recursive: true, force: true });
+		await cleanupStateRoot(cwd);
 	}
 });

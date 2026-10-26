@@ -32,6 +32,7 @@ import type { TeamTaskState } from "../../../../src/state/types.ts";
 import type { TeamConfig } from "../../../../src/teams/team-config.ts";
 import type { WorkflowConfig } from "../../../../src/workflows/workflow-config.ts";
 import { resolveCanonicalDir } from "../../../fixtures/test-tempdir.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const team: TeamConfig = {
 	name: "default",
@@ -65,16 +66,16 @@ function makeTempDir(prefix: string): string {
 	return resolveCanonicalDir(dir);
 }
 
-function withIsolatedHome<T>(fn: () => T): T {
+async function withIsolatedHome<T>(fn: () => T | Promise<T>): Promise<T> {
 	const previousHome = process.env.PI_TEAMS_HOME;
 	const home = makeTempDir("pi-crew-bug028-home-");
 	process.env.PI_TEAMS_HOME = home;
 	try {
-		return fn();
+		return await fn();
 	} finally {
 		if (previousHome === undefined) delete process.env.PI_TEAMS_HOME;
 		else process.env.PI_TEAMS_HOME = previousHome;
-		fs.rmSync(home, { recursive: true, force: true });
+		await removeDirWithRetry(home);
 	}
 }
 
@@ -92,7 +93,7 @@ function makeTask(id: string, status: TeamTaskState["status"], overrides: Partia
 }
 
 test("bug-028: last-settling unit's stale fallback must not resurrect disk-terminal siblings", () => {
-	withIsolatedHome(() => {
+	withIsolatedHome(async () => {
 		const cwd = makeTempDir("pi-crew-bug028-");
 		try {
 			const created = createRunManifest({ cwd, team, workflow, goal: "bug-028 stale fallback" });
@@ -141,7 +142,7 @@ test("bug-028: last-settling unit's stale fallback must not resurrect disk-termi
 			assert.equal(outById.get("A")?.status, "completed", "returned array keeps disk truth for A");
 			assert.equal(outById.get("B")?.status, "completed", "returned array keeps disk truth for B");
 		} finally {
-			fs.rmSync(cwd, { recursive: true, force: true });
+			await removeDirWithRetry(cwd);
 		}
 	});
 });

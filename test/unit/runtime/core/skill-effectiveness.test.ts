@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import {
@@ -16,29 +16,30 @@ import {
 	recordSkillActivation,
 } from "../../../../src/runtime/skill-effectiveness.ts";
 import { projectCrewRoot } from "../../../../src/utils/paths.ts";
+import { removeDirWithRetry } from "../../../helpers/rm-retry.ts";
 
 const TEST_CWD = process.cwd();
 const TEST_RUN_ID = `test-skill-eff-${Date.now()}`;
 
-function cleanup() {
+async function cleanup() {
 	// Cleanup at projectCrewRoot so the test follows the resolver (issue #29).
 	const path = join(projectCrewRoot(TEST_CWD), `state/runs/${TEST_RUN_ID}`);
 	try {
 		if (existsSync(path)) {
-			rmSync(path, { recursive: true, force: true });
+			await removeDirWithRetry(path);
 		}
 	} catch {
 		// Ignore cleanup errors
 	}
 }
 
-test("skill-effectiveness: CONFIDENCE_THRESHOLDS are ordered correctly", () => {
+test("skill-effectiveness: CONFIDENCE_THRESHOLDS are ordered correctly", async () => {
 	assert.ok(CONFIDENCE_THRESHOLDS.TENTATIVE < CONFIDENCE_THRESHOLDS.MODERATE);
 	assert.ok(CONFIDENCE_THRESHOLDS.MODERATE < CONFIDENCE_THRESHOLDS.STRONG);
 	assert.ok(CONFIDENCE_THRESHOLDS.STRONG < CONFIDENCE_THRESHOLDS.NEAR_CERTAIN);
 });
 
-test("skill-effectiveness: computeInitialConfidence from observation count", () => {
+test("skill-effectiveness: computeInitialConfidence from observation count", async () => {
 	assert.equal(computeInitialConfidence(0), 0.3); // No observations → tentative
 	assert.equal(computeInitialConfidence(1), 0.3); // 1 observation → tentative
 	assert.equal(computeInitialConfidence(2), 0.3); // 2 observations → tentative
@@ -49,26 +50,26 @@ test("skill-effectiveness: computeInitialConfidence from observation count", () 
 	assert.equal(computeInitialConfidence(11), 0.85); // 11+ observations → very strong
 });
 
-test("skill-effectiveness: adjustConfidence increases on success", () => {
+test("skill-effectiveness: adjustConfidence increases on success", async () => {
 	const confidence = 0.5;
 	const adjusted = adjustConfidence(confidence, true);
 	assert.equal(adjusted, confidence + CONFIDENCE_ADJUSTMENTS.CONFIRMING);
 	assert.equal(adjusted, 0.55);
 });
 
-test("skill-effectiveness: adjustConfidence decreases on failure", () => {
+test("skill-effectiveness: adjustConfidence decreases on failure", async () => {
 	const confidence = 0.5;
 	const adjusted = adjustConfidence(confidence, false);
 	assert.equal(adjusted, confidence + CONFIDENCE_ADJUSTMENTS.CONTRADICTING);
 	assert.equal(adjusted, 0.4);
 });
 
-test("skill-effectiveness: adjustConfidence clamps to valid range", () => {
+test("skill-effectiveness: adjustConfidence clamps to valid range", async () => {
 	assert.equal(adjustConfidence(0.15, false), 0.1); // Can't go below 0.1
 	assert.equal(adjustConfidence(0.9, true), 0.95); // Can't go above 0.95
 });
 
-test("skill-effectiveness: applyDecay reduces confidence over time", () => {
+test("skill-effectiveness: applyDecay reduces confidence over time", async () => {
 	const current = 0.7;
 	const weekAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString();
 	const decayed = applyDecay(current, weekAgo);
@@ -76,7 +77,7 @@ test("skill-effectiveness: applyDecay reduces confidence over time", () => {
 	assert.ok(decayed >= 0.1);
 });
 
-test("skill-effectiveness: confidenceToBehavior maps correctly", () => {
+test("skill-effectiveness: confidenceToBehavior maps correctly", async () => {
 	assert.equal(confidenceToBehavior(0.2), "suggest");
 	assert.equal(confidenceToBehavior(0.4), "suggest");
 	assert.equal(confidenceToBehavior(0.5), "apply_if_asked");
@@ -87,15 +88,15 @@ test("skill-effectiveness: confidenceToBehavior maps correctly", () => {
 	assert.equal(confidenceToBehavior(1.0), "act_autonomous");
 });
 
-test("skill-effectiveness: confidenceToThreshold returns correct threshold name", () => {
+test("skill-effectiveness: confidenceToThreshold returns correct threshold name", async () => {
 	assert.equal(confidenceToThreshold(0.2), "TENTATIVE");
 	assert.equal(confidenceToThreshold(0.5), "MODERATE");
 	assert.equal(confidenceToThreshold(0.7), "STRONG");
 	assert.equal(confidenceToThreshold(0.9), "NEAR_CERTAIN");
 });
 
-test("skill-effectiveness: recordSkillActivation and getSkillActivations", () => {
-	cleanup();
+test("skill-effectiveness: recordSkillActivation and getSkillActivations", async () => {
+	await cleanup();
 	try {
 		const activation = recordSkillActivation(TEST_CWD, {
 			id: `act-${Date.now()}`,
@@ -113,24 +114,24 @@ test("skill-effectiveness: recordSkillActivation and getSkillActivations", () =>
 		assert.equal(activations[0].skillId, "verification-before-done");
 		assert.equal(activations[0].passed, true);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("skill-effectiveness: computeSkillMetrics with no activations", () => {
-	cleanup();
+test("skill-effectiveness: computeSkillMetrics with no activations", async () => {
+	await cleanup();
 	try {
 		const metrics = computeSkillMetrics("nonexistent-skill", []);
 		assert.equal(metrics.totalActivations, 0);
 		assert.equal(metrics.passRate, 0);
 		assert.equal(metrics.currentConfidence, 0.3);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("skill-effectiveness: computeSkillMetrics with activations", () => {
-	cleanup();
+test("skill-effectiveness: computeSkillMetrics with activations", async () => {
+	await cleanup();
 	try {
 		// Record activations
 		recordSkillActivation(TEST_CWD, {
@@ -172,11 +173,11 @@ test("skill-effectiveness: computeSkillMetrics with activations", () => {
 		assert.ok(metrics.avgConfidence > 0);
 		assert.ok(metrics.currentConfidence >= 0.1);
 	} finally {
-		cleanup();
+		await cleanup();
 	}
 });
 
-test("skill-effectiveness: evaluatePromotionGate passes with good metrics", () => {
+test("skill-effectiveness: evaluatePromotionGate passes with good metrics", async () => {
 	const metrics = {
 		skillId: "test-skill",
 		totalActivations: 10,
@@ -197,7 +198,7 @@ test("skill-effectiveness: evaluatePromotionGate passes with good metrics", () =
 	assert.ok(gate.criteria.encoding);
 });
 
-test("skill-effectiveness: evaluatePromotionGate fails with low pass rate", () => {
+test("skill-effectiveness: evaluatePromotionGate fails with low pass rate", async () => {
 	const metrics = {
 		skillId: "test-skill",
 		totalActivations: 10,
@@ -216,7 +217,7 @@ test("skill-effectiveness: evaluatePromotionGate fails with low pass rate", () =
 	assert.ok(gate.criteria.evidence);
 });
 
-test("skill-effectiveness: evaluatePromotionGate fails with insufficient activations", () => {
+test("skill-effectiveness: evaluatePromotionGate fails with insufficient activations", async () => {
 	const metrics = {
 		skillId: "test-skill",
 		totalActivations: 2,
